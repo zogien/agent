@@ -108,14 +108,7 @@ pub fn main(init: std.process.Init) !void {
     const strip = parseBool(strip_text) orelse return error.InvalidBoolean;
 
     const source = try common.sourceIdentity(allocator, init.io, "AgentCore manifest");
-    const sdk_version_bytes = try std.Io.Dir.cwd().readFileAlloc(
-        init.io,
-        "sdk/VERSION",
-        allocator,
-        .limited(256),
-    );
-    const sdk_version = std.mem.trim(u8, sdk_version_bytes, " \r\n\t");
-    const version = try packageVersion(allocator, sdk_version, source);
+    const version = try versionAtHead(allocator, init.io, source);
     if (version.len > 32) return error.PackageVersionTooLong;
     const target_id = try common.packageTargetId(allocator, architecture, os, abi);
     const rust_target = try rustTarget(architecture, os, abi);
@@ -267,6 +260,32 @@ fn parseRipgrepPin(allocator: std.mem.Allocator, bytes: []const u8) !RipgrepPin 
         parsed.source_repository.len == 0 or parsed.license.len == 0)
         return error.InvalidRipgrepPin;
     return parsed;
+}
+
+fn versionAtHead(allocator: std.mem.Allocator, io: std.Io, source: SourceIdentity) ![]const u8 {
+    const tags = try common.runGit(allocator, io, "AgentCore manifest", &.{
+        "git", "tag", "--list", "--points-at", "HEAD", "fork/*-fork.*",
+    });
+    if (try forkVersion(tags)) |version| return version;
+
+    const sdk_version = try std.Io.Dir.cwd().readFileAlloc(io, "sdk/VERSION", allocator, .limited(256));
+    return packageVersion(allocator, std.mem.trim(u8, sdk_version, " \r\n\t"), source);
+}
+
+fn forkVersion(tags: []const u8) error{ InvalidForkTag, AmbiguousForkTags }!?[]const u8 {
+    const tag = std.mem.trim(u8, tags, "\r\n");
+    if (tag.len == 0) return null;
+    if (std.mem.indexOfScalar(u8, tag, '\n') != null) return error.AmbiguousForkTags;
+    const version = std.mem.cutPrefix(u8, tag, "fork/") orelse return error.InvalidForkTag;
+    const parsed = std.SemanticVersion.parse(version) catch return error.InvalidForkTag;
+    if (parsed.build != null) return error.InvalidForkTag;
+    const prerelease = parsed.pre orelse return error.InvalidForkTag;
+    const number = std.mem.cutPrefix(u8, prerelease, "fork.") orelse return error.InvalidForkTag;
+    if (number.len == 0 or (number.len > 1 and number[0] == '0')) return error.InvalidForkTag;
+    for (number) |digit| {
+        if (!std.ascii.isDigit(digit)) return error.InvalidForkTag;
+    }
+    return version;
 }
 
 fn packageVersion(allocator: std.mem.Allocator, sdk_version: []const u8, source: SourceIdentity) ![]const u8 {
@@ -514,6 +533,15 @@ test "package version is derived from sdk version and source identity" {
     try std.testing.expectEqualStrings("0.1.0", dirty_stable_version);
     try std.testing.expectError(error.InvalidSdkVersion, packageVersion(allocator, "0.1.0+local", clean));
     try std.testing.expectError(error.InvalidSdkVersion, packageVersion(allocator, "0.1.0-rc.1", clean));
+}
+
+test "a fork tag supplies the entire package version" {
+    try std.testing.expectEqualStrings("0.15.1-fork.1", (try forkVersion("fork/0.15.1-fork.1\r\n")).?);
+    try std.testing.expect((try forkVersion("")) == null);
+    try std.testing.expectError(error.InvalidForkTag, forkVersion("fork/0.15.1-fork.1+0123456789ab\n"));
+    try std.testing.expectError(error.InvalidForkTag, forkVersion("fork/0.15.1-fork.01\n"));
+    try std.testing.expectError(error.InvalidForkTag, forkVersion("fork/0.15.1-fork.x\n"));
+    try std.testing.expectError(error.AmbiguousForkTags, forkVersion("fork/0.15.1-fork.1\nfork/0.15.1-fork.2\n"));
 }
 
 test "generated development versions fit the Zig package limit" {
