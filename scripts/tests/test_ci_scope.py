@@ -24,7 +24,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import ci_scope  # noqa: E402
 
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
-AGENTCORE_WORKFLOW = ROOT / ".github" / "workflows" / "agentcore-windows.yml"
 # The runner's own bash invocation for `run:` steps.
 BASH = ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c"]
 CHECKOUT = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
@@ -623,75 +622,35 @@ class WorkflowTest(unittest.TestCase):
 
 
 class AgentCoreWorkflowTest(unittest.TestCase):
-    """agentcore-windows.yml's scope step, with its `${{ }}` expressions
-    rendered the way the runner renders them."""
+    """The fork's PR workflow runs the native AgentCore gate on Windows."""
 
     def setUp(self) -> None:
         try:
             import yaml
         except ImportError:  # requirements-dev.txt
             self.skipTest("PyYAML is not installed")
-        workflow = yaml.safe_load(AGENTCORE_WORKFLOW.read_text(encoding="utf-8"))
-        self.workflow = workflow
-        self.step = next(s for s in workflow["jobs"]["native-windows-gate"]["steps"] if s.get("id") == "scope")
+        self.workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
 
-    def test_the_merge_queue_runs_the_workflow(self) -> None:
-        self.assertIn("merge_group", self.workflow.get("on", self.workflow.get(True)))
-        self.assertNotIn("push", self.workflow.get("on", self.workflow.get(True)))
+    def test_ci_runs_on_pull_requests_only(self) -> None:
+        self.assertEqual(set(self.workflow.get("on", self.workflow.get(True))), {"pull_request"})
 
-    def render(self, event: str) -> str:
-        values = {
-            "github.event_name": event,
-            "github.event.pull_request.base.sha": "p" * 40 if event == "pull_request" else "",
-            "github.event.merge_group.base_sha": "m" * 40 if event == "merge_group" else "",
-        }
-        rendered = re.sub(r"\$\{\{\s*([^}]+?)\s*\}\}", lambda m: values[m.group(1)], self.step["run"])
-        self.assertNotIn("${{", rendered)
-        return rendered
-
-    def run_step(self, event: str, changed: str) -> tuple:
-        with tempfile.TemporaryDirectory() as tmp:
-            bindir = Path(tmp) / "bin"
-            bindir.mkdir()
-            log = Path(tmp) / "calls.log"
-            fake = bindir / "git"
-            fake.write_text('#!/bin/sh\necho "git $*" >> "$FAKE_LOG"\n'
-                            'case "$1" in diff) printf "%s\\n" "$FAKE_CHANGED" ;; esac\n', encoding="utf-8")
-            fake.chmod(0o755)
-            output = Path(tmp) / "github-output"
-            output.write_text("", encoding="utf-8")
-            env = dict(os.environ, PATH=f"{bindir}{os.pathsep}{os.environ['PATH']}", FAKE_LOG=str(log),
-                       FAKE_CHANGED=changed, GITHUB_OUTPUT=str(output))
-            proc = subprocess.run([*BASH, self.render(event)], env=env, capture_output=True, text=True)
-            calls = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
-            return proc, calls, output.read_text(encoding="utf-8")
-
-    @unittest.skipIf(os.name == "nt", "POSIX executable fixture")
-    def test_a_merge_group_is_judged_by_its_diff_against_the_group_base(self) -> None:
-        proc, calls, output = self.run_step("merge_group", "doc/API.md")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(calls, ["git fetch -q --depth=1 origin " + "m" * 40, "git diff --name-only %s HEAD" % ("m" * 40)])
-        self.assertIn("relevant=false", output)
-        proc, _, output = self.run_step("merge_group", "src/agentcore/abi_v1.zig")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("relevant=true", output)
-
-    @unittest.skipIf(os.name == "nt", "POSIX executable fixture")
-    def test_a_pull_request_uses_its_base_and_unknown_events_run_in_full(self) -> None:
-        proc, calls, _ = self.run_step("pull_request", "doc/API.md")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(calls[0], "git fetch -q --depth=1 origin " + "p" * 40)
-        proc, calls, output = self.run_step("push", "")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(calls, [])
-        self.assertIn("relevant=true", output)
-
-    def test_native_steps_read_relevance(self) -> None:
-        steps = self.workflow["jobs"]["native-windows-gate"]["steps"]
-        for step in steps:
-            if step.get("uses") == CHECKOUT or step.get("id") == "scope":
-                continue
-            self.assertEqual(step.get("if"), "steps.scope.outputs.relevant == 'true'")
+    def test_windows_archive_leg_also_runs_the_native_gate(self) -> None:
+        job = self.workflow["jobs"]["agentcore"]
+        self.assertIn(
+            {"runner": "windows-latest", "target": "x86_64-windows-gnu"},
+            job["strategy"]["matrix"]["include"],
+        )
+        steps = {step.get("name"): step for step in job["steps"]}
+        rust = steps["Rust toolchain (Windows)"]
+        gate = steps["Native AgentCore delivery gate (Windows MSVC)"]
+        windows_only = "matrix.target == 'x86_64-windows-gnu'"
+        self.assertEqual(rust["if"], windows_only)
+        self.assertEqual(gate["if"], windows_only)
+        self.assertLess(job["steps"].index(rust), job["steps"].index(gate))
+        self.assertEqual(
+            gate["run"],
+            "zig build agentcore:gate -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe --test-timeout 5m",
+        )
 
 
 if __name__ == "__main__":
