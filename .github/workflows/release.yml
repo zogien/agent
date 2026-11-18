@@ -1,430 +1,63 @@
 name: Release
 
-# The release pipeline (#82, #47 stage 7). A bare `X.Y.Z` tag (pushed, or
-# created by release-tag.yml which then dispatches this workflow) is the
-# stable channel, a `0.x.y-dev` commit the pre channel (#47 Q1/Q3), and
-# neither is published without a human pressing the button on the draft this
-# workflow leaves behind. Every job runs on an ephemeral GitHub-hosted runner
-# (doc/RELEASE_RUNNER.md): nothing from a PR job or an earlier release can
-# precondition the machine, and no self-hosted machine ever holds the token.
 on:
-  # Stage C of doc/RELEASE_AUTOMATION_DESIGN.md: a bare X.Y.Z tag builds and
-  # drafts the stable channel. release-tag.yml creates that tag with the
-  # repository token, which never fires this trigger (recursion guard), so it
-  # also dispatches this workflow explicitly; the trigger serves hand-pushed
-  # tags. Pre-releases stay on workflow_dispatch with dry_run.
   push:
-    tags: ["[0-9]+.[0-9]+.[0-9]+"]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Ref to release: the bare X.Y.Z tag (stable) or a branch / full 40-hex commit SHA whose version is 0.x.y-dev (pre); actions/checkout rejects short SHAs"
-        required: true
-        type: string
-      dry_run:
-        description: "Build, verify, archive and upload artifacts, but do not create the draft release"
-        required: true
-        type: boolean
-        default: true
+    tags: ["fork/*-fork.*"]
 
 permissions:
   contents: read
 
-concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
-  cancel-in-progress: false
-
-# bindgen for the AgentCore bindings-regen gate; the hosted images ship cargo
-# but not bindgen. Pinned to the version doc/RELEASE_RUNNER.md names.
-env:
-  BINDGEN_VERSION: 0.72.1
-  # One event-aware value replaces every direct `inputs.tag` use: on a tag
-  # push `inputs.*` is empty. The publish job additionally requires the ref to
-  # be a bare X.Y.Z tag, so a branch or SHA ref (pre channel) always stops at
-  # artifacts whatever dry_run says.
-  RELEASE_REF: ${{ inputs.tag || github.ref_name }}
-
 jobs:
-  build-posix:
-    name: Release (${{ matrix.os }} ${{ matrix.arch }})
-    timeout-minutes: 90
+  agentcore:
+    if: ${{ !github.event.deleted }}
+    name: AgentCore (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
     strategy:
-      # Every platform reports its own verdict: a rehearsal needs all of them,
-      # and the publish job already waits for all of them.
       fail-fast: false
-      # Each unit is built and verified natively on its own architecture: the
-      # Lean kernels, release:verify and the AgentCore gate all run what they
-      # build (doc/INSTALL_DESIGN.md §5, #307). aarch64-linux runs on GitHub's
-      # hosted arm64 Linux runner, x86_64-macos on its Intel macOS runner
-      # (macos-13 is retired; macos-15-intel is the oldest Intel image GitHub
-      # still hosts, and few Intel Macs run macOS 26).
-      #
-      # cli_target: the Zig target the CLI executable is built for. Without
-      # -Dtarget zig builds for the runner: its CPU, glibc and macOS. The
-      # published 0.8.0 units needed GLIBC_2.36 and AVX2 (x86_64 Linux),
-      # AVX-512 (Windows) and macOS 26.6 (aarch64 macOS), so they ran only on
-      # machines like the runners. An explicit target means the baseline CPU,
-      # and its version suffix is the oldest glibc or macOS the unit supports;
-      # scripts/check_binary_baseline.py holds the built executable to it. The
-      # arm64 unit is for the Graviton, Ampere, Raspberry Pi 5 and Jetson boards
-      # #307 names: no SVE, and glibc 2.31. release:verify still runs the unit,
-      # because the target keeps the runner's OS, architecture and ABI.
       matrix:
         include:
-          - os: Linux
-            arch: X64
-            runner: ubuntu-latest
-            zig_target: x86_64-linux-gnu
-            cli_target: x86_64-linux-gnu.2.31
-          - os: Linux
-            arch: ARM64
-            runner: ubuntu-24.04-arm
-            zig_target: aarch64-linux-gnu
-            cli_target: aarch64-linux-gnu.2.31
-          - os: macOS
-            arch: ARM64
-            runner: macos-latest
-            zig_target: aarch64-macos
-            cli_target: aarch64-macos.13.0
-          - os: macOS
-            arch: X64
-            runner: macos-15-intel
-            zig_target: x86_64-macos
-            cli_target: x86_64-macos.13.0
-    runs-on: ${{ matrix.runner }}
-    env:
-      # A Linux unit's executable ships stripped, and its debug symbols ship
-      # beside the unit as metacodes-<version>-<target-id>-debug.tar.gz
-      # (doc/RELEASE_RUNNER.md, "Debug symbols"). Every step that builds or
-      # archives the unit passes the same flags.
-      RELEASE_SYMBOLS: ${{ matrix.os == 'Linux' && '-Drelease-symbols=true' || '' }}
+          - runner: ubuntu-latest
+            target: x86_64-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-linux-gnu
+          - runner: macos-latest
+            target: aarch64-macos
+          - runner: macos-15-intel
+            target: x86_64-macos
+          - runner: windows-latest
+            target: x86_64-windows-msvc
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.tag || github.ref_name }}
-          fetch-depth: 0
-          fetch-tags: true
-      # A release build must not inherit a cache another branch wrote: no
-      # setup-zig cache here, every release compiles cold.
+          ref: ${{ github.ref }}
+          fetch-depth: 1
+          fetch-tags: false
+          persist-credentials: false
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.16.0
-          use-cache: false
-      - name: Install bindgen
-        run: cargo install bindgen-cli --version "$BINDGEN_VERSION" --locked
-      - name: Toolchain inventory
-        shell: bash
-        run: |
-          set -euo pipefail
-          for tool in cargo bindgen; do
-            command -v "$tool" >/dev/null 2>&1 || { echo "::error::$tool is required for the AgentCore gate (doc/RELEASE_RUNNER.md)"; exit 1; }
-          done
-          cargo --version
-          bindgen --version
-      - name: Install Python development dependencies
-        run: python3 -m pip install --break-system-packages -r requirements-dev.txt
-      - name: Vendored runtime assets are attested
-        run: python3 scripts/verify_tinykg_binary.py && python3 scripts/verify_ripgrep_binary.py
-      # The suite's Glob and Grep tests resolve rg from PATH, as in ci.yml. The
-      # arm64 Linux image ships none, and its first dry run failed those tests
-      # with RipgrepNotFound (#307). There the vendored, attested binary the
-      # unit itself ships goes on PATH rather than a package manager's, so the
-      # job reaches no new network source.
-      - name: ripgrep for the test suite
-        shell: bash
-        env:
-          ZIG_TARGET: ${{ matrix.zig_target }}
-        run: |
-          set -euo pipefail
-          if ! command -v rg >/dev/null 2>&1; then
-            arch=${ZIG_TARGET%%-*}; os=${ZIG_TARGET#*-}; os=${os%%-*}
-            python3 scripts/stage_ripgrep_binary.py "$arch" "$os" "$RUNNER_TEMP/ripgrep"
-            echo "$RUNNER_TEMP/ripgrep" >> "$GITHUB_PATH"
-            export PATH="$RUNNER_TEMP/ripgrep:$PATH"
-          fi
-          command -v rg
-          rg --version
-      # The unit ships both Lean kernels (manifest v2, release/LAYOUT.md),
-      # built here natively and cold like everything else in a release: the
-      # pinned elan, no Lean cache.
-      - name: Install pinned elan
-        run: bash scripts/ci/install-elan.sh
-      - name: Build the Lean kernels and their pins
-        shell: bash
-        run: |
-          set -euo pipefail
-          zig build kernels:stage -Dlean-kernels=on -Doptimize=ReleaseSafe --prefix "$RUNNER_TEMP/release"
-          pins=$(python3 scripts/kernel_pins.py "$RUNNER_TEMP/release")
-          echo "KERNEL_PINS=$pins" >> "$GITHUB_ENV"
-      # Same test watchdog as ci.yml: the build runner's one-minute default
-      # is what the Windows dry runs tripped (a few I/O-bound unit tests sit
-      # near a minute on that box).
-      - name: Full suite in release configuration
-        run: zig build test -Doptimize=ReleaseSafe --test-timeout 5m -Dlean-kernels=on
-      - name: Stage, manifest and verify the release unit
-        run: zig build release:verify -Drelease-layout=true -Doptimize=ReleaseSafe --prefix "$RUNNER_TEMP/release" $KERNEL_PINS -Dtarget=${{ matrix.cli_target }} $RELEASE_SYMBOLS
-      # The executable needs no CPU feature, glibc or macOS newer than its
-      # cli_target names (see the matrix); it fails here, before it is archived.
-      - name: The executable needs no more than its target
-        run: python3 scripts/check_binary_baseline.py --target ${{ matrix.cli_target }} "$RUNNER_TEMP/release/bin/metacodes"
-      - name: Installed prefix matches the release layout
-        run: python3 scripts/verify_install_prefix.py "$RUNNER_TEMP/release" --release --doctor
-      # The same watchdog again, as agentcore-windows.yml runs this gate: at
-      # the one-minute default the 0.2.1 Windows dry run killed an
-      # agentcore-abi-unit test ("test runner failed to respond for 1m6s").
-      # Release-only coverage: PR CI keeps Linux x86_64, macOS ARM64 and
-      # Windows x86_64. The ARM64 Linux and Intel macOS matrix entries above
-      # run their entire release suite natively here.
-      - name: Linux ARM64 cross-stage contract
-        if: matrix.os == 'Linux' && matrix.arch == 'X64'
-        run: |
-          zig build tinykg:stage -Dtarget=aarch64-linux-musl
-          zig build install -Dtarget=aarch64-linux-musl -Drelease-layout=true --prefix "$RUNNER_TEMP/stage-aarch64-linux"
-      - name: AgentCore gate for the native target
-        run: zig build agentcore:gate -Dtarget=${{ matrix.zig_target }} -Doptimize=ReleaseSafe --test-timeout 5m
-      - name: Archive (CLI unit)
-        run: zig build release:archive -Drelease-layout=true -Doptimize=ReleaseSafe --prefix "$RUNNER_TEMP/release" $KERNEL_PINS -Dtarget=${{ matrix.cli_target }} $RELEASE_SYMBOLS -Drelease-archive-dir="$RUNNER_TEMP/dist"
-      # What a user does with the archive: scripts/install.sh, then doctor.
-      - name: The archive installs
-        shell: bash
-        run: |
-          set -euo pipefail
-          sh scripts/install.sh --no-link --prefix "$RUNNER_TEMP/installed" "$RUNNER_TEMP"/dist/metacodes-*-${{ matrix.zig_target }}.tar.gz
-          "$RUNNER_TEMP/installed/bin/metacodes" doctor --strict
-      # AgentCore ships with every release under its own version
-      # (doc/RELEASE_AUTOMATION_DESIGN.md §2a): this release builds it, or, when
-      # its inputs are unchanged, delivers the artifacts of the release that did.
-      - name: AgentCore release mode
-        run: python3 scripts/agentcore_release.py release-mode --github-env "$GITHUB_ENV"
-      - name: Archive (AgentCore SDK)
-        if: env.AGENTCORE_REUSE_FROM == ''
-        run: zig build agentcore:archive -Dtarget=${{ matrix.zig_target }} -Doptimize=ReleaseSafe --prefix "$RUNNER_TEMP/sdk" -Dagentcore-archive-dir="$RUNNER_TEMP/dist"
-      - name: Language packages (Python wheel, Node package)
-        if: env.AGENTCORE_REUSE_FROM == ''
-        run: python3 scripts/agentcore_release.py package-languages --sdk-prefix "$RUNNER_TEMP/sdk" --dist "$RUNNER_TEMP/dist" --node
-      - name: Reuse the AgentCore artifacts
-        if: env.AGENTCORE_REUSE_FROM != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/agentcore_release.py fetch-reused --target ${{ matrix.zig_target }} --dist "$RUNNER_TEMP/dist"
-      # The unit's archive and, on Linux, its symbols archive.
-      - name: Archives are reproducible
-        shell: bash
-        run: |
-          set -euo pipefail
-          zig build release:archive -Drelease-layout=true -Doptimize=ReleaseSafe --prefix "$RUNNER_TEMP/release" $KERNEL_PINS -Dtarget=${{ matrix.cli_target }} $RELEASE_SYMBOLS -Drelease-archive-dir="$RUNNER_TEMP/dist-again"
-          for archive in "$RUNNER_TEMP"/dist/metacodes-*.tar.gz; do cmp "$archive" "$RUNNER_TEMP/dist-again/$(basename "$archive")"; echo "reproducible: $(basename "$archive")"; done
-          if [ -n "$RELEASE_SYMBOLS" ]; then ls "$RUNNER_TEMP"/dist/metacodes-*-${{ matrix.zig_target }}-debug.tar.gz; fi
-      # What `curl … install.sh | sh` does on this machine: no archive named,
-      # so install.sh picks one by the host's target (host_target) from a
-      # release's SHA256SUMS. A loopback mirror serves this job's archives
-      # under their version as a release would, holding only this platform's
-      # unit, so a wrong pick fails the download; the note must also name the
-      # matrix target. The SDK is picked by the same target.
-      - name: install.sh picks this platform's archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          version=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["release"]["version"])' "$RUNNER_TEMP/release/manifest.json")
-          mkdir -p "$RUNNER_TEMP/mirror/download/$version"
-          cp "$RUNNER_TEMP"/dist/* "$RUNNER_TEMP/mirror/download/$version/"
-          python3 scripts/release_sums.py "$RUNNER_TEMP/mirror/download/$version" "$version"
-          python3 -m http.server 8765 --bind 127.0.0.1 --directory "$RUNNER_TEMP/mirror" > "$RUNNER_TEMP/mirror.log" 2>&1 &
-          server=$!
-          trap 'kill "$server" 2>/dev/null || true' EXIT
-          for _ in $(seq 50); do curl -fs -o /dev/null http://127.0.0.1:8765/ && break; sleep 0.2; done
-          sh scripts/install.sh --no-link --prefix "$RUNNER_TEMP/installed-release" --release-base http://127.0.0.1:8765 --version "$version" 2> "$RUNNER_TEMP/install.log" || { cat "$RUNNER_TEMP/install.log" "$RUNNER_TEMP/mirror.log"; exit 1; }
-          cat "$RUNNER_TEMP/install.log"
-          grep -F "metacodes $version for ${{ matrix.zig_target }} from" "$RUNNER_TEMP/install.log"
-          "$RUNNER_TEMP/installed-release/bin/metacodes" doctor --strict
+      - name: Build AgentCore archive
+        run: zig build agentcore:archive -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: archives-${{ matrix.os }}-${{ matrix.arch }}
-          path: ${{ runner.temp }}/dist/*
+          name: agentcore-${{ matrix.target }}
+          path: zig-out/agentcore-archives/
           if-no-files-found: error
-          retention-days: 7
-
-  build-windows:
-    name: Release (Windows)
-    timeout-minutes: 90
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.tag || github.ref_name }}
-          fetch-depth: 0
-          fetch-tags: true
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        with:
-          version: 0.16.0
-          use-cache: false
-      # cmd throughout: Git-Bash paths are POSIX-style and native zig.exe
-      # cannot use them.
-      - name: Install bindgen
-        shell: cmd
-        run: cargo install bindgen-cli --version %BINDGEN_VERSION% --locked
-      - name: Toolchain inventory
-        shell: cmd
-        run: |
-          where cargo >nul 2>nul || ( echo ::error::cargo is required for the AgentCore gate ^(doc/RELEASE_RUNNER.md^) & exit /b 1 )
-          where bindgen >nul 2>nul || ( echo ::error::bindgen is required for the AgentCore gate ^(doc/RELEASE_RUNNER.md^) & exit /b 1 )
-          cargo --version
-          bindgen --version
-      - name: Install Python development dependencies
-        shell: cmd
-        run: python -m pip install -r requirements-dev.txt
-      - name: Vendored runtime assets are attested
-        shell: cmd
-        run: python scripts\verify_tinykg_binary.py && python scripts\verify_ripgrep_binary.py
-      # See build-posix: the Windows unit ships both Lean kernels too.
-      - name: Install pinned elan
-        shell: bash
-        run: bash scripts/ci/install-elan.sh
-      - name: Build the Lean kernels and their pins
-        shell: cmd
-        run: |
-          zig build kernels:stage -Dlean-kernels=on -Doptimize=ReleaseSafe --prefix "%RUNNER_TEMP%\release" || exit /b 1
-          for /f "delims=" %%P in ('python scripts\kernel_pins.py "%RUNNER_TEMP%\release"') do echo KERNEL_PINS=%%P>> "%GITHUB_ENV%"
-          findstr /B KERNEL_PINS= "%GITHUB_ENV%" || exit /b 1
-      - name: Full suite in release configuration
-        shell: cmd
-        run: zig build test -Doptimize=ReleaseSafe --test-timeout 5m -Dlean-kernels=on
-      - name: Stage, manifest and verify the release unit
-        shell: cmd
-        run: zig build release:verify -Drelease-layout=true -Doptimize=ReleaseSafe --prefix "%RUNNER_TEMP%\release" %KERNEL_PINS% -Dtarget=x86_64-windows-gnu
-      # See build-posix: the Windows executable is built for the baseline CPU
-      # (0.8.0's carried AVX-512) and held to it here.
-      - name: The executable needs no more than its target
-        shell: cmd
-        run: python scripts\check_binary_baseline.py --target x86_64-windows-gnu "%RUNNER_TEMP%\release\bin\metacodes.exe"
-      - name: Installed prefix matches the release layout
-        shell: cmd
-        run: python scripts\verify_install_prefix.py "%RUNNER_TEMP%\release" --release --doctor
-      - name: AgentCore gate for the native target
-        shell: cmd
-        run: zig build agentcore:gate -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSafe --test-timeout 5m
-      - name: Archive (CLI unit)
-        shell: cmd
-        run: zig build release:archive -Drelease-layout=true -Doptimize=ReleaseSafe --prefix "%RUNNER_TEMP%\release" %KERNEL_PINS% -Dtarget=x86_64-windows-gnu -Drelease-archive-dir="%RUNNER_TEMP%\dist"
-      - name: The archive installs
-        shell: cmd
-        run: for %%F in ("%RUNNER_TEMP%\dist\metacodes-*.zip") do powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install.ps1 "%%F" -Prefix "%RUNNER_TEMP%\installed" -NoPath && "%RUNNER_TEMP%\installed\bin\metacodes.exe" doctor --strict
-      # See build-posix. The Node addon does not support Windows yet.
-      - name: AgentCore release mode
-        shell: cmd
-        run: python scripts\agentcore_release.py release-mode --github-env "%GITHUB_ENV%"
-      - name: Archive (AgentCore SDK)
-        if: env.AGENTCORE_REUSE_FROM == ''
-        shell: cmd
-        run: zig build agentcore:archive -Dtarget=x86_64-windows-gnu -Doptimize=ReleaseSafe --prefix "%RUNNER_TEMP%\sdk" -Dagentcore-archive-dir="%RUNNER_TEMP%\dist"
-      - name: Language packages (Python wheel)
-        if: env.AGENTCORE_REUSE_FROM == ''
-        shell: cmd
-        run: python scripts\agentcore_release.py package-languages --sdk-prefix "%RUNNER_TEMP%\sdk" --dist "%RUNNER_TEMP%\dist"
-      - name: Reuse the AgentCore artifacts
-        if: env.AGENTCORE_REUSE_FROM != ''
-        shell: cmd
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python scripts\agentcore_release.py fetch-reused --target x86_64-windows-gnu --dist "%RUNNER_TEMP%\dist"
-      - name: Archives are reproducible
-        shell: cmd
-        run: zig build release:archive -Drelease-layout=true -Doptimize=ReleaseSafe --prefix "%RUNNER_TEMP%\release" %KERNEL_PINS% -Dtarget=x86_64-windows-gnu -Drelease-archive-dir="%RUNNER_TEMP%\dist-again" && for %%F in ("%RUNNER_TEMP%\dist\metacodes-*.zip") do fc /b "%%F" "%RUNNER_TEMP%\dist-again\%%~nxF" > nul
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: archives-Windows-X64
-          path: ${{ runner.temp }}\dist\*
-          if-no-files-found: error
-          retention-days: 7
-
-  windows-arm-cross:
-    name: Release (Windows ARM64 cross / ${{ matrix.target }})
-    timeout-minutes: 60
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [aarch64-windows-gnu, aarch64-windows-msvc]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.tag || github.ref_name }}
-          fetch-depth: 0
-          fetch-tags: true
-      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
-        with:
-          version: 0.16.0
-          use-cache: false
-      # Compile and link consumers; never try to execute ARM64 code on X64.
-      # This is SDK coverage, not an ARM64 CLI release unit: TinyKG does not
-      # have an ARM64 Windows bundle. No unsupported unit is published.
-      - name: Windows ARM64 SDK compiles and links
-        shell: cmd
-        run: zig build agentcore:bundle -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe --prefix "%RUNNER_TEMP%\sdk-arm64"
 
   publish:
-    name: Draft release
-    needs: [build-posix, build-windows, windows-arm-cross]
-    if: ${{ github.event_name == 'push' || !inputs.dry_run }}
-    timeout-minutes: 20
+    needs: agentcore
     runs-on: ubuntu-latest
-    # The only job that can write to the repository, and only through the
-    # ephemeral token, and only to create a *draft*.
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.tag || github.ref_name }}
-          fetch-depth: 0
-          fetch-tags: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          path: ${{ runner.temp }}/dist
+          pattern: agentcore-*
           merge-multiple: true
-      - name: The ref must be a bare X.Y.Z tag at HEAD
-        # A workflow_dispatch with dry_run=false on a branch or SHA ref (pre
-        # channel) reaches this job and must stop here: only a tagged stable
-        # version is ever drafted, and its version state must be consistent.
-        run: |
-          set -euo pipefail
-          if ! [[ "$RELEASE_REF" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "release ref '$RELEASE_REF' is not a bare X.Y.Z tag; pre-channel builds are never published" >&2; exit 1
-          fi
-          test "$(git describe --tags --exact-match HEAD)" = "$RELEASE_REF"
-          python3 scripts/check_version_state.py
-      # Refuses a development version, a package around another library, a
-      # version or ABI that disagrees anywhere, and any asset whose name a
-      # published release already holds with other bytes.
-      - name: Checksums of the published releases
+          path: dist
+      - name: Publish AgentCore archives
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
-        run: python3 scripts/agentcore_release.py fetch-published-sums --out "$RUNNER_TEMP/published"
-      - name: The deliverables are one consistent release
-        run: python3 scripts/agentcore_release.py verify-dist --dist "$RUNNER_TEMP/dist" --published-sums "$RUNNER_TEMP/published"
-      - name: SHA256SUMS over every archive
-        run: python3 scripts/release_sums.py "$RUNNER_TEMP/dist" "$RELEASE_REF"
-      - name: Release notes from CHANGELOG.md
-        run: python3 scripts/release_notes.py "$RELEASE_REF" > "$RUNNER_TEMP/notes.md"
-      - name: Create or update the draft release (a human publishes it)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        # Rerun-safe: a rerun after a failed upload updates the existing
-        # *draft* (--clobber) instead of failing on `create`; the archives were
-        # rebuilt from the immutable tag, never reused from expired artifacts.
-        # A release a human already published is immutable here: the job stops
-        # without touching it.
-        run: |
-          set -euo pipefail
-          if gh release view "$RELEASE_REF" >/dev/null 2>&1; then
-            if [ "$(gh release view "$RELEASE_REF" --json isDraft --jq .isDraft)" != "true" ]; then
-              echo "release $RELEASE_REF is already published; refusing to modify it" >&2; exit 1
-            fi
-            gh release upload "$RELEASE_REF" --clobber "$RUNNER_TEMP"/dist/*
-            gh release edit "$RELEASE_REF" --draft --title "metacodes $RELEASE_REF" --notes-file "$RUNNER_TEMP/notes.md"
-          else
-            gh release create "$RELEASE_REF" --draft --verify-tag \
-              --title "metacodes $RELEASE_REF" \
-              --notes-file "$RUNNER_TEMP/notes.md" \
-              "$RUNNER_TEMP"/dist/*
-          fi
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" --verify-tag --notes "" dist/*

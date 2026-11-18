@@ -58,6 +58,7 @@ BARE_RE = re.compile(rf"^{_BARE}$")
 SOURCE_VERSION_RE = re.compile(rf"^({_BARE})(-dev)?$")
 # What `scripts/agentcore_manifest.zig` packageVersion produces.
 BUILT_DEV_RE = re.compile(rf"^({_BARE})-dev\+([0-9a-f]{{12}})(\.dirty)?$")
+FORK_VERSION_RE = re.compile(rf"{_BARE}-fork\.(?:0|[1-9][0-9]*)", re.ASCII)
 PY_PROJECT_VERSION_RE = re.compile(r'^(version = ")([^"]+)(")$', re.M)
 PY_INIT_VERSION_RE = re.compile(r'^(__version__ = ")([^"]+)(")$', re.M)
 NODE_VERSION_RE = re.compile(r'^(  "version": ")([^"]+)(",?)$', re.M)
@@ -346,7 +347,7 @@ def check_bundle_contents(manifest: dict, reader: Reader) -> None:
         raise CutError(f"bundle manifest lacks {exc}") from None
     if not isinstance(version, str):
         raise CutError("bundle manifest version is not a string")
-    _, development = base_of_built(version)
+    development = not FORK_VERSION_RE.fullmatch(version) and base_of_built(version)[1]
     if development:
         built = BUILT_DEV_RE.match(version)
         if not isinstance(commit, str) or not commit.startswith(built.group(2)):

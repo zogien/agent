@@ -17,10 +17,10 @@ manifest identity:
 
 Channels gate what may be archived (#47 Q1/Q3): a pre-release version
 (`X.Y.Z-<pre>+<commit12>`) archives from any commit that is not itself a release;
-a stable version requires a clean source tree and a tag. For the CLI that is the
-bare `X.Y.Z` tag on HEAD. AgentCore has its own version and no tag of its own
-(`0.13.0` may one day name a main-project release): a stable SDK archive requires
-the main-project tag on HEAD, HEAD at `manifest.source.commit`, and the ledger
+a stable version requires a clean source tree and a tag. A fork SDK archive
+uses the version of its `fork/X.Y.Z-fork.N` tag at the manifest's commit.
+The upstream CLI uses a bare `X.Y.Z` tag on HEAD. A stable upstream SDK archive
+requires the main-project tag on HEAD, HEAD at `manifest.source.commit`, and the ledger
 (`sdk/agentcore-releases.json`) saying this main release is the one that builds
 this AgentCore version. A later main release reuses those artifacts instead, so
 it cannot produce a second, different archive under the same version.
@@ -97,6 +97,7 @@ class GitFacts:
     head_commit: str | None = None
     # The main-project release the ledger says builds this AgentCore version.
     agentcore_built_by: str | None = None
+    fork_tags: tuple[str, ...] = ()
 
 
 def collect_git_facts(repo_root: Path, agentcore_version: str | None = None) -> GitFacts:
@@ -119,6 +120,7 @@ def collect_git_facts(repo_root: Path, agentcore_version: str | None = None) -> 
         head_tag=git("describe", "--tags", "--exact-match", "HEAD"),
         head_commit=git("rev-parse", "HEAD"),
         agentcore_built_by=built_by,
+        fork_tags=tuple((git("tag", "--list", "--points-at", "HEAD", "fork/*-fork.*") or "").splitlines()),
     )
 
 
@@ -227,6 +229,17 @@ def load_bundle(bundle_root: Path, kind: str) -> Bundle:
 def enforce_channel(bundle: Bundle, git_facts: GitFacts | None) -> None:
     """A pre-release archives from any commit but a release; a stable one only
     from a clean, tagged tree."""
+    source = bundle.manifest.get("source") or {}
+    dirty = source.get("dirty")
+    commit = source.get("commit")
+    if bundle.kind == "agentcore" and agentcore_contract.FORK_VERSION_RE.fullmatch(bundle.version):
+        tag = f"fork/{bundle.version}"
+        if git_facts is None or tag not in git_facts.fork_tags:
+            raise ValueError(f"AgentCore {bundle.version} requires tag {tag} at HEAD")
+        if dirty is not False or git_facts.head_commit is None or commit != git_facts.head_commit:
+            raise ValueError(f"AgentCore {tag} requires a clean bundle built from the tagged commit")
+        return
+
     if bundle.channel == "pre":
         head_tag = None if git_facts is None else git_facts.head_tag
         if bundle.kind == "agentcore" and head_tag is not None and agentcore_contract.BARE_RE.match(head_tag):
@@ -235,9 +248,6 @@ def enforce_channel(bundle: Bundle, git_facts: GitFacts | None) -> None:
                 "a formal release carries a final AgentCore version (scripts/release_cut.py finalizes it)"
             )
         return
-    source = bundle.manifest.get("source") or {}
-    dirty = source.get("dirty")
-    commit = source.get("commit")
     head_tag = None if git_facts is None else git_facts.head_tag
     if bundle.kind == "agentcore":
         head_commit = None if git_facts is None else git_facts.head_commit
@@ -641,6 +651,20 @@ class ArchiveTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "development version"):
                 write_archive(bundle, root / "out", "agentcore", GitFacts(head_tag="0.10.0"))
             write_archive(bundle, root / "out", "agentcore", GitFacts(head_tag=None))
+
+    def test_a_fork_sdk_archives_under_its_own_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            version = "0.15.1-fork.1"
+            tag = f"fork/{version}"
+            bundle = _sdk_fixture(root, "windows", "x86_64-windows-gnu", version=version)
+            with self.assertRaisesRegex(ValueError, f"requires tag {re.escape(tag)} at HEAD"):
+                write_archive(bundle, root / "out", "agentcore", GitFacts("0.15.1", COMMIT))
+            with self.assertRaisesRegex(ValueError, "built from the tagged commit"):
+                write_archive(bundle, root / "out", "agentcore", GitFacts(tag, "f" * 40, fork_tags=(tag,)))
+            archive, sidecar = write_archive(bundle, root / "out", "agentcore", GitFacts("0.15.1", COMMIT, fork_tags=(tag,)))
+            self.assertEqual(archive.name, f"metask-agentcore-{version}-x86_64-windows-gnu.zip")
+            self.assertEqual(sidecar.name, f"{archive.name}.sha256")
 
     def test_rejects_payload_hash_mismatch_and_wrong_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
