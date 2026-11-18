@@ -475,7 +475,7 @@ class ForkReleaseWorkflowTest(unittest.TestCase):
         except ImportError:  # requirements-dev.txt
             self.skipTest("PyYAML is not installed")
         workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
-        self.assertEqual(workflow.get("on", workflow.get(True)), {"push": {"tags": ["fork/*-fork.*"]}})
+        self.assertEqual(workflow.get("on", workflow.get(True)), {"push": {"tags": ["fork/v*-fork.*"]}})
         steps = workflow["jobs"]["publish"]["steps"]
         publish = next(step for step in steps if step.get("name") == "Publish AgentCore archives")
         self.assertEqual(publish["env"]["RELEASE_TAG"], "${{ github.ref_name }}")

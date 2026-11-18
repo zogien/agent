@@ -264,7 +264,7 @@ fn parseRipgrepPin(allocator: std.mem.Allocator, bytes: []const u8) !RipgrepPin 
 
 fn versionAtHead(allocator: std.mem.Allocator, io: std.Io, source: SourceIdentity) ![]const u8 {
     const tags = try common.runGit(allocator, io, "AgentCore manifest", &.{
-        "git", "tag", "--list", "--points-at", "HEAD", "fork/*-fork.*",
+        "git", "tag", "--list", "--points-at", "HEAD", "fork/v*-fork.*",
     });
     if (try forkVersion(tags)) |version| return version;
 
@@ -276,7 +276,7 @@ fn forkVersion(tags: []const u8) error{ InvalidForkTag, AmbiguousForkTags }!?[]c
     const tag = std.mem.trim(u8, tags, "\r\n");
     if (tag.len == 0) return null;
     if (std.mem.indexOfScalar(u8, tag, '\n') != null) return error.AmbiguousForkTags;
-    const version = std.mem.cutPrefix(u8, tag, "fork/") orelse return error.InvalidForkTag;
+    const version = std.mem.cutPrefix(u8, tag, "fork/v") orelse return error.InvalidForkTag;
     const parsed = std.SemanticVersion.parse(version) catch return error.InvalidForkTag;
     if (parsed.build != null) return error.InvalidForkTag;
     const prerelease = parsed.pre orelse return error.InvalidForkTag;
@@ -543,12 +543,13 @@ test "package version is derived from sdk version and source identity" {
 }
 
 test "a fork tag supplies the entire package version" {
-    try std.testing.expectEqualStrings("0.15.1-fork.1", (try forkVersion("fork/0.15.1-fork.1\r\n")).?);
+    try std.testing.expectEqualStrings("0.15.0-fork.1", (try forkVersion("fork/v0.15.0-fork.1\r\n")).?);
     try std.testing.expect((try forkVersion("")) == null);
-    try std.testing.expectError(error.InvalidForkTag, forkVersion("fork/0.15.1-fork.1+0123456789ab\n"));
-    try std.testing.expectError(error.InvalidForkTag, forkVersion("fork/0.15.1-fork.01\n"));
-    try std.testing.expectError(error.InvalidForkTag, forkVersion("fork/0.15.1-fork.x\n"));
-    try std.testing.expectError(error.AmbiguousForkTags, forkVersion("fork/0.15.1-fork.1\nfork/0.15.1-fork.2\n"));
+    try std.testing.expectError(error.InvalidForkTag, forkVersion("fork/0.15.0-fork.1\n"));
+    try std.testing.expectError(error.InvalidForkTag, forkVersion("fork/v0.15.0-fork.1+0123456789ab\n"));
+    try std.testing.expectError(error.InvalidForkTag, forkVersion("fork/v0.15.0-fork.01\n"));
+    try std.testing.expectError(error.InvalidForkTag, forkVersion("fork/v0.15.0-fork.x\n"));
+    try std.testing.expectError(error.AmbiguousForkTags, forkVersion("fork/v0.15.0-fork.1\nfork/v0.15.0-fork.2\n"));
 }
 
 test "generated development versions fit the Zig package limit" {
