@@ -20,10 +20,8 @@ jobs:
             target: aarch64-linux-gnu
           - runner: macos-latest
             target: aarch64-macos
-          - runner: macos-15-intel
-            target: x86_64-macos
           - runner: windows-latest
-            target: x86_64-windows-gnu
+            target: x86_64-windows-msvc
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
@@ -32,7 +30,7 @@ jobs:
       - name: Build AgentCore archive
         run: zig build agentcore:archive -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
       - name: Rust toolchain (Windows)
-        if: matrix.target == 'x86_64-windows-gnu'
+        if: matrix.target == 'x86_64-windows-msvc'
         shell: cmd
         env:
           RUSTUP_AUTO_INSTALL: "0"
@@ -44,7 +42,7 @@ jobs:
           rustc --version
           cargo --version
       - name: Native AgentCore delivery gate (Windows MSVC)
-        if: matrix.target == 'x86_64-windows-gnu'
+        if: matrix.target == 'x86_64-windows-msvc'
         shell: cmd
         timeout-minutes: 45
         run: zig build agentcore:gate -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe --test-timeout 5m

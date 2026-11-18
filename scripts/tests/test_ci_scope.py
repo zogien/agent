@@ -637,13 +637,13 @@ class AgentCoreWorkflowTest(unittest.TestCase):
     def test_windows_archive_leg_also_runs_the_native_gate(self) -> None:
         job = self.workflow["jobs"]["agentcore"]
         self.assertIn(
-            {"runner": "windows-latest", "target": "x86_64-windows-gnu"},
+            {"runner": "windows-latest", "target": "x86_64-windows-msvc"},
             job["strategy"]["matrix"]["include"],
         )
         steps = {step.get("name"): step for step in job["steps"]}
         rust = steps["Rust toolchain (Windows)"]
         gate = steps["Native AgentCore delivery gate (Windows MSVC)"]
-        windows_only = "matrix.target == 'x86_64-windows-gnu'"
+        windows_only = "matrix.target == 'x86_64-windows-msvc'"
         self.assertEqual(rust["if"], windows_only)
         self.assertEqual(gate["if"], windows_only)
         self.assertLess(job["steps"].index(rust), job["steps"].index(gate))
