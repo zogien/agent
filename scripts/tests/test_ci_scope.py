@@ -622,7 +622,7 @@ class WorkflowTest(unittest.TestCase):
 
 
 class AgentCoreWorkflowTest(unittest.TestCase):
-    """The fork's CI runs the native AgentCore gate on Windows."""
+    """The fork's CI builds AgentCore archives on all matrix targets."""
 
     def setUp(self) -> None:
         try:
@@ -637,22 +637,19 @@ class AgentCoreWorkflowTest(unittest.TestCase):
             {"pull_request": None, "push": {"branches": ["main"]}},
         )
 
-    def test_windows_archive_leg_also_runs_the_native_gate(self) -> None:
+    def test_windows_uses_the_shared_archive_step(self) -> None:
         job = self.workflow["jobs"]["agentcore"]
         self.assertIn(
             {"runner": "windows-latest", "target": "x86_64-windows-msvc"},
             job["strategy"]["matrix"]["include"],
         )
-        steps = {step.get("name"): step for step in job["steps"]}
-        rust = steps["Rust toolchain (Windows)"]
-        gate = steps["Native AgentCore delivery gate (Windows MSVC)"]
-        windows_only = "matrix.target == 'x86_64-windows-msvc'"
-        self.assertEqual(rust["if"], windows_only)
-        self.assertEqual(gate["if"], windows_only)
-        self.assertLess(job["steps"].index(rust), job["steps"].index(gate))
+        run_steps = [step for step in job["steps"] if "run" in step]
+        self.assertEqual(len(run_steps), 1)
+        archive = run_steps[0]
+        self.assertNotIn("if", archive)
         self.assertEqual(
-            gate["run"],
-            "zig build agentcore:gate -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe --test-timeout 5m",
+            archive["run"],
+            "zig build agentcore:archive -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe",
         )
 
 

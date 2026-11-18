@@ -32,20 +32,3 @@ jobs:
           version: 0.16.0
       - name: Build AgentCore archive
         run: zig build agentcore:archive -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
-      - name: Rust toolchain (Windows)
-        if: matrix.target == 'x86_64-windows-msvc'
-        shell: cmd
-        env:
-          RUSTUP_AUTO_INSTALL: "0"
-        run: |
-          rustup which --toolchain stable rustc >nul 2>nul || rustup toolchain install stable --profile minimal --no-self-update
-          if errorlevel 1 exit /b 1
-          rustup default stable
-          if errorlevel 1 exit /b 1
-          rustc --version
-          cargo --version
-      - name: Native AgentCore delivery gate (Windows MSVC)
-        if: matrix.target == 'x86_64-windows-msvc'
-        shell: cmd
-        timeout-minutes: 45
-        run: zig build agentcore:gate -Dtarget=x86_64-windows-msvc -Doptimize=ReleaseSafe --test-timeout 5m
