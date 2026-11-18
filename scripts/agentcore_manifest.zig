@@ -280,29 +280,31 @@ fn forkVersion(tags: []const u8) error{ InvalidForkTag, AmbiguousForkTags }!?[]c
     const parsed = std.SemanticVersion.parse(version) catch return error.InvalidForkTag;
     if (parsed.build != null) return error.InvalidForkTag;
     const prerelease = parsed.pre orelse return error.InvalidForkTag;
-    const number = std.mem.cutPrefix(u8, prerelease, "fork.") orelse return error.InvalidForkTag;
-    if (number.len == 0 or (number.len > 1 and number[0] == '0')) return error.InvalidForkTag;
-    for (number) |digit| {
-        if (!std.ascii.isDigit(digit)) return error.InvalidForkTag;
-    }
+    if (!isForkPrerelease(prerelease)) return error.InvalidForkTag;
     return version;
+}
+
+fn isForkPrerelease(prerelease: []const u8) bool {
+    const number = std.mem.cutPrefix(u8, prerelease, "fork.") orelse return false;
+    if (number.len == 0 or (number.len > 1 and number[0] == '0')) return false;
+    for (number) |digit| {
+        if (!std.ascii.isDigit(digit)) return false;
+    }
+    return true;
 }
 
 fn packageVersion(allocator: std.mem.Allocator, sdk_version: []const u8, source: SourceIdentity) ![]const u8 {
     if (sdk_version.len == 0) return error.InvalidSdkVersion;
     const parsed = std.SemanticVersion.parse(sdk_version) catch return error.InvalidSdkVersion;
     if (parsed.build != null) return error.InvalidSdkVersion;
-    // Between releases `-dev`, and a release is final: scripts/agentcore_contract.py
-    // accepts these two shapes and nothing else.
-    if (parsed.pre) |pre| if (!std.mem.eql(u8, pre, "dev")) return error.InvalidSdkVersion;
+    const prerelease = parsed.pre orelse return allocator.dupe(u8, sdk_version);
+    if (!std.mem.eql(u8, prerelease, "dev") and !isForkPrerelease(prerelease)) return error.InvalidSdkVersion;
 
-    if (parsed.pre == null) return allocator.dupe(u8, sdk_version);
-
+    // An untagged checkout of a fork version still produces a development bundle.
+    const base = std.mem.sliceTo(sdk_version, '-');
     const commit_short = source.commit[0..12];
-    return if (source.dirty)
-        std.fmt.allocPrint(allocator, "{s}+{s}.dirty", .{ sdk_version, commit_short })
-    else
-        std.fmt.allocPrint(allocator, "{s}+{s}", .{ sdk_version, commit_short });
+    const dirty_suffix = if (source.dirty) ".dirty" else "";
+    return std.fmt.allocPrint(allocator, "{s}-dev+{s}{s}", .{ base, commit_short, dirty_suffix });
 }
 
 fn rustTarget(architecture: []const u8, os: []const u8, abi: []const u8) ![]const u8 {
@@ -531,6 +533,11 @@ test "package version is derived from sdk version and source identity" {
     const dirty_stable_version = try packageVersion(allocator, "0.1.0", dirty);
     defer allocator.free(dirty_stable_version);
     try std.testing.expectEqualStrings("0.1.0", dirty_stable_version);
+
+    const fork_dev_version = try packageVersion(allocator, "0.15.0-fork.1", clean);
+    defer allocator.free(fork_dev_version);
+    try std.testing.expectEqualStrings("0.15.0-dev+0123456789ab", fork_dev_version);
+    try std.testing.expectError(error.InvalidSdkVersion, packageVersion(allocator, "0.15.0-fork.01", clean));
     try std.testing.expectError(error.InvalidSdkVersion, packageVersion(allocator, "0.1.0+local", clean));
     try std.testing.expectError(error.InvalidSdkVersion, packageVersion(allocator, "0.1.0-rc.1", clean));
 }
