@@ -622,7 +622,7 @@ class WorkflowTest(unittest.TestCase):
 
 
 class AgentCoreWorkflowTest(unittest.TestCase):
-    """The fork's PR workflow runs the native AgentCore gate on Windows."""
+    """The fork's CI runs the native AgentCore gate on Windows."""
 
     def setUp(self) -> None:
         try:
@@ -631,8 +631,11 @@ class AgentCoreWorkflowTest(unittest.TestCase):
             self.skipTest("PyYAML is not installed")
         self.workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
 
-    def test_ci_runs_on_pull_requests_only(self) -> None:
-        self.assertEqual(set(self.workflow.get("on", self.workflow.get(True))), {"pull_request"})
+    def test_ci_runs_on_pull_requests_and_main_pushes(self) -> None:
+        self.assertEqual(
+            self.workflow.get("on", self.workflow.get(True)),
+            {"pull_request": None, "push": {"branches": ["main"]}},
+        )
 
     def test_windows_archive_leg_also_runs_the_native_gate(self) -> None:
         job = self.workflow["jobs"]["agentcore"]
