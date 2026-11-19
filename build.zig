@@ -3121,6 +3121,7 @@ pub fn build(b: *std.Build) void {
         .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
     });
     const core_integration_run = addTestRunArtifact(b, core_integration_test);
+    wireLeanKernelTestInputs(core_integration_run, staged_lean_kernels);
     const core_integration_step = b.step("test:core-integration", "Run integration tests against the Core library");
     core_integration_step.dependOn(&core_integration_run.step);
     spike_step.dependOn(core_integration_step);
@@ -3136,6 +3137,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     const core_integration_timed_run = addTestRunArtifact(b, core_integration_timed_test);
+    wireLeanKernelTestInputs(core_integration_timed_run, staged_lean_kernels);
     integration_times_step.dependOn(&core_integration_timed_run.step);
 
     // ToolDispatcher metadata 验收(issue #5):直接消费 AgentCore 包装层

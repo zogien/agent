@@ -14,13 +14,13 @@
 const std = @import("std");
 const pfs = @import("platform").fs;
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 
-const SessionHost = cc.session_host.SessionHost;
-const HostedSession = cc.session_host.HostedSession;
-const EventJournal = cc.event_journal.EventJournal;
-const Phase = cc.session_host.Phase;
-const QueueWaiting = cc.session_host.QueueWaiting;
+const SessionHost = core.session_host.SessionHost;
+const HostedSession = core.session_host.HostedSession;
+const EventJournal = core.event_journal.EventJournal;
+const Phase = core.session_host.Phase;
+const QueueWaiting = core.session_host.QueueWaiting;
 
 const TOOLS = [_][]const u8{ "AskUserQuestion", "Write" };
 
@@ -53,10 +53,10 @@ fn mixedTurnSse(allocator: std.mem.Allocator, write_path: []const u8, read_path:
 }
 
 /// The directory `SessionHost` keeps Session `id` in.
-fn sessionDirOf(a: std.mem.Allocator, config: cc.agent_session.SessionConfig, id: cc.session_id.SessionId) ![]u8 {
-    var policy = try cc.workspace_policy.WorkspacePolicy.init(a, config.workspace);
+fn sessionDirOf(a: std.mem.Allocator, config: core.agent_session.SessionConfig, id: core.session_id.SessionId) ![]u8 {
+    var policy = try core.workspace_policy.WorkspacePolicy.init(a, config.workspace);
     defer policy.deinit();
-    return cc.transcript.sessionDir(a, policy.stateRoot(), policy.root, id);
+    return core.transcript.sessionDir(a, policy.stateRoot(), policy.root, id);
 }
 
 fn readFileIn(a: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
@@ -155,7 +155,7 @@ fn lineWith(journal: *EventJournal, needle: []const u8) ![]u8 {
     return error.NoSuchLine;
 }
 
-fn baseConfig(url: []const u8, workspace: []const u8, home: []const u8) cc.agent_session.SessionConfig {
+fn baseConfig(url: []const u8, workspace: []const u8, home: []const u8) core.agent_session.SessionConfig {
     return .{
         .provider_kind = .anthropic,
         .api_key = "test-key",
@@ -208,13 +208,13 @@ test "L2 #446 SessionHost suspend mode: a question open across a restart is answ
     const url = try server.urlOwned(a);
     defer a.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
     var config = baseConfig(url, dirs.workspace, dirs.home);
     config.permission_mode = .accept_edits;
 
     // Process 1: the question suspends its Run; nothing holds the driver.
-    var id: cc.session_id.SessionId = undefined;
+    var id: core.session_id.SessionId = undefined;
     const announcement = blk: {
         var host = SessionHost.init(a, runtime, .{ .ui_request_wait = .@"suspend", .max_turns = 1 });
         defer host.deinit();
@@ -281,7 +281,7 @@ test "L2 #446 SessionHost: work submitted while a request is open waits behind i
     var dirs: Dirs = undefined;
     try dirs.init();
     defer dirs.tmp.cleanup();
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
 
     // A blocking permission request (the default).
@@ -365,7 +365,7 @@ test "L2 #446 SessionHost suspend mode: a permission request still blocks and is
     defer server.stop();
     const url = try server.urlOwned(a);
     defer a.free(url);
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
     var host = SessionHost.init(a, runtime, .{ .ui_request_wait = .@"suspend" });
     defer host.deinit();
@@ -379,7 +379,7 @@ test "L2 #446 SessionHost suspend mode: a permission request still blocks and is
     try expectSnapshot(hosted, .running, 1, 0, .none);
     var snapshot = try hosted.snapshot(a);
     defer snapshot.deinit(a);
-    try std.testing.expectEqual(cc.session_host.UiRequestWait.@"suspend", snapshot.ui_request_wait);
+    try std.testing.expectEqual(core.session_host.UiRequestWait.@"suspend", snapshot.ui_request_wait);
     try std.testing.expectEqual(@as(usize, 0), try countLines(&hosted.journal, "\"type\":\"ui_request_closed\""));
     try std.testing.expectEqual(@as(usize, 0), try countLines(&hosted.journal, "\"type\":\"run_done\""));
     try std.testing.expect(!try exists(dirs.workspace, "approved.txt"));
@@ -400,7 +400,7 @@ test "L2 #446 SessionHost expiry: interrupt stops the Run, re_announce repeats t
     var dirs: Dirs = undefined;
     try dirs.init();
     defer dirs.tmp.cleanup();
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
 
     // `.interrupt`: the unanswered prompt is cancelled and the Run stops there.
@@ -422,7 +422,7 @@ test "L2 #446 SessionHost expiry: interrupt stops the Run, re_announce repeats t
         defer host.release(hosted);
         var snapshot = try hosted.snapshot(a);
         defer snapshot.deinit(a);
-        try std.testing.expectEqual(cc.session_host.UiRequestExpiry.interrupt, snapshot.ui_request_expiry);
+        try std.testing.expectEqual(core.session_host.UiRequestExpiry.interrupt, snapshot.ui_request_expiry);
         try std.testing.expectEqual(@as(?u64, 100), snapshot.ui_request_timeout_ms);
 
         try hosted.submit(.{ .text = "write it" });
@@ -553,7 +553,7 @@ test "L2 #446 SessionHost suspend mode: an interrupt cancels the suspended quest
     defer server.stop();
     const url = try server.urlOwned(a);
     defer a.free(url);
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
     var host = SessionHost.init(a, runtime, .{ .ui_request_wait = .@"suspend" });
     defer host.deinit();
@@ -562,7 +562,7 @@ test "L2 #446 SessionHost suspend mode: an interrupt cancels the suspended quest
 
     try hosted.submit(.{ .text = "ask me" });
     try waitFor(&hosted.journal, "\"stop_reason\":\"suspended\"", 1);
-    try std.testing.expectEqual(cc.session_host.InterruptOutcome.requested, hosted.interrupt());
+    try std.testing.expectEqual(core.session_host.InterruptOutcome.requested, hosted.interrupt());
     try waitFor(&hosted.journal, "\"type\":\"run_done\"", 2);
     try std.testing.expectEqual(@as(usize, 1), try countLines(&hosted.journal, "{\"v\":1,\"type\":\"ui_request_closed\",\"id\":1,\"outcome\":\"cancelled\"}"));
     try std.testing.expectEqual(@as(usize, 1), try countLines(&hosted.journal, "\"run_id\":2,\"trace_id\":null,\"stop_reason\":\"aborted\""));
@@ -602,11 +602,11 @@ test "L2 #446 SessionHost suspend mode: a second answer is AlreadyAnswered, a la
     defer server.stop();
     const url = try server.urlOwned(a);
     defer a.free(url);
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
     const config = baseConfig(url, dirs.workspace, dirs.home);
 
-    var id: cc.session_id.SessionId = undefined;
+    var id: core.session_id.SessionId = undefined;
     {
         var host = SessionHost.init(a, runtime, .{ .ui_request_wait = .@"suspend" });
         defer host.deinit();
@@ -618,8 +618,8 @@ test "L2 #446 SessionHost suspend mode: a second answer is AlreadyAnswered, a la
 
         SecondAnswer.refused = null;
         SecondAnswer.ran = false;
-        cc.session_host.testing_hooks.before_resumption = SecondAnswer.tryAgain;
-        defer cc.session_host.testing_hooks.before_resumption = null;
+        core.session_host.testing_hooks.before_resumption = SecondAnswer.tryAgain;
+        defer core.session_host.testing_hooks.before_resumption = null;
         try hosted.respond(1, "{\"answers\":[\"Ship\"],\"by\":\"alice\"}");
         try waitFor(&hosted.journal, "\"type\":\"run_done\"", 2);
         try std.testing.expect(SecondAnswer.ran);
@@ -669,7 +669,7 @@ test "L2 #446 SessionHost: a question cancelled by its expiry fails its call, no
     defer server.stop();
     const url = try server.urlOwned(a);
     defer a.free(url);
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
     // The defaults but for a timeout: the question blocks, then is cancelled.
     var host = SessionHost.init(a, runtime, .{ .transcripts = false, .ui_request_timeout_ms = 100 });
@@ -732,7 +732,7 @@ test "L2 #446 SessionHost suspend mode: a suspended team lead runs nothing and l
     const member_url = try member_srv.urlOwned(a);
     defer a.free(member_url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{"AskUserQuestion"}, .enable_teams = true });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{"AskUserQuestion"}, .enable_teams = true });
     defer runtime.destroy() catch unreachable;
     var host = SessionHost.init(a, runtime, .{ .ui_request_wait = .@"suspend" });
     defer host.deinit();
@@ -754,7 +754,7 @@ test "L2 #446 SessionHost suspend mode: a suspended team lead runs nothing and l
     member_config.allowed_tools = &.{"SendMessage"};
     member_config.permission_mode = .bypass_permissions;
     member_config.workspace = lead_config.workspace;
-    const lease = cc.session_id.gen();
+    const lease = core.session_id.gen();
     member_config.team = .{
         .role = .member,
         .team_name = "crew",
@@ -770,7 +770,7 @@ test "L2 #446 SessionHost suspend mode: a suspended team lead runs nothing and l
 
     // Several poll periods pass: the suspended lead starts nothing, and its
     // inbox is not read (read mail would have been queued as a submission).
-    std.Io.sleep(std.testing.io, .fromMilliseconds(3 * cc.session_host.lead_inbox_poll_ms), .awake) catch {};
+    std.Io.sleep(std.testing.io, .fromMilliseconds(3 * core.session_host.lead_inbox_poll_ms), .awake) catch {};
     try expectSnapshot(lead, .suspended, 1, 1, .ui_request);
     try std.testing.expectEqual(@as(usize, 2), try countLines(&lead.journal, "\"type\":\"user_message\""));
     try std.testing.expectEqual(@as(usize, 0), try countLines(&lead.journal, "done: 42"));
@@ -789,7 +789,7 @@ test "L2 #446 SessionHost suspend mode: a suspended team lead runs nothing and l
     try std.testing.expectEqual(@as(usize, 6), lead_srv.requestCount());
     const request = lead_srv.requestAt(5).?;
     try std.testing.expect(std.mem.indexOf(u8, request.body(), "done: 42") != null);
-    std.Io.sleep(std.testing.io, .fromMilliseconds(3 * cc.session_host.lead_inbox_poll_ms), .awake) catch {};
+    std.Io.sleep(std.testing.io, .fromMilliseconds(3 * core.session_host.lead_inbox_poll_ms), .awake) catch {};
     try std.testing.expectEqual(@as(usize, 1), try countLines(&lead.journal, "done: 42"));
 }
 
@@ -813,14 +813,14 @@ test "L2 #446 SessionHost suspend mode: a question asked beside other calls; acr
     defer a.free(url);
 
     const tools = [_][]const u8{ "AskUserQuestion", "Write", "Read" };
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &tools });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &tools });
     defer runtime.destroy() catch unreachable;
     var config = baseConfig(url, dirs.workspace, dirs.home);
     config.allowed_tools = &tools;
     // The Write runs (in the workspace); the Read is denied by a rule.
     config.permission_mode = .accept_edits;
 
-    var id: cc.session_id.SessionId = undefined;
+    var id: core.session_id.SessionId = undefined;
     {
         var host = SessionHost.init(a, runtime, .{ .ui_request_wait = .@"suspend" });
         defer host.deinit();
@@ -842,7 +842,7 @@ test "L2 #446 SessionHost suspend mode: a question asked beside other calls; acr
     {
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
-        const state = (try cc.ui_request_store.load(arena.allocator(), dir)).?;
+        const state = (try core.ui_request_store.load(arena.allocator(), dir)).?;
         const held = state.suspended.?;
         try std.testing.expectEqualStrings("tu_q", held.tool_use_id);
         try std.testing.expectEqual(@as(usize, 2), held.completed.len);
@@ -895,11 +895,11 @@ test "L2 #446 SessionHost suspend mode: the transcript is the witness; a recorde
     defer server.stop();
     const url = try server.urlOwned(a);
     defer a.free(url);
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
     const config = baseConfig(url, dirs.workspace, dirs.home);
 
-    var id: cc.session_id.SessionId = undefined;
+    var id: core.session_id.SessionId = undefined;
     {
         var host = SessionHost.init(a, runtime, .{ .ui_request_wait = .@"suspend" });
         defer host.deinit();
@@ -913,11 +913,11 @@ test "L2 #446 SessionHost suspend mode: the transcript is the witness; a recorde
     defer a.free(dir);
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
-    var state = (try cc.ui_request_store.load(arena.allocator(), dir)).?;
+    var state = (try core.ui_request_store.load(arena.allocator(), dir)).?;
     // What the disk holds when the answer was recorded and the process
     // stopped before the resumed Run was written.
     state.suspended.?.settled = .{ .outcome = .answered, .answer = "{\"answers\":[\"Wait\"]}", .by = "carol" };
-    try cc.ui_request_store.store(a, dir, state);
+    try core.ui_request_store.store(a, dir, state);
 
     // The next open applies it, once.
     {
@@ -933,12 +933,12 @@ test "L2 #446 SessionHost suspend mode: the transcript is the witness; a recorde
     try std.testing.expectEqual(@as(usize, 2), server.requestCount());
     const resumed = (server.requestAt(1) orelse return error.NoRequestCaptured).body();
     try std.testing.expect(std.mem.indexOf(u8, resumed, "{\\\"answers\\\":[\\\"Wait\\\"]}") != null);
-    try std.testing.expect((try cc.ui_request_store.load(arena.allocator(), dir)).?.suspended == null);
+    try std.testing.expect((try core.ui_request_store.load(arena.allocator(), dir)).?.suspended == null);
 
     // What the disk holds when the resumed Run was written and the process
     // stopped before the record was cleared: the transcript already has the
     // call's result, so the next open only drops the record.
-    try cc.ui_request_store.store(a, dir, state);
+    try core.ui_request_store.store(a, dir, state);
     {
         var host = SessionHost.init(a, runtime, .{ .ui_request_wait = .@"suspend" });
         defer host.deinit();
@@ -951,7 +951,7 @@ test "L2 #446 SessionHost suspend mode: the transcript is the witness; a recorde
         try std.testing.expectError(error.NoSuchRequest, hosted.respond(1, "{\"answers\":[\"Wait\"]}"));
     }
     try std.testing.expectEqual(@as(usize, 2), server.requestCount());
-    try std.testing.expect((try cc.ui_request_store.load(arena.allocator(), dir)).?.suspended == null);
+    try std.testing.expect((try core.ui_request_store.load(arena.allocator(), dir)).?.suspended == null);
     const transcript = try readFileIn(a, dir, "transcript.jsonl");
     defer a.free(transcript);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, transcript, "\"tool_use_id\":\"tu_q\""));
@@ -987,7 +987,7 @@ test "L2 #446 SessionHost suspend mode: an answer that arrives while the suspens
     defer server.stop();
     const url = try server.urlOwned(a);
     defer a.free(url);
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
     var host = SessionHost.init(a, runtime, .{ .ui_request_wait = .@"suspend" });
     defer host.deinit();
@@ -996,8 +996,8 @@ test "L2 #446 SessionHost suspend mode: an answer that arrives while the suspens
 
     Handover.ran = false;
     Handover.refused = null;
-    cc.session_host.testing_hooks.before_handover = Handover.answer;
-    defer cc.session_host.testing_hooks.before_handover = null;
+    core.session_host.testing_hooks.before_handover = Handover.answer;
+    defer core.session_host.testing_hooks.before_handover = null;
     try hosted.submit(.{ .text = "ask me" });
     // The answer given in the window resumes the Run, by itself.
     try waitFor(&hosted.journal, "\"type\":\"run_done\"", 2);
@@ -1005,7 +1005,7 @@ test "L2 #446 SessionHost suspend mode: an answer that arrives while the suspens
     try std.testing.expect(Handover.refused == null);
     try std.testing.expectEqual(@as(usize, 1), try countLines(&hosted.journal, "{\"v\":1,\"type\":\"ui_request_closed\",\"id\":1,\"outcome\":\"answered\",\"by\":\"bot\"}"));
     try std.testing.expectEqual(@as(usize, 1), try countLines(&hosted.journal, "\"run_id\":2,\"trace_id\":null,\"stop_reason\":\"end_turn\""));
-    cc.session_host.testing_hooks.before_handover = null;
+    core.session_host.testing_hooks.before_handover = null;
 
     // The next request, a permission, waits for its own answer.
     try hosted.submit(.{ .text = "write it" });
@@ -1046,14 +1046,14 @@ test "L2 #446 SessionHost suspend mode: with a background job running, the suspe
     const url = try server.urlOwned(a);
     defer a.free(url);
     const tools = [_][]const u8{ "AskUserQuestion", "Bash" };
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &tools });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &tools });
     defer runtime.destroy() catch unreachable;
     var config = baseConfig(url, dirs.workspace, dirs.home);
     config.allowed_tools = &tools;
     config.permission_mode = .bypass_permissions;
     config.workspace.shell = .unrestricted;
 
-    var id: cc.session_id.SessionId = undefined;
+    var id: core.session_id.SessionId = undefined;
     var dir: []u8 = &.{};
     defer a.free(dir);
     {
@@ -1072,7 +1072,7 @@ test "L2 #446 SessionHost suspend mode: with a background job running, the suspe
         {
             var arena = std.heap.ArenaAllocator.init(a);
             defer arena.deinit();
-            const held = (try cc.ui_request_store.load(arena.allocator(), dir)).?.suspended.?;
+            const held = (try core.ui_request_store.load(arena.allocator(), dir)).?.suspended.?;
             try std.testing.expectEqualStrings("AskUserQuestion", held.tool_name);
             try std.testing.expectEqual(@as(usize, 1), held.completed.len);
             try std.testing.expectEqualStrings("tu_b", held.completed[0].tool_use_id);
@@ -1091,7 +1091,7 @@ test "L2 #446 SessionHost suspend mode: with a background job running, the suspe
         try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, transcript, "\"tool_use_id\":\"tu_q\""));
         var arena = std.heap.ArenaAllocator.init(a);
         defer arena.deinit();
-        try std.testing.expect((try cc.ui_request_store.load(arena.allocator(), dir)).?.suspended == null);
+        try std.testing.expect((try core.ui_request_store.load(arena.allocator(), dir)).?.suspended == null);
     }
 
     // Closed and opened again: nothing to resume, nothing run twice.
@@ -1120,11 +1120,11 @@ test "L2 #446 SessionHost suspend mode: a request file this version cannot read 
     defer server.stop();
     const url = try server.urlOwned(a);
     defer a.free(url);
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
     const config = baseConfig(url, dirs.workspace, dirs.home);
 
-    var id: cc.session_id.SessionId = undefined;
+    var id: core.session_id.SessionId = undefined;
     {
         var host = SessionHost.init(a, runtime, .{ .ui_request_wait = .@"suspend" });
         defer host.deinit();
@@ -1138,7 +1138,7 @@ test "L2 #446 SessionHost suspend mode: a request file this version cannot read 
     const unknown = "{\"v\":1,\"next_id\":7,\"suspended\":{\"kind\":\"permission\",\"id\":6,\"announcement\":\"\",\"tool_use_id\":\"tu_p\",\"tool_name\":\"Write\",\"max_turns\":4}}";
     {
         var file_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const target = try std.fmt.bufPrint(&file_buf, "{s}/" ++ cc.ui_request_store.FILE_NAME, .{dir});
+        const target = try std.fmt.bufPrint(&file_buf, "{s}/" ++ core.ui_request_store.FILE_NAME, .{dir});
         try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = target, .data = unknown });
     }
     // Twice, as two processes would: neither starts its ids again, nor
@@ -1161,7 +1161,7 @@ test "L2 #446 SessionHost suspend mode: a request file this version cannot read 
         try hosted.respond(request_id, "{\"answers\":[\"Ship\"]}");
         try waitFor(&hosted.journal, "\"type\":\"run_done\"", 1);
         try std.testing.expectEqual(@as(usize, 0), try countLines(&hosted.journal, "\"stop_reason\":\"suspended\""));
-        const kept = try readFileIn(a, dir, cc.ui_request_store.FILE_NAME);
+        const kept = try readFileIn(a, dir, core.ui_request_store.FILE_NAME);
         defer a.free(kept);
         try std.testing.expectEqualStrings(unknown, kept);
     }
@@ -1169,7 +1169,7 @@ test "L2 #446 SessionHost suspend mode: a request file this version cannot read 
     // A field this version does not know, beside ones it does: still read.
     {
         var file_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const target = try std.fmt.bufPrint(&file_buf, "{s}/" ++ cc.ui_request_store.FILE_NAME, .{dir});
+        const target = try std.fmt.bufPrint(&file_buf, "{s}/" ++ core.ui_request_store.FILE_NAME, .{dir});
         try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = target, .data = "{\"v\":1,\"next_id\":9,\"later\":true,\"suspended\":null}" });
     }
     {
@@ -1195,7 +1195,7 @@ test "L2 #446 SessionHost suspend mode: the idempotency key of a suspended Run d
     defer server.stop();
     const url = try server.urlOwned(a);
     defer a.free(url);
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
     // Keys expire at once: only the suspension can keep this one.
     var host = SessionHost.init(a, runtime, .{ .ui_request_wait = .@"suspend", .idempotency_retention_ms = 0 });
@@ -1220,9 +1220,9 @@ test "L2 #446 SessionHost: re_announce needs a period; a zero timeout is refused
     var dirs: Dirs = undefined;
     try dirs.init();
     defer dirs.tmp.cleanup();
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
-    for ([_]cc.session_host.UiRequestWait{ .block, .@"suspend" }) |wait| {
+    for ([_]core.session_host.UiRequestWait{ .block, .@"suspend" }) |wait| {
         var host = SessionHost.init(a, runtime, .{ .ui_request_wait = wait, .ui_request_timeout_ms = 0, .ui_request_expiry = .re_announce });
         defer host.deinit();
         try std.testing.expectError(error.InvalidUiRequestTimeout, host.open(.{ .config = baseConfig("http://127.0.0.1:9", dirs.workspace, dirs.home) }));
@@ -1239,7 +1239,7 @@ test "L2 #446 SessionHost: an unreadable answer closes malformed under its appro
     var dirs: Dirs = undefined;
     try dirs.init();
     defer dirs.tmp.cleanup();
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
 
     // Blocking: a permission prompt's unreadable answer grants nothing, and
@@ -1301,7 +1301,7 @@ test "L2 #446 SessionHost expiry: a permission prompt the interrupt expiry ends 
     var dirs: Dirs = undefined;
     try dirs.init();
     defer dirs.tmp.cleanup();
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &TOOLS });
     defer runtime.destroy() catch unreachable;
     const path = try std.fmt.allocPrint(a, "{s}/expired.txt", .{dirs.workspace});
     defer a.free(path);

@@ -19,11 +19,11 @@
 const std = @import("std");
 const pfs = @import("platform").fs;
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 
-const SessionHost = cc.session_host.SessionHost;
-const Submission = cc.session_host.Submission;
-const EventJournal = cc.event_journal.EventJournal;
+const SessionHost = core.session_host.SessionHost;
+const Submission = core.session_host.Submission;
+const EventJournal = core.event_journal.EventJournal;
 
 fn textSse(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_t\",\"role\":\"assistant\",\"model\":\"x\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}}}\n\n" ++
@@ -95,7 +95,7 @@ fn countLines(journal: *EventJournal, needle: []const u8) !usize {
     return seen;
 }
 
-fn baseConfig(url: []const u8, workspace: []const u8, home: []const u8) cc.agent_session.SessionConfig {
+fn baseConfig(url: []const u8, workspace: []const u8, home: []const u8) core.agent_session.SessionConfig {
     return .{
         .provider_kind = .anthropic,
         .api_key = "test-key",
@@ -147,7 +147,7 @@ test "L2 #447 SessionHost: one idempotency key is one Run while queued, running 
     const url = try server.urlOwned(a);
     defer a.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
     defer runtime.destroy() catch unreachable;
     var host = SessionHost.init(a, runtime, .{});
     defer host.deinit();
@@ -217,11 +217,11 @@ test "L2 #447 SessionHost: after a restart that resumes the Session a started ke
     const url = try server.urlOwned(a);
     defer a.free(url);
     const config = baseConfig(url, dirs.workspace, dirs.home);
-    const id = cc.session_id.gen();
+    const id = core.session_id.gen();
     const dropped = Submission{ .text = "reading 43", .kind = "telemetry", .idempotency_key = "hr-01:seq-43" };
 
     {
-        const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
+        const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
         defer runtime.destroy() catch unreachable;
         var host = SessionHost.init(a, runtime, .{});
         const hosted = try host.open(.{ .config = config, .id = id });
@@ -240,7 +240,7 @@ test "L2 #447 SessionHost: after a restart that resumes the Session a started ke
     }
 
     // A new Host, as after a process restart, resumes the Session.
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
     defer runtime.destroy() catch unreachable;
     var host = SessionHost.init(a, runtime, .{});
     defer host.deinit();
@@ -279,7 +279,7 @@ test "L2 #447 SessionHost: a full queue refuses with QueueFull and holds nothing
     const url = try server.urlOwned(a);
     defer a.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
     defer runtime.destroy() catch unreachable;
     var host = SessionHost.init(a, runtime, .{ .max_queued = 2, .transcripts = false });
     defer host.deinit();
@@ -330,12 +330,12 @@ test "L2 #447 SessionHost: source, kind, key and attributes leave the provider's
     const url = try server.urlOwned(a);
     defer a.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
     defer runtime.destroy() catch unreachable;
     var host = SessionHost.init(a, runtime, .{ .transcripts = false });
     defer host.deinit();
     const config = baseConfig(url, dirs.workspace, dirs.home);
-    const id = cc.session_id.gen();
+    const id = core.session_id.gen();
 
     // The same fresh conversation under the same id, once with the text
     // alone and once typed: the provider receives the same bytes.
@@ -379,7 +379,7 @@ test "L2 #447 SessionHost options: the retention window and the key bound forget
     const url = try server.urlOwned(a);
     defer a.free(url);
     const config = baseConfig(url, dirs.workspace, dirs.home);
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
     defer runtime.destroy() catch unreachable;
     const k1 = Submission{ .text = "reading 1", .idempotency_key = "seq-1" };
     const k2 = Submission{ .text = "reading 2", .idempotency_key = "seq-2" };
@@ -426,7 +426,7 @@ test "L2 #447 SessionHost: a key the Host cannot record fails its Run before any
     const url = try server.urlOwned(a);
     defer a.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
     defer runtime.destroy() catch unreachable;
     var host = SessionHost.init(a, runtime, .{});
     defer host.deinit();
