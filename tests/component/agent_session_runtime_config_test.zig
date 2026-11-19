@@ -15,7 +15,7 @@
 const std = @import("std");
 const pfs = @import("platform").fs;
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 
 const FINAL_SSE =
     "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_final\",\"role\":\"assistant\",\"model\":\"x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n" ++
@@ -40,11 +40,11 @@ const DenyAll = struct {
 
     fn request(
         raw: *anyopaque,
-        _: cc.session_id.SessionId,
+        _: core.session_id.SessionId,
         _: std.mem.Allocator,
-        req: *const cc.ui_request.UiRequest,
-        out: *cc.ui_request.UiResponse,
-    ) anyerror!cc.ui_request.RequestOutcome {
+        req: *const core.protocol.ui_request.UiRequest,
+        out: *core.protocol.ui_request.UiResponse,
+    ) anyerror!core.protocol.ui_request.RequestOutcome {
         const self: *DenyAll = @ptrCast(@alignCast(raw));
         switch (req.*) {
             .permission => {
@@ -56,13 +56,13 @@ const DenyAll = struct {
         }
     }
 
-    fn requester(self: *DenyAll) cc.agent_session.UiRequester {
+    fn requester(self: *DenyAll) core.agent_session.UiRequester {
         return .{ .ctx = self, .requestFn = request };
     }
 };
 
 const Sink = struct {
-    fn emit(_: *anyopaque, _: cc.session_id.SessionId, _: u64, _: cc.ui_event.CoreEvent) bool {
+    fn emit(_: *anyopaque, _: core.session_id.SessionId, _: u64, _: core.protocol.ui_event.CoreEvent) bool {
         return true;
     }
 };
@@ -117,7 +117,7 @@ test "L2 AgentSession additional directories widen accept_edits and are replaced
     const url = try server.urlOwned(a);
     defer a.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{"Write"} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{"Write"} });
     defer runtime.destroy() catch unreachable;
     var ui = DenyAll{};
     const session = try runtime.createSession(.{
@@ -132,7 +132,7 @@ test "L2 AgentSession additional directories widen accept_edits and are replaced
     });
     defer session.destroy() catch unreachable;
     var sink_state: u8 = 0;
-    const sink: cc.agent_session.EventSink = .{ .ctx = &sink_state, .emit = Sink.emit };
+    const sink: core.agent_session.EventSink = .{ .ctx = &sink_state, .emit = Sink.emit };
 
     // Inside the additional directory: auto-approved like the root.
     _ = try session.runText(1, "write into extra", 4, sink);
@@ -175,7 +175,7 @@ test "L2 AgentSession reasoning effort reaches the request, survives setModel an
     const url = try server.urlOwned(a);
     defer a.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
     defer runtime.destroy() catch unreachable;
     const session = try runtime.createSession(.{
         .provider_kind = .anthropic,
@@ -188,7 +188,7 @@ test "L2 AgentSession reasoning effort reaches the request, survives setModel an
     });
     defer session.destroy() catch unreachable;
     var sink_state: u8 = 0;
-    const sink: cc.agent_session.EventSink = .{ .ctx = &sink_state, .emit = Sink.emit };
+    const sink: core.agent_session.EventSink = .{ .ctx = &sink_state, .emit = Sink.emit };
 
     _ = try session.runText(1, "one", 4, sink);
     try std.testing.expect(std.mem.indexOf(u8, try lastBody(server), "\"output_config\":{\"effort\":\"high\"}") != null);
@@ -216,7 +216,7 @@ test "L2 AgentSession refuses a reasoning effort its provider cannot carry" {
     var workspace_buf: [std.fs.max_path_bytes]u8 = undefined;
     const workspace = try subdir(&tmp, "workspace", &workspace_buf);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{} });
     defer runtime.destroy() catch unreachable;
     try std.testing.expectError(error.AgentEffortUnsupportedProvider, runtime.createSession(.{
         .provider_kind = .gemini,
@@ -239,7 +239,7 @@ fn bashToolSse(allocator: std.mem.Allocator, command: []const u8) ![]u8 {
 }
 
 test "L2 AgentSession sandboxed shell may write in an additional directory and nowhere beside it" {
-    if (!cc.sandbox_exec.hostSupported()) return error.SkipZigTest; // needs a real sandbox
+    if (!core.sandbox_exec.hostSupported()) return error.SkipZigTest; // needs a real sandbox
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -264,7 +264,7 @@ test "L2 AgentSession sandboxed shell may write in an additional directory and n
     const url = try server.urlOwned(a);
     defer a.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{"Bash"} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{"Bash"} });
     defer runtime.destroy() catch unreachable;
     const session = try runtime.createSession(.{
         .provider_kind = .anthropic,

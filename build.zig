@@ -3221,18 +3221,15 @@ pub fn build(b: *std.Build) void {
     integration_test_step.dependOn(spike_step);
 
     // test:new —— 只跑本次 e2e 框架新增的 L2 component 测试(隔离运行,绕开主套件已知
-    // 的 integration 挂起)。每个文件独立 artifact,带 cc + harness imports。
+    // 的 integration 挂起)。每个文件独立 artifact,使用所属套件的实现入口。
     const new_step = b.step("test:new", "Run only the new e2e-framework L2 component tests");
     const new_files = [_][]const u8{
         "tests/component/user_context_inject_test.zig",
         "tests/component/subagent_agentdef_fields_test.zig",
-        "tests/component/agent_session_tools_test.zig",
         "tests/component/sealed_publication_test.zig",
         "tests/component/recovery_allowance_test.zig",
-        "tests/component/agent_session_host_tools_test.zig",
         "tests/component/plugin_runtime_test.zig",
         "tests/component/plugin_process_test.zig",
-        "tests/component/agent_session_ui_test.zig",
         "tests/component/http_error_test.zig",
         "tests/component/answer_queue_test.zig",
         "tests/component/base_url_flag_test.zig",
@@ -3285,22 +3282,37 @@ pub fn build(b: *std.Build) void {
         "tests/component/add_dir_test.zig",
         "tests/component/dialect_matrix_test.zig",
     };
-    for (new_files) |f| {
-        const m = b.createModule(.{
-            .root_source_file = b.path(f),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        m.addImport("harness", test_harness_mod); // 共享模块(见 integ 循环前注释:perf)
-        m.addImport("cc", test_cc_mod);
-        addPlatform(b, m); // 测试文件用 platform 的可移植 env/net 封装(setEnv、clientRoundtrip)
-        const t = b.addTest(.{
-            .name = "new-l2",
-            .root_module = m,
-            .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
-        });
-        new_step.dependOn(&addTestRunArtifact(b, t).step);
+    const new_core_files = [_][]const u8{
+        "tests/component/agent_session_tools_test.zig",
+        "tests/component/agent_session_host_tools_test.zig",
+        "tests/component/agent_session_ui_test.zig",
+    };
+    const new_test_groups = [_]struct {
+        files: []const []const u8,
+        import_name: []const u8,
+        implementation: *std.Build.Module,
+    }{
+        .{ .files = &new_files, .import_name = "cc", .implementation = test_cc_mod },
+        .{ .files = &new_core_files, .import_name = "metacodes-core", .implementation = core_mod },
+    };
+    for (new_test_groups) |group| {
+        for (group.files) |f| {
+            const m = b.createModule(.{
+                .root_source_file = b.path(f),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            m.addImport("harness", test_harness_mod); // 共享模块(见 integ 循环前注释:perf)
+            m.addImport(group.import_name, group.implementation);
+            addPlatform(b, m); // 测试文件用 platform 的可移植 env/net 封装(setEnv、clientRoundtrip)
+            const t = b.addTest(.{
+                .name = "new-l2",
+                .root_module = m,
+                .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
+            });
+            new_step.dependOn(&addTestRunArtifact(b, t).step);
+        }
     }
 
     // 五个 AgentDef 运行字段的聚焦门；开发时无需编译整套 component artifacts。

@@ -10,6 +10,12 @@ test {
         _ = @import("component/session_host_test.zig");
         _ = @import("component/session_host_requests_test.zig");
         _ = @import("component/session_host_submission_test.zig");
+        _ = @import("component/agent_session_tools_test.zig");
+        _ = @import("component/agent_session_team_test.zig");
+        _ = @import("component/agent_session_host_tools_test.zig");
+        _ = @import("component/agent_session_ui_test.zig");
+        _ = @import("component/agent_session_transcript_resume_test.zig");
+        _ = @import("component/agent_session_runtime_config_test.zig");
     } else {
         cliTests();
     }
@@ -40,16 +46,10 @@ fn cliTests() void {
     _ = @import("component/subagent_agentdef_fields_test.zig");
     _ = @import("component/web_search_test.zig");
     _ = @import("component/allowed_tools_test.zig");
-    _ = @import("component/agent_session_tools_test.zig");
-    _ = @import("component/agent_session_team_test.zig");
     _ = @import("component/recovery_allowance_test.zig");
-    _ = @import("component/agent_session_host_tools_test.zig");
     _ = @import("component/plugin_runtime_test.zig");
     _ = @import("component/plugin_process_test.zig");
-    _ = @import("component/agent_session_ui_test.zig");
     _ = @import("component/agent_session_permission_scope_test.zig");
-    _ = @import("component/agent_session_transcript_resume_test.zig");
-    _ = @import("component/agent_session_runtime_config_test.zig");
     _ = @import("component/agent_session_credential_test.zig");
     _ = @import("component/skill_fork_test.zig");
     _ = @import("component/sealed_skill_test.zig");

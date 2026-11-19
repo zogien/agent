@@ -5,7 +5,7 @@
 const std = @import("std");
 const pfs = @import("platform").fs;
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 
 const FINAL_SSE =
     "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_2\",\"role\":\"assistant\",\"model\":\"x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n" ++
@@ -35,15 +35,15 @@ fn writeToolSse(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 const UiProbe = struct {
     asks: usize = 0,
     permissions: usize = 0,
-    session_id: cc.session_id.SessionId = .single,
+    session_id: core.session_id.SessionId = .single,
 
     fn request(
         raw: *anyopaque,
-        session_id: cc.session_id.SessionId,
+        session_id: core.session_id.SessionId,
         allocator: std.mem.Allocator,
-        req: *const cc.ui_request.UiRequest,
-        out: *cc.ui_request.UiResponse,
-    ) anyerror!cc.ui_request.RequestOutcome {
+        req: *const core.protocol.ui_request.UiRequest,
+        out: *core.protocol.ui_request.UiResponse,
+    ) anyerror!core.protocol.ui_request.RequestOutcome {
         const self: *UiProbe = @ptrCast(@alignCast(raw));
         self.session_id = session_id;
         switch (req.*) {
@@ -66,13 +66,13 @@ const UiProbe = struct {
         return .answered;
     }
 
-    fn requester(self: *UiProbe) cc.agent_session.UiRequester {
+    fn requester(self: *UiProbe) core.agent_session.UiRequester {
         return .{ .ctx = self, .requestFn = request };
     }
 };
 
 const Sink = struct {
-    fn emit(_: *anyopaque, _: cc.session_id.SessionId, _: u64, _: cc.ui_event.CoreEvent) bool {
+    fn emit(_: *anyopaque, _: core.session_id.SessionId, _: u64, _: core.protocol.ui_event.CoreEvent) bool {
         return true;
     }
 };
@@ -100,7 +100,7 @@ test "L2 AgentSession routes AskUserQuestion through the Host UiRequester" {
     defer a.free(url);
 
     var ui = UiProbe{};
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{"AskUserQuestion"} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{"AskUserQuestion"} });
     defer runtime.destroy() catch unreachable;
     const session = try runtime.createSession(.{
         .provider_kind = .anthropic,
@@ -116,7 +116,7 @@ test "L2 AgentSession routes AskUserQuestion through the Host UiRequester" {
 
     var sink_state: u8 = 0;
     const result = try session.runText(1, "ask me", 4, .{ .ctx = &sink_state, .emit = Sink.emit });
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, result.stop_reason);
     try std.testing.expectEqual(@as(usize, 1), ui.asks);
     try std.testing.expectEqualSlices(u8, session.session_id.asSlice(), ui.session_id.asSlice());
     const body = (server.lastRequest() orelse return error.NoRequestCaptured).body();
@@ -140,7 +140,7 @@ test "L2 AgentSession routes permission prompts through the same Host UiRequeste
     defer a.free(url);
 
     var ui = UiProbe{};
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{"Write"} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{"Write"} });
     defer runtime.destroy() catch unreachable;
     const session = try runtime.createSession(.{
         .provider_kind = .anthropic,
@@ -156,7 +156,7 @@ test "L2 AgentSession routes permission prompts through the same Host UiRequeste
 
     var sink_state: u8 = 0;
     const result = try session.runText(1, "use host write", 4, .{ .ctx = &sink_state, .emit = Sink.emit });
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, result.stop_reason);
     try std.testing.expectEqual(@as(usize, 1), ui.permissions);
     try std.testing.expect(pfs.exists(file_path.ptr));
 }
