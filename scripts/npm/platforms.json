@@ -1,0 +1,53 @@
+{
+  "scope": "@zogien",
+  "name": "agentcore",
+  "repository": "git+https://github.com/zogien/agentcore.git",
+  "homepage": "https://github.com/zogien/agentcore#readme",
+  "license": "MIT",
+  "platforms": [
+    {
+      "target": "x86_64-windows-msvc",
+      "suffix": "win32-x64",
+      "os": "win32",
+      "cpu": "x64",
+      "label": "Windows x64 (MSVC)"
+    },
+    {
+      "target": "aarch64-windows-msvc",
+      "suffix": "win32-arm64",
+      "os": "win32",
+      "cpu": "arm64",
+      "label": "Windows ARM64 (MSVC)"
+    },
+    {
+      "target": "aarch64-macos",
+      "suffix": "darwin-arm64",
+      "os": "darwin",
+      "cpu": "arm64",
+      "label": "macOS ARM64"
+    },
+    {
+      "target": "x86_64-macos",
+      "suffix": "darwin-x64",
+      "os": "darwin",
+      "cpu": "x64",
+      "label": "macOS x64"
+    },
+    {
+      "target": "x86_64-linux-gnu",
+      "suffix": "linux-x64-gnu",
+      "os": "linux",
+      "cpu": "x64",
+      "libc": "glibc",
+      "label": "Linux x64 (glibc)"
+    },
+    {
+      "target": "aarch64-linux-gnu",
+      "suffix": "linux-arm64-gnu",
+      "os": "linux",
+      "cpu": "arm64",
+      "libc": "glibc",
+      "label": "Linux ARM64 (glibc)"
+    }
+  ]
+}

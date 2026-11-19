@@ -63,3 +63,61 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: gh release create "$RELEASE_TAG" --verify-tag --notes "" dist/*
+
+  pack-npm:
+    name: Pack and verify AgentCore npm packages
+    needs: agentcore
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: agentcore-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/agentcore-archives
+      - name: Check npm release retry behavior
+        run: node --test scripts/npm/publish-release.test.mjs
+      - name: Pack and install-check the seven tarballs
+        run: >-
+          node scripts/npm/pack-release.mjs
+          "$RUNNER_TEMP/agentcore-archives" "$GITHUB_REF_NAME"
+          "$(git rev-parse HEAD)" "$RUNNER_TEMP/agentcore-npm"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-packages
+          path: ${{ runner.temp }}/agentcore-npm/
+          if-no-files-found: error
+
+  publish-npm:
+    name: Publish AgentCore npm packages
+    if: github.repository == 'zogien/agentcore'
+    needs: [publish, pack-npm]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: agentcore-npm-publish
+      queue: max
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-packages
+          path: ${{ runner.temp }}/agentcore-npm
+      - name: Publish platform packages, then the main package
+        run: >-
+          node scripts/npm/publish-release.mjs
+          "$RUNNER_TEMP/agentcore-npm" "$GITHUB_REF_NAME"
