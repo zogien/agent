@@ -1,13 +1,11 @@
-# Observability: OpenTelemetry traces and the web trace view
+# Observability: OpenTelemetry traces
 
 Every Run (one `agent_loop.run`: a user message and everything the agent does
 to answer it) is recorded as an OpenTelemetry span tree. The same spans go to
-three places:
+two places:
 
 - **The session's span store**, `<session dir>/spans.jsonl`: on by default,
   next to the transcript.
-- **The web trace view**: `GET /trace` on `--web` and `serve` shows the whole
-  conversation as a waterfall, from `GET /spans`.
 - **An OTLP/HTTP collector** (Jaeger, Tempo, Phoenix, Langfuse, an
   OpenTelemetry Collector...): when the standard `OTEL_*` variables configure
   one.
@@ -49,8 +47,8 @@ The signal-specific variable wins over the general one. `METACODES_LOG=otel:info
 logs where traces go; `otel:debug` logs every export.
 
 The exporter is one per process. It starts when the first session (App) is
-created and is flushed and stopped when the last one ends, so a headless
-`metacodes -p` and a daemon stopped with SIGINT exit with their spans sent. A
+created and is flushed and stopped when the last one ends, including a
+headless `metacodes -p` Run. A
 span is dropped, never waited for, when the queue is full; a collector that
 answers an error or does not answer within the deadline costs one batch, which
 is logged and dropped; nothing is retried.
@@ -106,32 +104,7 @@ cut to 16 KiB per attribute (on a UTF-8 boundary, marked `…[truncated]`).
 
 The session span store always keeps content, cut to 64 KiB per attribute: it
 lives beside the transcript, which holds the same content at the same trust
-level, and it is what the web trace view shows. `METACODES_SPANS=off` turns
-the store off (export is unaffected).
-
-## The web trace view
-
-`metacodes --web` and `metacodes serve` serve the trace view of the session at
-`GET /trace` (under `/s/<id>/` in the multi-session daemon); the chat page links
-to it (`trace ↗`). It shows:
-
-- the session's totals: runs, spans, wall time, tokens in, out and cached,
-  tool calls, errors;
-- every Run of the conversation on one time axis, then each Run as a waterfall:
-  the span tree with each span's bar, duration, token counts and tool
-  argument;
-- for a selected span, its input and output messages, tool arguments and
-  result, attributes and events.
-
-It polls `GET /spans` every 2 s, so a running Run fills in as its spans end.
-A resumed session shows its earlier Runs too: the store belongs to the session
-directory. `OTLP JSON` downloads the request the view is showing; any OTLP/HTTP
-JSON receiver accepts it as is.
-
-`GET /spans` answers one OTLP/JSON `ExportTraceServiceRequest` holding the
-store's spans in the order they ended (the newest 32 MiB of a larger store).
-Both routes go through the server's normal admission: with a token, open the
-page as `trace?token=<token>`.
+level. `METACODES_SPANS=off` turns the store off (export is unaffected).
 
 ## Not yet traced
 

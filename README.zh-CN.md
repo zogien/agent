@@ -15,7 +15,7 @@
 
 </div>
 
-metacodes 是用 Zig 从零写成的 coding agent harness。它今天就能当终端 agent 用，但它是按"库"来设计的：一个固定的 agent loop，权限、预算和形式化判定任何插件都绕不过去；外面包着几层让任何程序都能宿主它的接口：Zig 模块、C ABI（C、C++、Rust、Python、Node 以及任何带 FFI 的语言都能调用）、headless NDJSON、HTTP/UDS 守护进程和 Web UI。
+metacodes 是用 Zig 从零写成的 coding agent harness。它今天就能当终端 agent 用，但它是按"库"来设计的：一个固定的 agent loop，权限、预算和形式化判定任何插件都绕不过去；外面包着几层让任何程序都能宿主它的接口：Zig 模块、C ABI（C、C++、Rust、Python、Node 以及任何带 FFI 的语言都能调用）和 headless NDJSON。
 
 ## 为什么还要一个 harness
 
@@ -99,7 +99,6 @@ metacodes 吸收了 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-h
 | AgentCore C ABI v1 revision 28 | [sdk/](sdk/README.md) 自带 C、C++、Zig、Rust 绑定；JNA、.NET P/Invoke 等任何 FFI 都能直接加载共享库 |
 | Python 与 Node 包 | `import metacodes` / `require('metacodes')`：Runtime、Session、流式事件、用 Python 或 JavaScript 写工具（[sdk/python](sdk/python/README.md)、[sdk/node](sdk/node/README.md)；实验性） |
 | Headless `-p --json` / `--stream-json` | 任何能起子进程、能读 NDJSON 的语言 |
-| `serve` 守护进程（HTTP 与 UDS，多会话）和 `--web` | 服务端、桌面应用、远程 UI |
 
 宿主能拿到：
 
@@ -116,7 +115,7 @@ metacodes 吸收了 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-h
 
 - **宿主调度的团队（AgentCore）。** lead 会话只记录派生请求，每个成员会话在哪里跑由你的宿主决定。
 - **CLI swarm（`--agent-teams`）。** 队友以线程或 worktree 隔离的进程运行，通过文件邮箱通信，并以原子租约从共享的 TinyKG 任务 DAG 里认领工作。
-- **单元足够小。** `serve` 守护进程在一个进程里承载多个会话，并有活跃会话上限。一个忙碌的 headless agent 进程峰值约 23 MB，sealed gateway 在 64 个并发客户端下每步只增加 3 ms（中位数，p99 为 9 ms）。
+- **单元足够小。** 一个忙碌的 headless agent 进程峰值约 23 MB，sealed gateway 在 64 个并发客户端下每步只增加 3 ms（中位数，p99 为 9 ms）。
 - **字节稳定的 prompt。** 成千上万个并行运行持续命中 provider 的 prompt cache。
 
 ### TinyKG：agent 自己驾驭的图记忆
@@ -170,7 +169,6 @@ curl -fsSL https://raw.githubusercontent.com/metask-ai/metacodes/main/scripts/in
 metacodes login                            # 在浏览器里登录 Metask(TUI 里是 /login)
 metacodes                                  # 交互式 TUI
 metacodes -p "explain src/main.zig" --json # headless，输出一条 NDJSON 结果
-metacodes --web                            # 浏览器 UI，127.0.0.1:7777
 metacodes doctor                           # 查看每个运行时组件从哪里解析
 ```
 
@@ -192,7 +190,7 @@ zig build example                          # 在 Zig 程序里嵌入运行时
 
 ```mermaid
 flowchart TB
-    hosts["宿主：CLI / TUI · Web UI · 守护进程 · 你的应用（C ABI 或 Zig）"]
+    hosts["宿主：CLI / TUI · 你的应用（C ABI 或 Zig）"]
     runtime["不可变 Runtime 代（可热替换）"]
     subgraph kernel["固定内核"]
         loop["AgentLoop 与对话账本"]
@@ -215,7 +213,7 @@ metacodes 处于 1.0 之前，版本号以 `build.zig.zon` 为准，每个发布
 
 | 部分 | 状态 |
 |---|---|
-| CLI、headless、Web UI、守护进程 | 日常在用；1.0 前参数仍可能变化 |
+| CLI、headless | 日常在用；1.0 前参数仍可能变化 |
 | AgentCore C ABI | 实验性；宿主锁定精确的 revision |
 | `metacodes-core` Zig 模块 | 实验性源码 API |
 | TinyKG 记忆与任务 DAG | CLI 中默认开启；AgentCore 中尚未提供 |

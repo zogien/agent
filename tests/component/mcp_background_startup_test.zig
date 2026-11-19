@@ -293,8 +293,6 @@ test "only the interactive REPL defers the MCP join" {
     try std.testing.expectEqual(cc.types_mod.McpConnect.app_init, repl.mcp_connect);
     const others = [_][]const [*:0]const u8{
         &.{ "metacodes", "-p", "hi" },
-        &.{ "metacodes", "--web", "0" },
-        &.{ "metacodes", "serve", "0" },
         &.{ "metacodes", "--dump-prompt" },
         &.{ "metacodes", "--teammate", "--agent-name", "x", "--team-name", "t" },
     };

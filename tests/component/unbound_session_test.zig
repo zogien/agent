@@ -14,7 +14,7 @@
 //!   resolves to.
 //!
 //! Through the real CLI (`METACODES_TEST_CLI_BIN`): without a credential the
-//! uses nobody watches — `-p`, `serve`, `--web`, a REPL fed by a pipe — still
+//! uses nobody watches — `-p` and a REPL fed by a pipe — still
 //! stop at once, non-zero, with the sign-in hint and no request; so does an
 //! incomplete Metask sign-in under `-p`.
 
@@ -328,7 +328,7 @@ fn runCli(case: *Case, cli: []const u8, env: []const []const u8, args: []const [
     return .{ .exit_code = out.exit_code, .stderr = out.stderr };
 }
 
-test "unbound: without a credential -p, serve, --web and a piped REPL stop at once, non-zero, sending nothing (#484)" {
+test "unbound: without a credential -p and a piped REPL stop at once, non-zero, sending nothing (#484)" {
     if (builtin.os.tag == .windows) return error.SkipZigTest;
     const raw_cli = std.c.getenv("METACODES_TEST_CLI_BIN") orelse return error.SkipZigTest;
     var case: Case = undefined;
@@ -343,8 +343,6 @@ test "unbound: without a credential -p, serve, --web and a piped REPL stop at on
 
     const uses = [_][]const []const u8{
         &.{ "-p", "hi" },
-        &.{ "serve", "0" },
-        &.{ "--web", "0" },
         // No `-p`, but nobody at a terminal either: not the TUI.
         &.{},
     };

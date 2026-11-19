@@ -29,7 +29,7 @@ Run `zig build gate:pr` to execute the single AGENTS.md pre-submit checklist.
   frontends, the capability exchange, and the additive/breaking change policy.
 - [Observability](OBSERVABILITY.md) — OpenTelemetry span tree per Run (GenAI
   semantic conventions), OTLP/HTTP export from the standard `OTEL_*`
-  variables, the session span store and the web trace view.
+  variables and the session span store.
 - [TinyKG integration](TINYKG_INTEGRATION.md) — binary attestation and ownership.
 - [Plugin architecture](PLUGIN_ARCHITECTURE.md) — immutable plugin generations.
 - [Process plugin protocol](PLUGIN_PROCESS_PROTOCOL.md) — isolated tool packages.

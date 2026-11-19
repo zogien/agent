@@ -18,7 +18,7 @@ The installed `metacodes -p` against a loopback mock provider in this process
      `end_turn` exit 0 with no notice; an HTTP 402 keeps its own diagnostic and
      does not gain this one.
 
-Run by `zig build test:product` (METACODES_DAEMON_E2E_BIN set by build.zig);
+Run by `zig build test:product` (METACODES_NATIVE_E2E_BIN set by build.zig);
 by hand: `zig build && python3 tests/e2e/headless_stop_notice_e2e.py`.
 """
 
@@ -39,7 +39,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 EXE = "metacodes.exe" if os.name == "nt" else "metacodes"
-BIN = Path(os.environ.get("METACODES_DAEMON_E2E_BIN") or ROOT / "zig-out" / "bin" / EXE)
+BIN = Path(os.environ.get("METACODES_NATIVE_E2E_BIN") or ROOT / "zig-out" / "bin" / EXE)
 
 EXHAUSTED_NOTICE = (
     "error: stopped (max_tokens_exhausted): the reply was still cut off at the output "

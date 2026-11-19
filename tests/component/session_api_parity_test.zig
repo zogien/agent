@@ -1,14 +1,5 @@
-//! L2 组件测试(U11 / issue #3):**Session API 三前端等价性**。
-//!
-//! 锁定的契约:TUI(repl/loop.zig)、web(web/session.zig)、daemon(daemon/app_driver.zig)
-//! 的会话业务全部经同一条 canonical 管线:
-//!
-//!   raw → session_intent.parse → SessionService.dispatch/execLine → outcome(+RunPlan)
-//!   run 字段装配 → session_service.buildRunOptions(唯一装配点)
-//!
-//! 本测试在**真 App**(App.init 全初始化,非 undefined 最小化)上驱动 execLine——即 web/
-//! daemon 的字面入口,也是 TUI 各命令分支的下沉终点——证明 mutation 语义单源。
-//! 跨模块:session_intent + session_service + app + conversation + web/session(≥3,合 L2)。
+//! L2 coverage for the TUI session command service. Exercise parsing,
+//! command outcomes and Run preparation against a real App.
 
 const std = @import("std");
 const cc = @import("cc");
@@ -186,33 +177,6 @@ test "U11 parity: prompt/宏/retry/shell 的对话 mutation 全在 service 层" 
     try std.testing.expectEqual(@as(usize, 3), app.conversation.messages.items.len);
 }
 
-test "U11 parity: run Options 装配单源(web 只比 canonical 多 ui_requester)" {
-    var fx: AppFixture = undefined;
-    try fx.setup();
-    defer fx.deinit();
-    const app = fx.app;
-
-    var journal = cc.event_journal.EventJournal.init(std.testing.allocator);
-    defer journal.deinit();
-    var wb = cc.web_backend.WebBackend.init(std.testing.allocator, &journal);
-    defer wb.deinit();
-
-    const canonical = session_service.buildRunOptions(app, null);
-    var web_opts = cc.web_session.buildWebOptions(app, &wb, null);
-    // web 宿主专属字段:ui_requester(WebBackend 对话框)。抹平后必须与 canonical 完全一致
-    // ——web 再漏字段(旧病:缺 lsp/swarm/background_request)会在此变红。
-    try std.testing.expect(web_opts.ui_requester != null);
-    web_opts.ui_requester = canonical.ui_requester;
-    // 进度更新义务是宿主契约字段(#114):web 有人在看,自己接上;canonical 不带。抹平后比对。
-    try std.testing.expect(web_opts.progress_updates);
-    web_opts.progress_updates = canonical.progress_updates;
-    web_opts.progress_updates_observe = canonical.progress_updates_observe;
-    // 停滞闸门(stall gate)同属宿主契约字段:web 有人能一句话续接,默认 enforce;canonical 不带。
-    try std.testing.expectEqual(@as(?cc.stall_gate.Mode, .enforce), web_opts.stall_gate);
-    web_opts.stall_gate = canonical.stall_gate;
-    try std.testing.expect(std.meta.eql(canonical, web_opts));
-}
-
 test "U11 parity: 过程义务门是宿主契约字段,canonical 不带(delivery_cadence 显式排除)" {
     // Codex round 6 (2026-09-21):注入宏 run / web 会话走 canonical 装配,若 canonical 带
     // cadence,一次 `/commit` 就多落一条终局记录,trace 契约(每份 journal 一条)作废。
@@ -383,17 +347,12 @@ fn messageText(conversation: *const cc.conversation.Conversation, index: usize) 
     return conversation.messages.items[index].blocks[0].text;
 }
 
-test "L2 /edit (issue #432): web/daemon/TUI edit user message n, rerun from it, and the transcript restores the edited history" {
+test "L2 /edit (issue #432): editing a user message plans a run and persists the edited history" {
     const a = std.testing.allocator;
     var fx: AppFixture = undefined;
     try fx.setup();
     defer fx.deinit();
     const app = fx.app;
-    var journal = cc.event_journal.EventJournal.init(a);
-    defer journal.deinit();
-    var wb = cc.web_backend.WebBackend.init(a, &journal);
-    defer wb.deinit();
-
     try app.conversation.appendText(.user, "q1");
     try app.conversation.appendText(.assistant, "a1");
     try app.conversation.appendText(.user, "q2");
@@ -415,10 +374,6 @@ test "L2 /edit (issue #432): web/daemon/TUI edit user message n, rerun from it, 
         .{ .line = "/edit 7 new", .reason = "(NotUserMessage)" },
     };
     for (refused) |case| {
-        var batch: cc.web_session.CommandBatch = .{};
-        defer batch.deinit(a);
-        try std.testing.expect(cc.web_session.execCommand(app, &wb, a, case.line, &batch) == null);
-        try std.testing.expect(!batch.run_planned);
         var buf: [256]u8 = undefined;
         var svc = session_service.SessionService.init(app);
         const d = session_service.execLine(&svc, app.allocator, case.line);
@@ -435,37 +390,15 @@ test "L2 /edit (issue #432): web/daemon/TUI edit user message n, rerun from it, 
     try std.testing.expect(std.mem.indexOf(u8, listing.written(), "runtime notice") == null);
     try std.testing.expect(std.mem.indexOf(u8, listing.written(), "a1") == null);
 
-    // The web/daemon entry (POST /command) edits message 3 and plans the run.
-    var batch: cc.web_session.CommandBatch = .{};
-    defer batch.deinit(a);
-    const plan = cc.web_session.execCommand(app, &wb, a, "/edit 3   q2, edited  ", &batch) orelse return error.NoRunPlanned;
+    var edit_service = session_service.SessionService.init(app);
+    const edited = session_service.execLine(&edit_service, app.allocator, "/edit 3   q2, edited  ");
+    const plan = edited.run orelse return error.NoRunPlanned;
     try std.testing.expectEqual(session_service.RunPlan.Kind.edited_prompt, plan.kind);
     try std.testing.expectEqual(@as(usize, 3), app.conversation.len());
     try std.testing.expectEqualStrings("q1", messageText(&app.conversation, 0));
     try std.testing.expectEqualStrings("a1", messageText(&app.conversation, 1));
     try std.testing.expectEqualStrings("q2, edited", messageText(&app.conversation, 2));
     try std.testing.expect(app.read_state.get("/tmp/read-in-a-dropped-turn") == null);
-    {
-        // The Run begins once the batch has run: its user_message (wire v1, #444)
-        // follows the command_result and carries the run_id and `replaces`.
-        cc.web_session.beginPlannedRun(&wb, &batch);
-        cc.web_session.announceRunFailed(&wb, "NotRunHere");
-        const lines = (try journal.waitSince(a, 0, 1)) orelse return error.NoJournal;
-        defer {
-            for (lines) |line| a.free(line);
-            a.free(lines);
-        }
-        const echo = "{\"v\":1,\"type\":\"user_message\",\"data\":{\"run_id\":1,\"trace_id\":null,\"text\":\"q2, edited\",\"replaces\":3}}";
-        const queued = "{\"v\":1,\"type\":\"command_result\",\"data\":{\"command\":\"edit\",\"ok\":true,\"error_name\":null,\"message\":\"queued for run\"}}";
-        var at_echo: ?usize = null;
-        var at_queued: ?usize = null;
-        for (lines, 0..) |line, index| {
-            if (std.mem.eql(u8, line, echo)) at_echo = index;
-            if (std.mem.eql(u8, line, queued)) at_queued = index;
-        }
-        try std.testing.expect(at_queued.? < at_echo.?);
-    }
-
     // The transcript on disk follows the edit (a full rewrite), so a restart
     // restores messages 1-2 + the edited message, never the dropped turns.
     app.persistTranscript();

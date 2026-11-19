@@ -116,7 +116,6 @@ test "out-of-vocabulary flag values fail closed" {
         .{ .argv = .{ "metacodes", "--reasoning-effort", "bogus" }, .needle = "invalid value 'bogus'" },
         .{ .argv = .{ "metacodes", "--teammate-mode", "bogus" }, .needle = "invalid value 'bogus' for --teammate-mode" },
         .{ .argv = .{ "metacodes", "--temperature", "warm" }, .needle = "invalid value 'warm' for --temperature" },
-        .{ .argv = .{ "metacodes", "--web", "70000" }, .needle = "invalid port '70000'" },
     };
     for (cases) |case| {
         const config = cc.parseArgsForTest(&case.argv, a);
@@ -146,12 +145,55 @@ test "teammate-mode accepts its documented vocabulary" {
     try std.testing.expect(!config.teammate_out_of_process);
 }
 
-test "in-range optional web port still parses" {
+test "removed Web and serve entry points fail argument parsing" {
     const a = std.testing.allocator;
-    const argv = [_][*:0]const u8{ "metacodes", "--web", "8080" };
-    const config = cc.parseArgsForTest(&argv, a);
-    try std.testing.expect(config.parse_error == null);
-    try std.testing.expectEqual(@as(?u16, 8080), config.web_port);
+    const cases = [_]struct { arg: [:0]const u8, needle: []const u8 }{
+        .{ .arg = "--web", .needle = "unknown flag '--web'" },
+        .{ .arg = "serve", .needle = "unexpected positional argument 'serve'" },
+    };
+    for (cases) |case| {
+        const config = cc.parseArgsForTest(&.{ "metacodes", case.arg.ptr }, a);
+        defer freeErr(a, config);
+        try parseErr(config, case.needle);
+    }
+}
+
+test "U8: --resume-response 解析进 config.resume_response(内联 + @file)" {
+    const a = std.testing.allocator;
+    {
+        // 内联 JSON 直接进 config。
+        const argv = [_][*:0]const u8{ "metacodes", "--resume-response", "{\"choice\":\"Red\"}" };
+        const cfg = cc.parseArgsForTest(&argv, a);
+        defer if (cfg.resume_response) |r| a.free(r); // owned dupe,须释放(否则泄漏)
+        try std.testing.expect(cfg.resume_response != null);
+        try std.testing.expectEqualStrings("{\"choice\":\"Red\"}", cfg.resume_response.?);
+    }
+    {
+        // @file:从文件读。写临时文件后解析。
+        // 文件 IO 走 platform.fs + 路径走 paths.tempDir:std.c.open 的 `O` 在 Windows 是 void
+        // (编不过),"/tmp" 在 Windows 不存在。所有测试模块现已接 platform dep(build.zig)。
+        const ppaths = @import("platform").paths;
+        const pfs = @import("platform").fs;
+        var pbuf: [512]u8 = undefined;
+        const path = try std.fmt.bufPrintZ(&pbuf, "{s}/cc-zig-u8-resume-resp.json", .{ppaths.tempDir()});
+        const fd = try pfs.openZ(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o600);
+        const content = "{\"answer\":42}";
+        _ = pfs.write(fd, content);
+        pfs.close(fd);
+        defer @import("platform").fs.unlinkPath(path.ptr) catch {};
+        var argbuf: [600]u8 = undefined;
+        const at_arg = try std.fmt.bufPrintZ(&argbuf, "@{s}", .{path});
+        const argv = [_][*:0]const u8{ "metacodes", "--resume-response", at_arg.ptr };
+        const cfg = cc.parseArgsForTest(&argv, a);
+        defer if (cfg.resume_response) |r| a.free(r); // owned(readFileAll dupe),须释放
+        try std.testing.expect(cfg.resume_response != null);
+        try std.testing.expectEqualStrings(content, cfg.resume_response.?);
+    }
+    {
+        // 无 flag → null(不启用 resume)。
+        const argv = [_][*:0]const u8{"metacodes"};
+        try std.testing.expectEqual(@as(?[]const u8, null), cc.parseArgsForTest(&argv, a).resume_response);
+    }
 }
 
 test "argv0 alone yields a clean default config" {
@@ -183,7 +225,7 @@ test "--image without a value is rejected" {
     try parseErr(config, "missing value for --image");
 }
 
-test "--image without -p/--print fails closed (no silent drop into TUI/serve)" {
+test "--image without -p/--print fails closed" {
     const a = std.testing.allocator;
     const argv = [_][*:0]const u8{ "metacodes", "--image", "a.png" };
     const config = cc.parseArgsForTest(&argv, a);

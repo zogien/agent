@@ -1,12 +1,10 @@
 //! L2 (#473): on an App host an MCP tool asks before it runs, mode by mode, as
 //! it does on AgentCore.
 //!
-//! A real App (`App.init`, with the `.app_init` MCP join that `-p`, `--web`
-//! and `serve` start with) connects the stdio mock server named in the user's
-//! `config.json` and registers its tools through `registry_bridge`. Each case
-//! runs one turn on the Run options the TUI, web and serve hosts assemble
-//! (`session_service.buildRunOptions`), with a scripted host in place of their
-//! dialog, against a loopback provider whose first answer calls
+//! A real App connects the stdio mock server named in the user's
+//! config.json using the synchronous MCP join used by print mode. Each
+//! case runs one turn using session_service.buildRunOptions and a scripted
+//! host dialog, against a loopback provider whose first answer calls
 //! `mcp__plc__echo`, a tool with no annotations. A shell loop in front of the
 //! server appends each line it is sent to a log before passing it on, so the
 //! test reads what the server received: whether a `tools/call` reached it, and
@@ -229,8 +227,7 @@ const Session = struct {
         self.arena.deinit();
     }
 
-    /// One turn on the canonical host Run options with `host` answering
-    /// permission requests, as `--web` and `serve` attach their dialog.
+    /// One turn on the canonical Run options with the scripted host answering permission requests.
     fn turn(self: *Session, host: *Host) !cc.agent_loop.StopReason {
         const app = self.app;
         try app.conversation.appendText(.user, "set the conveyor speed");

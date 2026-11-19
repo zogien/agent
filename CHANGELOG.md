@@ -10,6 +10,12 @@ status, compatibility boundaries, and entry points are defined by
 
 ## Unreleased
 
+### Removed
+
+- The bundled browser UI (`metacodes --web`) and HTTP/UDS service
+  (`metacodes serve`) in this fork. Use `SessionHost` with your own transport
+  or embed the AgentCore SDK to host sessions in another application.
+
 ### Changed
 
 - **The CLI no longer consults a built-in System-One advisor** (#474). Until

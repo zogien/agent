@@ -20,7 +20,7 @@ it today as a terminal agent, but it is built as a library: one fixed agent
 loop, with permissions, budgets and formal checks that no plugin can bypass,
 inside surfaces that let any program host it. Those surfaces are a Zig module,
 a C ABI (callable from C, C++, Rust, Python, Node and anything else with an
-FFI), headless NDJSON, an HTTP/UDS daemon and a web UI.
+FFI), and headless NDJSON.
 
 ## Why another harness
 
@@ -148,7 +148,6 @@ See [PLUGIN_ARCHITECTURE](doc/PLUGIN_ARCHITECTURE.md),
 | AgentCore C ABI v1 revision 28 | C, C++, Zig and Rust bindings ship in [sdk/](sdk/README.md); JNA, .NET P/Invoke and any other FFI load the shared library |
 | Python and Node packages | `import metacodes` / `require('metacodes')`: Runtime, Session, streaming events, tools written in Python or JavaScript ([sdk/python](sdk/python/README.md), [sdk/node](sdk/node/README.md); experimental) |
 | Headless `-p --json` / `--stream-json` | Any language that can spawn a process and read NDJSON |
-| `serve` daemon (HTTP and UDS, multi-session) and `--web` | Services, desktop apps, remote UIs |
 
 What a host gets:
 
@@ -168,10 +167,9 @@ Start at [doc/API.md](doc/API.md).
 - **CLI swarm (`--agent-teams`).** Teammates run as threads or as
   worktree-isolated processes. They coordinate through file mailboxes and claim
   work from a shared TinyKG task DAG under atomic leases.
-- **Small units.** The `serve` daemon hosts many sessions in one process under
-  a live-session cap. A busy headless agent process peaks around 23 MB, and
-  the sealed gateway adds 3 ms per step at the median with 64 concurrent
-  clients (9 ms at p99).
+- **Small units.** A busy headless agent process peaks around 23 MB. The
+  sealed gateway adds 3 ms per step at the median with 64 concurrent clients
+  (9 ms at p99).
 - **Byte-stable prompts.** Thousands of parallel runs keep hitting the
   provider's prompt cache.
 
@@ -262,7 +260,6 @@ uses `scripts\install.ps1` with the release zip. Then:
 metacodes login                            # sign in to Metask in the browser (or /login in the TUI)
 metacodes                                  # interactive TUI
 metacodes -p "explain src/main.zig" --json # headless, one NDJSON result
-metacodes --web                            # browser UI on 127.0.0.1:7777
 metacodes doctor                           # where every runtime asset resolves from
 metacodes update                           # move this install to the latest release
 ```
@@ -294,7 +291,7 @@ providers, Metask OAuth, Lean kernels and Windows.
 
 ```mermaid
 flowchart TB
-    hosts["Hosts: CLI / TUI · web UI · daemon · your app (C ABI or Zig)"]
+    hosts["Hosts: CLI / TUI · your app (C ABI or Zig)"]
     runtime["Immutable Runtime generation (hot-swappable)"]
     subgraph kernel["Fixed kernel"]
         loop["AgentLoop and conversation ledger"]
@@ -318,7 +315,7 @@ ship for five targets with checksums.
 
 | Area | Status |
 |---|---|
-| CLI, headless, web UI, daemon | Used daily; flags may still change before 1.0 |
+| CLI and headless | Used daily; flags may still change before 1.0 |
 | AgentCore C ABI | Experimental; hosts pin the exact revision |
 | `metacodes-core` Zig module | Experimental source API |
 | TinyKG memory and task DAG | On by default in the CLI; not yet in AgentCore |
