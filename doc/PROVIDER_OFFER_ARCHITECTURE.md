@@ -78,7 +78,7 @@ Replacement is validated and capacity-reserved before anything mutates, so a set
 of profiles installs atomically: the registry never ends up holding profiles
 that borrow an arena the same call is about to release.
 
-Nothing in `AgentLoop`, the client factory, the TUI, or the Web UI changes. A
+Nothing in `AgentLoop`, the client factory, or the TUI changes. A
 provider discovered at runtime (user-defined instance, plugin-supplied profile)
 goes through the same `ProviderRegistry.register` call, including validation.
 
@@ -275,11 +275,10 @@ in `provider/registry.zig` keeps a new one a deliberate entry. The vendors
 license these plans for a person working in a coding tool — Kimi Code's
 community guidelines name personal, interactive use, and the GLM Coding
 Plan's subscription agreement the tools Zhipu lists — so a start with nobody
-at the keyboard (`-p`, `serve`, a resumed suspension, the REPL reading a pipe)
+at the keyboard (`-p`, a resumed suspension, the REPL reading a pipe)
 prints one `warning:` line on stderr saying so. It never refuses and never
-changes the exit code: the terms are the vendor's to enforce. `--web` is a
-person in a browser and a teammate answers to its lead's session; neither
-prints it.
+changes the exit code: the terms are the vendor's to enforce. A teammate
+answers to its lead's session and does not print it.
 
 ## User-Agent
 
@@ -635,7 +634,7 @@ identity in an `ActualRouteEvent`.
 
 ## Control plane
 
-One kernel API serves the TUI, Web UI, CLI, and future clients:
+One kernel API serves the TUI, CLI, and embedders:
 `model.list`, `model.describe`, `selection.validate`, `selection.resolve`,
 `selection.commit`, plus a replayable event journal. Clients never read provider
 environment variables, probe endpoints, refresh tokens, instantiate provider

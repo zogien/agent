@@ -254,8 +254,6 @@ metacodes                                   # interactive TUI
 metacodes --resume <id>                     # the TUI, back in a session of this directory
 metacodes -p "explain src/main.zig" --json  # headless: one prompt, one NDJSON result
 metacodes -p - --stream-json < task.txt     # headless, streaming every event as NDJSON
-metacodes --web                             # browser UI on 127.0.0.1:7777
-metacodes serve --sessions 4                # HTTP daemon with create/destroy session routes
 metacodes doctor                            # where every runtime asset resolves from
 ```
 

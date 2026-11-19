@@ -4,7 +4,7 @@ metacodes keeps its own Skills and MCP configuration under its state root
 (`~/.metacodes` unless `--state-dir`, `METACODES_HOME` or the install manifest
 chooses another), and also reads what Claude Code and Codex users already have,
 with each tool's own semantics. This page is the contract for the CLI hosts
-(terminal REPL, `--web`, `serve`). AgentCore keeps the narrower,
+(terminal REPL and headless CLI). AgentCore keeps the narrower,
 `.agents/skills`-only policy described in
 [AGENTCORE_BINARY_ABI.md](AGENTCORE_BINARY_ABI.md).
 
@@ -282,7 +282,7 @@ repository may carry, and the flow is PKCE for a public client.
   tools registered and the tool list and system prompt built — once, so what
   the model sees never depends on how fast a server answered. Leaving the
   REPL while a server connects interrupts its handshake. Every other mode
-  (`-p`, `--web`, `serve`, `--teammate`, `--dump-*`) waits for the servers
+  (`-p`, `--teammate`, `--dump-*`) waits for the servers
   before it starts, as before; their connects overlap the rest of startup.
   After startup, failures are announced once in the footer, Claude Code's way
   (`1 MCP server failed · /mcp`, `1 MCP server needs auth · /mcp` for a 401 or

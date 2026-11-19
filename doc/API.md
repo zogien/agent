@@ -25,14 +25,12 @@ helper contract and the current network-policy limits.
 | Python package | `import metacodes` ([sdk/python](../sdk/python/README.md)) | experimental, unpublished | speaks exactly the AgentCore ABI revision it was built for and refuses any other |
 | Node package | `require('metacodes')` ([sdk/node](../sdk/node/README.md)) | experimental, unpublished; macOS and Linux | same exact-revision rule; the addon is rebuilt per platform |
 | Process plugins | strict manifest + stdio protocol | versioned v1 | reject unknown fields and digest drift |
-| Plugin inventory | `--dump-plugins`, Zig, Web state | versioned v1 | additive observation fields only where specified |
+| Plugin inventory | `--dump-plugins`, Zig | versioned v1 | additive observation fields only where specified |
 | TinyKG executable distribution | `vendor/tinykg/manifest.json` | bundle v1 | exact target, format, source commit, and SHA-256 pinning |
-| Web/daemon HTTP surface | `metacodes --web`, `metacodes serve` | pre-1.0 | endpoints, authentication and bind rules as in [Web and daemon HTTP surface](#web-and-daemon-http-surface); changes with changelog notice |
 
-Beyond the endpoints and access rules of
-[Web and daemon HTTP surface](#web-and-daemon-http-surface), there is no
-general HTTP service API promise yet. The Web and daemon hosts are product
-surfaces built over the same core protocols.
+Use [SessionHost](#sessionhost-a-multi-session-service-for-network-hosts)
+behind your own transport, or use the [AgentCore SDK](#agentcore-binary-embedding)
+to embed sessions in an application.
 
 ## Provider selection surface
 
@@ -94,9 +92,9 @@ normative model; the entry points are:
 |---|---|
 | `--provider <id\|alias>` / `METACODES_PROVIDER` | resolve the route through the provider registry instead of inferring a transport from the model name |
 | `METACODES_MODEL` | the model, as `--model` gives it (the flag wins) |
-| `--preset <name>` / `METACODES_PRESET` | a named setup from `config.json` `presets` (#489; [LOCAL_CONFIG.md](LOCAL_CONFIG.md#presets)), applied as the flags naming its route would: `--model`, `--channel` and `--reasoning-effort` replace one field for that run, `--provider`/`--offer` set it aside, nothing is written back. Below a preset named at start comes the one `directory_presets` remembers for the working directory (its git worktree root, else the directory), then the `/model` default. A name `config.json` does not define stops `-p`, `serve` and `--web` with exit 2, listing the presets; the TUI starts without it and says so under its banner |
+| `--preset <name>` / `METACODES_PRESET` | a named setup from `config.json` `presets` (#489; [LOCAL_CONFIG.md](LOCAL_CONFIG.md#presets)), applied as the flags naming its route would: `--model`, `--channel` and `--reasoning-effort` replace one field for that run, `--provider`/`--offer` set it aside, nothing is written back. Below a preset named at start comes the one `directory_presets` remembers for the working directory (its git worktree root, else the directory), then the `/model` default. A name `config.json` does not define stops `-p` with exit 2, listing the presets; the TUI starts without it and says so under its banner |
 | `<state root>/.env` | the install's local configuration ([LOCAL_CONFIG.md](LOCAL_CONFIG.md)), read once at start and never `setenv`: a layer below the process environment for the names it may set — every registered profile's `env_aliases`, the variables `config.json` names (`providers.<id>.credentials[].env`, `provider_catalogs.<id>.credential_env`), `METACODES_PROVIDER`, `METACODES_MODEL`, `METACODES_PRESET`; a provider's aliases are read from it only when the environment sets none of them. Request addresses (`METACODES_BASE_URL`, `METASK_GATEWAY_URL`, `METASK_SITE_URL`, `METACODES_KEY_CHECK_URL`, `METACODES_KG_URL`, any `*_URL`) are refused; other names are ignored with one warning listing them. Its `METACODES_PRESET`, else its `METACODES_PROVIDER` (else the one provider whose key it holds), applies only when no flag or environment variable names a provider or a preset, the working directory remembers no preset, no `global_selection` is stored and no Metask sign-in exists (`--api-key`, `METASK_API_KEY`, a key or older sign-in in `auth.json`, the Metask session `oauth/metask.json`); keys of several providers and no name choose none, and the run lists them. A `.env` anywhere else, the working directory included, is never read. `metacodes install` writes `<state root>/.env.example` on every install and upgrade and never touches `.env` |
-| no credential at all | the interactive TUI opens without a model (#484): its banner reads `not set — /login, or configure .env`; a prompt, `/retry`, `/edit <n>`, `/init`, `/commit`, `/review`, `/btw`, `/recap` and a Skill are refused with a note before any request is assembled; nothing is probed; no session directory is made until a route binds (`/model`, `/login`). A Metask sign-in in `auth.json` older than #527 with no key and model chosen opens it the same way, and so does a provider named by `--provider`, `--offer`, `METACODES_PROVIDER`, a preset or `.env` that has no credential: the note names that provider's variables, and no other provider is used in its place (#485). `-p`, `-`, `serve`, `--web` and a REPL whose input is a pipe exit non-zero with the sign-in hint (or the named provider's help) instead. The banner names where a bound route's credential came from (`· Metask`, `· from .env`, `· from shell`, `· saved key`, `· signed in`, `· --api-key`) |
+| no credential at all | the interactive TUI opens without a model (#484): its banner reads `not set — /login, or configure .env`; a prompt, `/retry`, `/edit <n>`, `/init`, `/commit`, `/review`, `/btw`, `/recap` and a Skill are refused with a note before any request is assembled; nothing is probed; no session directory is made until a route binds (`/model`, `/login`). A Metask sign-in in `auth.json` older than #527 with no key and model chosen opens it the same way, and so does a provider named by `--provider`, `--offer`, `METACODES_PROVIDER`, a preset or `.env` that has no credential: the note names that provider's variables, and no other provider is used in its place (#485). `-p`, `-` and a REPL whose input is a pipe exit non-zero with the sign-in hint (or the named provider's help) instead. The banner names where a bound route's credential came from (`· Metask`, `· from .env`, `· from shell`, `· saved key`, `· signed in`, `· --api-key`) |
 | stored default without a credential | a `global_selection` whose provider has no credential (a Metask one: no Metask session, no Metask key and no key in `auth.json`; a stored Metask route the session authenticates runs at the session's gateway, never at the compiled endpoint with the session's token, #527) is passed over for the levels below it, with one notice: `The default model, <provider> · <model>, has no key or sign-in; this session uses <model> · <origin>.` (under the TUI's banner, else on stderr) (#485) |
 | `metacodes logout` | revokes the Metask session at `$METASK_SITE_URL/api/oauth/revoke` (bounded; a failure is reported and the local sign-out goes on), removes both Metask sign-ins (`auth.json`, `oauth/metask.json` with its refresh token) and a key stored with `login --provider metask`, forgets a stored default that resolves to Metask, and says which it removed; `METASK_API_KEY` left in the shell or `.env` is named, never removed. `logout --provider metask` is the same (#499) |
 | `--channel <id>` | narrow to one endpoint/region/plan/account binding |
@@ -189,8 +187,8 @@ path unchanged.
 
 ## Session command surface (UI-neutral)
 
-All three interactive hosts (terminal REPL, `--web`, `serve`/`serve --sessions N`)
-share one input pipeline (`src/session_intent.zig` + `src/session_service.zig`):
+The terminal REPL uses the session command pipeline in
+`src/session_intent.zig` and `src/session_service.zig`:
 
     raw input → session_intent.parse → InputIntent
       → SessionService.dispatch (validate → mutate → optional RunPlan)
@@ -201,17 +199,14 @@ share one input pipeline (`src/session_intent.zig` + `src/session_service.zig`):
   same-named skills); an unknown `/head` is a skill candidate; anything else is
   a prompt. The verb table is the single registry — hosts do not parse slash
   commands themselves.
-- **Service verbs** (equivalent across hosts): `/model use <id>`, `/mode
-  [name]`, `/effort <level>`, `/compact`, `/add-dir <path>`, `/theme <v>`,
-  `/vim`, `/retry`, `/edit <n> <text>`, `/commit`, `/review`, `/init`, plus
-  prompt and `!cmd` submission. Web/daemon reach them via `POST /command`
-  (queued to the driver thread; result arrives as a `command_result` journal
-  event, run-producing commands then execute a normal agent run). Display-only verbs (`/help`,
-  `/tools`, …) are terminal-rendered; web/daemon report them as unsupported.
+- **Service verbs**: `/model use <id>`, `/mode [name]`, `/effort <level>`,
+  `/compact`, `/add-dir <path>`, `/theme <v>`, `/vim`, `/retry`, `/edit <n> <text>`,
+  `/commit`, `/review`, `/init`, prompt submission and `!cmd`. The terminal
+  handles display-only verbs such as `/help` and `/tools`.
 - **Run assembly.** `session_service.buildRunOptions` is the only place App
   state is projected into `agent_loop.Options`; hosts add only host-specific
   fields (UI requester, run-control observers, budgets).
-- Equivalence is locked by `tests/component/session_api_parity_test.zig`.
+- `tests/component/session_api_parity_test.zig` exercises the command service.
 
 ### Edit and rerun
 
@@ -338,7 +333,7 @@ live view never showed stays out: messages the runtime wrote itself
 a record without the key is the user's or the model's) and text blocks that
 ride along with tool results. `/resume <id>` clears the screen and does the
 same, then shows the command and what it restored. An id that names no session exits 1 before the REPL starts;
-`--resume` beside `-p`/`-`, `--web`, `serve`, `--resume-response`, `--session`,
+`--resume` beside `-p`/`-`, `--resume-response`, `--session`,
 `--teammate` or `--dump-*` is a usage error. When an interactive session whose
 transcript is on disk exits (`/exit`, Ctrl+C or Ctrl+D twice, EOF), the REPL
 prints, dim, `Resume this session with:` and `metacodes --resume <id>` (with
@@ -743,98 +738,6 @@ through the JSONL transcript and the AgentCore checkpoint (block tag 6), so a
 resumed session keeps the continuity. A conversation with no reasoning items
 serializes byte-identically to before.
 
-## Web and daemon HTTP surface
-
-`metacodes --web [port]` (one session with the bundled browser UI),
-`metacodes serve [port]` (one session) and `metacodes serve --sessions N
-[--max-sessions M] [--uds <path>] [port]` (the multi-session daemon: N
-sessions at startup, N ≥ 0, then created and destroyed over HTTP, at most M
-live) serve one HTTP/1.1 surface (`src/web/server.zig`). Port 0 lets the
-kernel pick; the startup line prints the address actually bound,
-`<label>: http://<address>:<port>  (Ctrl+C to quit)`.
-
-**Endpoints.** With one session the routes below sit at the root; with
-`--sessions N` (any N, 1 included) or `--uds` every session route is under
-`/s/<id>/`, and an unknown id, or one being destroyed, is 404. Bodies are JSON
-unless noted.
-
-| Method and path | Purpose |
-|---|---|
-| `GET /health` | Liveness probe: `200 {"status":"ok","version":"<v>","sessions":N}`. `<v>` is the version `metacodes --version` prints on its first line (the semver, plus `+<commit12>` on a development build); `N` is 1, or the number of live sessions the daemon hosts. Never under `/s/<id>/`, never authenticated, and it reads no session, journal or lock. |
-| `GET /` | The bundled single-session browser UI; in the `/s/<id>/` daemon, a page listing the live session ids and these endpoints. |
-| `GET /events` | SSE stream of the session's wire lines ([Wire lines](#wire-lines-for-out-of-process-hosts): ids `<epoch>-<seq>`, `Last-Event-ID` or `?since=<seq>&epoch=<epoch>`, `event: resync`). |
-| `POST /message` | `{"text":"..."}`: queue a prompt; echoed as `user_message`. |
-| `POST /respond` | `{"id":N,...}`: answer the pending `ui_request` N; 409 when N is not pending. |
-| `POST /capabilities` | The frontend's [capability frame](WIRE_PROTOCOL.md#2-capability-exchange): `200` with the `capabilities_accepted` line (also journaled), `400` with `capabilities_refused` (nothing changes). From then on a UI request the frame leaves out is journaled as `ui_request_unavailable` and never announced. |
-| `POST /command` | `{"cmd":"/verb ..."}`: queue a [service verb](#session-command-surface-ui-neutral); the result arrives as `command_result`. |
-| `POST /interrupt` | Interrupt the running generation; 409 when idle. |
-| `GET /state` | Session snapshot (model, mode, usage, journal epoch and seq, ...). |
-| `GET /spans` | The session's recorded spans as one OTLP/JSON `ExportTraceServiceRequest` ([Observability](OBSERVABILITY.md#the-web-trace-view)): every Run of the conversation, in the order its spans ended. `404` when the host records no spans. |
-| `GET /trace` | The trace view: the conversation's spans as a waterfall, read from `GET /spans`. |
-
-**Session lifecycle (multi-session daemon only, #254).** These routes sit at
-the top level, never under `/s/<id>/`, and go through the same admission
-(token, `Host`, `Origin`) as every other route. On `--web` and the
-single-session `serve` they are 404. A session id is 24 lowercase hex
-characters.
-
-| Method and path | Result |
-|---|---|
-| `GET /sessions` | `200 {"sessions":[{"session_id","generating","model","permission_mode","pending_request_id"}]}`, live sessions in id order (ids sort by creation time). The fields are read the way `/state` reads them; `pending_request_id` is the pending `ui_request` id, 0 when none. |
-| `POST /sessions/create` | Body empty or `{"session_id"?:"<id>","resume"?:bool}`. `201 {"session_id":"<id>","messages":N}`: a new session (the given id, or a generated one), the same as a startup session; `N` is the number of messages restored, 0 for a fresh one. `"resume":true` rebuilds the conversation persisted under that id (its transcript under the state root, the session's goal and its own model route). `400` for a malformed body or id, or `resume` without `session_id`; `409` when the id is live, when it names a destroyed session that is not freed yet (`{"error":"session is still closing"}`; see destroy), or when a fresh create names an id whose transcript is persisted (restore it with `"resume":true`; a fresh create never overwrites a conversation); `404` when `"resume":true` names an id with no transcript; `429 {"error":"session limit reached","max_sessions":M}` at the cap; `503` while the daemon shuts down. A refused create builds nothing and writes nothing. The request holds its connection for the whole session construction, which starts the session's MCP and language servers and can take seconds; a client that gives up waiting may still have created the session, so after a timed-out create it should look in `GET /sessions` (or create again with its own `session_id`, which answers 409 if the first one landed) and destroy what it does not want. |
-| `POST /sessions/<id>/resume` | `200 {"session_id":"<id>","live":true}` when the session is live, `404` otherwise; it loads nothing (a caller restores with `create {"resume":true}`). |
-| `POST /sessions/<id>/destroy` | `200 {"ok":true,"session_id":"<id>"}` once the session's work has stopped and been joined: its driver (an in-flight run is aborted and its provider request cancelled) and its background work (background agent jobs, swarm teammates, background shell commands); `404` when it is not live. From then on the id resolves nowhere (`/s/<id>/...` is 404); every `GET /s/<id>/events` stream and UDS `attach` receives the aborted run's last events, then `session_lifecycle.closed`, then its transport's close, and ends. The destroy never waits for such readers: the session's memory is freed once the last request using it has finished, normally milliseconds later. Until then the session still owns its directory, and a create with its id answers `409 {"error":"session is still closing"}`; retry. The persisted transcript stays. |
-
-`--max-sessions M` (default 32, M ≥ 1 and ≥ N) caps live sessions; a session
-being destroyed no longer counts. With `--sessions 0` the daemon starts with no
-session. The UDS `list` op lists the same live sessions.
-
-**Admission.** Each request is judged on its head, before any body byte is
-read, in this order:
-
-1. `GET /health` is answered at once.
-2. Token: when one is configured (`--web-token <t>`, else
-   `METACODES_WEB_TOKEN`; the flag wins), every other request must carry
-   `Authorization: Bearer <t>` (scheme case-insensitive). A `GET` may carry
-   `?token=<t>` instead, percent-encoded (EventSource cannot set headers, and
-   a browser opens the UI as `/?token=<t>`); a `POST` is never authenticated by
-   query. Missing or wrong: `401 {"error":"unauthorized"}` with
-   `WWW-Authenticate: Bearer`. The comparison takes the same time however many
-   leading bytes match. A token is 1 to 4096 visible ASCII bytes. The token is
-   never printed or logged; a `--web-token` value is visible to other local
-   users in `ps`, so the environment variable is preferred.
-3. Host (DNS rebinding): without a token, a `Host` header must name the server
-   by `localhost`, `127.0.0.1` (any 127/8 literal) or `[::1]`, with the
-   listening port or none; on a non-loopback bind allowed by
-   `--web-allow-unauth` an IP literal is accepted as well, since no DNS answer
-   can rebind one. Anything else is `403 {"error":"host not allowed"}`. With a
-   token, `Host` is not restricted. A request without `Host` is not from a
-   browser and passes.
-4. Origin (CSRF): a `POST` whose `Origin` is present must be `http://<Host>`,
-   or `https://<Host>` behind a TLS-terminating proxy, where `<Host>` is the
-   request's own `Host` value (without `Host`: the loopback origins of the
-   listening port). Otherwise `403 {"error":"cross-origin POST rejected"}`. A
-   valid token does not lift this rule.
-
-**Bind.** `--web-bind <addr>`, else `METACODES_WEB_BIND` (the flag wins),
-names the IPv4 or IPv6 literal to bind (`127.0.0.1` by default; `0.0.0.0`,
-`::`, `::1`, `[::1]` and specific addresses are accepted; host names, zone
-ids and `::ffff:` IPv4-mapped forms are not). An IPv6 socket sets
-`IPV6_V6ONLY` explicitly: `::` is dual-stack (IPv4 clients reach it too), any
-other IPv6 address is IPv6-only. A bind address that is not loopback (127/8 or
-`::1`) needs a token or `--web-allow-unauth`; otherwise the process exits with
-code 2 before anything starts and names `METACODES_WEB_TOKEN`. Invalid values
-(a malformed address, an empty or non-ASCII token) also exit 2, and
-`--web-bind`, `--web-token` and `--web-allow-unauth` without `--web` or
-`serve` are argument errors. The environment variables are ignored when no
-web surface is requested. Likewise `--sessions`, `--max-sessions` and `--uds`
-without `serve`, `--max-sessions` without `--sessions` or `--uds`, a
-`--sessions` value that is not a count, `--max-sessions 0`, and N above M exit
-with code 2.
-
-The `--uds` transport of `serve` is not HTTP and takes no token: its access
-control is the socket file's mode 0600 (owner only).
-
 ## Zig source embedding
 
 `src/lib.zig` exports the UI-neutral core. In a consumer, these types are reached
@@ -913,8 +816,8 @@ are hard constraints on the mode work runs under, not only on what `/mode`
 accepts:
 
 - **Mode switches are refused.** A session that starts in such a mode is
-  downgraded to `default` when the settings load. `/mode` on every surface
-  and the `--web`/`serve` message's `permission_mode` refuse it (see below).
+  downgraded to `default` when the settings load. The REPL `/mode` command
+  refuses a disabled mode.
   `AgentSession.setPermissionMode` returns `error.PermissionModeDisabled` and
   AgentCore `update_permission_mode` returns `INVALID_ARGUMENT` (diagnostic
   `PermissionModeDisabled`); the mode, policy generation and grants stay as
@@ -960,8 +863,7 @@ Host events (`user_message`, `run_done`, `command_result`,
 kernel's events ([WIRE_PROTOCOL.md](WIRE_PROTOCOL.md#11-host-events)). Runs
 are numbered 1, 2, … per Session. A Run's lines run from its `user_message`
 to its `run_done`, and every kernel event in between carries its `run_id`
-([Runs](WIRE_PROTOCOL.md#12-runs)). The bundled `--web` and `serve` host
-journals nothing but these lines.
+([Runs](WIRE_PROTOCOL.md#12-runs)).
 
 The normative contract, including which changes keep v1 and which bump
 `SCHEMA_VERSION`, is [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md).
@@ -1001,143 +903,7 @@ answer, so the model reads that nobody answered instead of that the user
 declined; a question or a custom UI with `InputAborted`
 ([WIRE_PROTOCOL.md](WIRE_PROTOCOL.md#14-requests-nobody-answered)). `tests/fixtures/wire/v1` pins one line for every event tag and request
 kind, plus capability frames with core's reply to each, and doubles as
-conformance vectors for Hosts in other languages. The bundled `--web` UI
-consumes exactly these lines and declares `permission` and `ask_question`
-when it loads.
-
-The `--web` server streams these lines over SSE with ids `<epoch>-<seq>`; the
-UDS `attach` op streams the same lines, one per line. Each transport also has
-frames of its own that are not journal lines and carry no `v`
-([Transport frames](WIRE_PROTOCOL.md#13-transport-frames)). The
-epoch names the event journal; a restarted host or a rebuilt session has a new
-one. A client resumes with `Last-Event-ID` or `?since=<seq>&epoch=<epoch>`
-(`/state` reports both). When the cursor belongs to another epoch, names a
-position without an epoch, or lies past the journal's end, the server sends
-`event: resync` with
-`{"reason":"epoch_changed"|"epoch_unknown"|"cursor_ahead","epoch":...,"from":N}`
-and replays from the oldest event it kept; when old events were evicted under
-the cursor, the reason is `evicted`. Deduplicate on `(session, epoch, seq)`.
-
-### Web and daemon messages: `POST /message` and `GET /state`
-
-`--web` and `serve` take a message at `POST /message`, `serve --sessions N`
-at `POST /s/<id>/message`:
-
-```json
-{"text": "...", "model": "claude-opus-4-6", "permission_mode": "acceptEdits"}
-```
-
-The UDS transport's `{"op":"message","session":"<id>",...}` reads the same
-three fields with the same checks (replies `{"ok":true}` or
-`{"ok":false,"error":"..."}`). The other interactive routes have UDS ops too,
-so a UDS-only frontend needs no HTTP side channel:
-`{"op":"respond","session":"<id>","id":N,...}` answers the pending
-`ui_request` N with the same answer fields `POST /respond` takes beside the
-routing fields (`{"ok":true}`; a stale or unknown id replies
-`{"ok":false,"error":"no pending request with this id"}`, the 409 of the HTTP
-surface, and a line without `id` replies `{"ok":false,"error":"missing id"}`),
-and `{"op":"capabilities","session":"<id>","v":1,"type":"capabilities",...}`
-is the capability frame itself
-([WIRE_PROTOCOL.md](WIRE_PROTOCOL.md#23-transports)) beside the routing
-fields, answered with the `capabilities_accepted` acknowledgement line (also
-journaled, like the HTTP route) or `capabilities_refused`.
-
-- `text` is required and must not be empty after trimming. A body that is not
-  a JSON object is the text itself.
-- `model` and `permission_mode` are optional and hold for this message's turn
-  and the turns after it. Absent or `null` keeps what is in force; nothing is
-  ever reset.
-- `permission_mode` takes the names `/mode` takes: `default`, `acceptEdits`,
-  `auto`, `dontAsk`, `bypassPermissions`, their underscore and hyphen
-  spellings (`accept_edits`, `accept-edits`) and the historical
-  `prompt`/`bypass`. Any other value, an empty string or a non-string is
-  answered `400 {"error":"invalid permission_mode (...)"}`, a `model` that is
-  not a non-empty string `400 {"error":"invalid model: ..."}`, and nothing is
-  queued. `200 {"ok":true}` means queued.
-- Other fields are ignored, except `idempotency_key`: these hosts do not
-  de-duplicate yet, so a message carrying one (not `null`) is refused with
-  `400 {"error":"idempotency_key not supported: this host does not de-duplicate messages"}`
-  rather than run once per delivery while the client relies on the key
-  (#447; [`SessionHost`](#sessionhost-a-multi-session-service-for-network-hosts)
-  takes it).
-
-The session's driver takes messages one at a time, after the turn in progress
-and after queued `POST /command`s. For each message it checks the permission
-mode (a mode the session's settings disable — `disableBypassPermissionsMode`,
-`disableAutoMode` — is refused, as `/mode` refuses it) and the model (tier
-names resolve as `/model` resolves them; the model must be usable with the
-session's provider), switches to the model for this session only — unlike
-`/model`, the login's saved model selection is not written — sets the
-permission mode, journals `user_message` and runs the turn. Each field the
-message gives is
-announced, even when its value was already in force, so the journal for one
-message reads, with nothing from the driver in between:
-
-```text
-{"v":1,"type":"config_changed","data":{"model":"claude-opus-4-6"}}   if model was given
-{"v":1,"type":"config_changed","data":{"mode":"accept_edits"}}      if permission_mode was given
-{"v":1,"type":"user_message","data":{"run_id":N,"trace_id":null,"text":"...","replaces":null}}
-... the Run's events, each with "run_id":N ...
-{"v":1,"type":"run_done","data":{"run_id":N,"trace_id":null,"stop_reason":"end_turn","error_name":null,"model_error":null}}
-```
-
-A turn that stops on the model (`api_error`, `max_tokens_exhausted`) says why
-on the same line: `model_error` is the structured detail, and its `message` is
-the text to show. Every other stop has `"model_error":null`. A Run that fails
-without returning (the run control refuses it, or the loop fails) has
-`"stop_reason":null` and names the error in `error_name`.
-
-```text
-{"v":1,"type":"run_done","data":{"run_id":N,"trace_id":null,"stop_reason":"api_error","error_name":null,"model_error":{"category":"payment_required","code":"insufficient_balance","type":null,"message":"Balance too low","http_status":402,"request_id":"req_1","retry":"not_retryable","retry_after_ms":null,"attempts":1,"truncated":false}}}
-```
-
-The fields, what is redacted and how `retry` is decided are specified in
-[AGENTCORE_BINARY_ABI.md](AGENTCORE_BINARY_ABI.md#model-failure-detail).
-`code` passes through whatever the provider sent: metacodes attaches no billing
-or quota meaning to it. `SessionHost` writes the same `run_done` line.
-
-If either field is refused, neither is applied, the text stays out of the
-conversation, no turn runs, and this line takes the place of `user_message`:
-
-```text
-{"v":1,"type":"message_rejected","data":{"message":"model not available for current provider","text":"...","model":"...","permission_mode":"bypass_permissions"}}
-{"v":1,"type":"message_rejected","data":{"message":"bypassPermissions is disabled by settings","text":"...","model":"...","permission_mode":"bypass_permissions"}}
-```
-
-`model` and `permission_mode` repeat what the message asked for (`null` when
-not given; the mode in the spelling `/state` uses). Every accepted message
-therefore ends in exactly one `user_message` or `message_rejected`.
-`user_message` is journaled when the turn starts, not when the message is
-queued: a message sent during a turn appears after that turn's `run_done`.
-
-Every line is a wire v1 line ([Wire lines](#wire-lines-for-out-of-process-hosts)).
-A `config_changed` line has one of `model`, `mode`, `dirs`, `reasoning` or
-`route` in `data`, whatever caused the change: a message, `/command` or a
-tool. `session_lifecycle` is a kernel event. `user_message`, `run_done`,
-`command_result` and `message_rejected` are host events
-([WIRE_PROTOCOL.md](WIRE_PROTOCOL.md#11-host-events)). A `/command` is
-answered by `command_result`: `command` is the line's verb, `message` what it
-reports, and `error_name` is set when `ok` is false. A `/command` that plans a
-Run (a prompt, `/edit`, `/retry`, `/commit`, …) journals its `command_result`
-first, then the Run's `user_message` (none for a macro or `/retry`). A
-`user_message` from `/edit <n> <text>` has `"replaces":n`: the conversation
-before the turn is messages `1..n-1` ([Edit and rerun](#edit-and-rerun)).
-
-`GET /state` (`/s/<id>/state`) is the snapshot a client reconciles with after
-connecting or reconnecting:
-
-| Field | Meaning |
-|---|---|
-| `seq`, `epoch` | Journal position of the next line and the journal it belongs to. `seq` never decreases within an epoch; `/events?since=<seq>&epoch=<epoch>` continues exactly after the snapshot. |
-| `model`, `permission_mode` | In force now; the mode as `default`, `accept_edits`, `auto`, `dont_ask` or `bypass_permissions`. |
-| `generating` | A turn or a command is running. |
-| `pending_request_id` | The UI request waiting for `POST /respond`, `0` when none. |
-| `frontend_capabilities` | The declaration in force (the last `capabilities_accepted` object), `null` while no frontend declared: every request is then announced. |
-
-It also carries `session_id`, `additional_dirs`, token usage and cost, the
-agent roster, tasks and `plugin_inventory`.
-`tests/component/web_message_config_test.zig` holds both drivers (`--web` and
-`serve`, over HTTP and UDS) to this section.
+conformance vectors for Hosts in other languages.
 
 ### SessionHost: a multi-session service for network Hosts
 
@@ -1189,38 +955,33 @@ leaving every Host to rebuild them:
   (`IdempotencyKeyNotRecorded`) and stays unspent. At most
   `idempotency_max_keys` (10 000) started keys are kept; the oldest goes
   first.
-- A submission may carry its own `model` and `permission_mode` (#445), as a
-  `--web`/`serve` message does: the driver applies them just before the
-  Run, as `set_model` then `set_permission_mode` queued right ahead of it
-  would, and journals each as `config_changed` (`{"model":...}` as
-  resolved, `{"mode":...}`) before the Run's `user_message`, also when
-  the value was already in force, as `--web`/`serve` does. They stay the
+- A submission may carry its own `model` and `permission_mode` (#445).
+  The driver applies them just before the Run, as `set_model` then
+  `set_permission_mode` queued right ahead of it would. It journals each as
+  `config_changed` before the Run's `user_message`, also when already in force.
+  They stay the
   Session's settings afterwards. The mode is checked first
   (`AgentSession.setPermissionMode`'s check), so when either is refused
   (a mode the settings disable, or a model `Options.models` or the
   Session refuses) nothing is applied, the text stays out of the
   conversation, no Run starts, and `message_rejected` takes the place of
-  `user_message`, its `message` saying why in words (the daemon's, such
-  as `bypassPermissions is disabled by settings` or `model not available
-  for current provider`, where the two refuse alike). Its idempotency key
+  `user_message`, with the reason in its `message` (such as
+  `bypassPermissions is disabled by settings` or `model not available for
+  current provider`). Its idempotency key
   is not spent; `model` and `permission_mode` are not part of what a key
   compares.
 - With `Options.models` (a `ModelPolicy`), a model name in a submission
-  or a `set_model` command resolves as the bundled daemon resolves one
-  (`api/model_availability.zig`, shared with `/model` and `--web`/`serve`
-  messages): it is trimmed, a tier name (`low`/`mid`/`high`, or
-  `haiku`/`sonnet`/`opus`) becomes the model `tiers` (a borrowed
+  or a `set_model` command is trimmed (`api/model_availability.zig`). A tier
+  name (`low`/`mid`/`high`, or `haiku`/`sonnet`/`opus`) becomes the model `tiers`
   `model_tiers.TierTable`) sets for the Session's provider kind, and the
   result must be one that provider takes: listed for it in `catalog`
   (`CatalogModel{ provider, id }`, borrowed), or with an id that names it
   (`claude-`, `gpt`/`o1`/`o3`, `gemini`). Anything else, an unset tier
   included, is `error.ModelUnavailable` (`set_model`'s `error_name`) and
-  changes nothing. A tier's reasoning effort is not applied, as on the
-  daemon. Without `Options.models` the name goes to the Session as it is.
+  changes nothing. A tier's reasoning effort is not applied. Without
+  `Options.models` the name goes to the Session as it is.
 - `SessionHost.setModelCatalog(catalog)` replaces `Options.models`'
-  `catalog` while the Host runs (#445), as the daemon adopts a refreshed
-  `/v1/models` answer (cached at startup, replaced when the background
-  refresh lands). The Host copies `catalog`; from the call on, every
+  `catalog` while the Host runs (#445). The Host copies `catalog`; from the call on, every
   Session's next `Submission.model` or `set_model` is checked against it
   and no longer against the catalog before (replaced, not merged). The
   model a Session is on stays in force, also when the new catalog no
@@ -1237,10 +998,9 @@ leaving every Host to rebuild them:
   `update_permission_rules`, `compact`, `cancel_cron_job`,
   `cancel_all_cron_jobs`, `set_route`) share one FIFO run by the Session's
   driver thread, so configuration changes apply between Runs in the order
-  they were queued. Each command is answered by `command_result`. As the
-  `--web`/`serve` config sink journals `/model`, `/mode`, `/effort` and
-  `/add-dir` (#445), an accepted `set_model`, `set_permission_mode` or
-  `set_reasoning_effort` is first journaled as `config_changed`
+  they were queued. Each command is answered by `command_result`. An accepted
+  `set_model`, `set_permission_mode` or `set_reasoning_effort` is first journaled
+  as `config_changed`
   (`{"model":...}` as resolved, `{"mode":...}`, `{"reasoning":...}`, `null`
   when the effort was cleared), also when the value was already in force,
   and `set_additional_directories` journals `{"dirs":...}` for each
@@ -1339,8 +1099,7 @@ leaving every Host to rebuild them:
   `run_journal`: anything but the default on an ephemeral Session is refused
   by `open` (`error.RunControlRequiresRunJournal`). With
   `project_rules = .enforced`, an active bundle in
-  `<dirname(run journal root)>/project-rules` (the daemon's layout when the
-  journal root is the Session's directory) for the workspace root is
+  `<dirname(run journal root)>/project-rules` for the workspace root is
   re-attested before the provider request and decides each tool call through
   the project kernel: a call it blocks reaches the model as a
   `project_rule_blocked` tool error. A missing or invalid kernel
@@ -1348,8 +1107,7 @@ leaving every Host to rebuild them:
   Session still running or a team it leads (`ProjectRulesRequireDetachedWorkersIdle`)
   fails the Run before any provider request: `run_done` names the error and
   the Run is closed in the journal. Unlike other failed Runs, such a refusal
-  does not poison the Session, as the daemon reports the Run failed and
-  takes the next message: the submission's text never enters the
+  does not poison the Session. The submission's text stays out of the
   Conversation and the Session is idle again. A refused resumption of a
   suspended Run (`ui_request_wait = .suspend`) keeps the suspension: after
   `ui_request_closed` and `run_resumed`, `run_done` names the error, the
@@ -1360,11 +1118,11 @@ leaving every Host to rebuild them:
   open still poisons. After a Run the bundle is re-attested and the Run's
   operational observation is published beside the journal.
   `abandoned_run = .record_abandoned` closes a Run whose process died as
-  abandoned and runs the next one, as the daemon does; the default,
+  abandoned and runs the next one. The default,
   `fail_closed`, keeps the Session closed (`UnfinishedRun`).
 - With `Options.teammates` (a `TeammateFactory`), the SessionHost also
-  fulfils the lead's `SpawnTeammate` requests, as the daemon's `App` starts
-  its teammates: after each Run the lead's driver takes the pending requests
+  fulfils the lead's `SpawnTeammate` requests. After each Run the lead's
+  driver takes the pending requests
   oldest first, calls `configure(ctx, arena, spawn)` for the member's
   `SessionConfig` (provider, workspace, tools and permissions are the
   Host's; `spawn` names the lead, team, member, prompt, `agent_type` and
@@ -1424,8 +1182,7 @@ Authentication, tenancy and the transport stay with the Host.
 To stream a Session's journal over SSE, parse the client's position with
 `event_journal.Cursor.fromLastEventId` / `fromSince`, start from
 `EventJournal.planResume(cursor)` (send `resync` when it reports a restart),
-and label lines with `EventJournal.eventId` — the rule the bundled `--web`
-server uses.
+and label lines with `EventJournal.eventId`.
 
 UI requests on a long-lived Session (#446; the wire side is
 [WIRE_PROTOCOL.md §1.5](WIRE_PROTOCOL.md#15-ui-requests-approvers-expiry-suspended-runs)):

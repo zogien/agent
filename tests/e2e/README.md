@@ -17,34 +17,6 @@ zig build tinykg:stage && tests/e2e/process_dag_resume_smoke.sh
 "Active task recovery packet"。会话关掉 autostart、清掉所有 `METACODES_KG_*` 覆盖,只走
 这个服务;退出时停掉服务,并在有 TinyKG 进程残留时失败。
 
-daemon 的 HTTP 面另有两个不调用模型的真进程 e2e(`zig build test` 在 POSIX 上自动跑):
-
-```bash
-zig build && bash tests/e2e/daemon_serve_e2e.sh && bash tests/e2e/daemon_serve_multi_e2e.sh
-```
-
-`serve` / `serve --sessions 2 --uds` 对 loopback mock provider(`daemon_mock_provider.py`)跑:
-`GET /health`、bearer token、`--web-bind ::1`、非回环无鉴权拒绝启动、按 session 路由、UDS、
-动态 session 生命周期(`/sessions` create/list/resume/destroy、`"resume":true` 从 transcript
-恢复、`--sessions 0`、`--max-sessions` 的 429,#254)、journal 逐行是 wire v1 且 Run 的行带
-`run_id`(SSE 与 UDS attach 各读一遍,#444)、SIGINT 关停。端口全由内核分配,HOME 与
-state root 临时,TinyKG autostart 关,共用 `daemon_e2e_lib.sh`。
-
-前端能力交换(doc/WIRE_PROTOCOL.md §2)另有一个跨进程 e2e,纯 Python + HTTP,所以每个平台的
-`zig build test:product` 都跑:
-
-```bash
-zig build && python3 tests/e2e/frontend_capabilities_e2e.py
-```
-
-脚本本身就是第二进程前端:`POST /capabilities` 声明能渲染什么,读 `/events`、答 `/respond`。
-mock provider 见到 `CAPS_ASK` / `CAPS_WRITE:<path>` 时让模型调 AskUserQuestion / Write。断言:
-未声明照旧通告;v2 帧被拒且不生效;不声明 ask_question 则问题不通告、落 `ui_request_unavailable`、
-回合照常结束,模型读到的是"前端渲染不了问答"而不是 NotATty;什么都不声明则 Write 的权限请求被直接
-拒绝、文件不写,模型读到的是"未询问即拒绝、前端渲染不了权限请求"而不是"user declined";两者都声明后
-同样的请求被通告、作答、文件写入;用户真的拒绝时仍是 "user declined 'Write' via prompt"。
-`CAPS_E2E_DUMP=<file>` 把最终 journal 落盘供复核。
-
 plain headless 的失败说明(#417)同样纯 Python,mock provider 就在脚本进程内:
 
 ```bash

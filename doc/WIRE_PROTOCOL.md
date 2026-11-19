@@ -1,15 +1,12 @@
 # metacodes wire protocol v1
 
-Status: implemented contract. Normative for every Host that carries a Session
-across a process or network boundary: the bundled `--web`/`serve` HTTP
-surface (`src/web/`), `SessionHost` behind an embedder's transport
-(`src/core/session_host.zig`), and any Host in another language. The
-encoder and parser are `src/core/protocol/wire.zig`; routing by declared
-capabilities is `src/core/protocol/frontend_capabilities.zig`. Conformance
-vectors: `tests/fixtures/wire/v1`. Evidence that a declaration changes what a
-frontend is asked: `tests/component/frontend_capabilities_test.zig` (HTTP
-surface and `SessionHost`) and `tests/e2e/frontend_capabilities_e2e.py` (the
-installed `serve` with a second-process frontend).
+Status: implemented contract. Normative for Hosts that carry a Session across
+a process or network boundary, including `SessionHost` behind an embedder's
+transport (`src/core/session_host.zig`). The encoder and parser are
+`src/core/protocol/wire.zig`; routing by declared capabilities is
+`src/core/protocol/frontend_capabilities.zig`. Conformance vectors are in
+`tests/fixtures/wire/v1`. `tests/component/frontend_capabilities_test.zig`
+exercises how a declaration changes what a SessionHost frontend is asked.
 [API.md](API.md#wire-lines-for-out-of-process-hosts) summarizes the same
 contract for embedders.
 
@@ -41,13 +38,8 @@ malformed answer is never a grant), which may name who gave it (`"by"`,
 `wire.zig`'s module comment and pinned by the fixtures. `ui_request_closed`
 carries `by` only when the answer it closed on named someone (§1.5).
 
-A Host journals these lines and nothing else. The bundled `--web`/`serve`
-host writes every journal line through `wire.zig`, its host events and
-`session_lifecycle` included (#444). Two tests refuse any line that is not
-one of these: `tests/component/web_message_config_test.zig` reads a whole
-session journal of both drivers through a Run with a permission prompt, and
-the wire leg of `tests/e2e/daemon_serve_multi_e2e.sh` does the same for the
-installed `serve`'s SSE stream and UDS attachment.
+SessionHost writes journal lines through `wire.zig`, including host events
+and `session_lifecycle`.
 
 ### 1.1 Host events
 
@@ -56,41 +48,30 @@ What a Host adds around the kernel's events, as
 
 | `type` | `data` | Written by |
 |---|---|---|
-| `user_message` | `run_id`, `trace_id`, `text`, `replaces`; `source`, `kind`, `idempotency_key`, `attributes` when given | both Hosts: a Run's first line |
-| `run_done` | `run_id`, `trace_id`, `stop_reason`, `error_name`, `model_error` | both Hosts: a Run's last line |
-| `command_result` | `command`, `ok`, `error_name`, `message` | both Hosts |
-| `message_rejected` | `message`, `text`, `model`, `permission_mode` | both Hosts |
+| `user_message` | `run_id`, `trace_id`, `text`, `replaces`; `source`, `kind`, `idempotency_key`, `attributes` when given | SessionHost: a Run's first line |
+| `run_done` | `run_id`, `trace_id`, `stop_reason`, `error_name`, `model_error` | SessionHost: a Run's last line |
+| `command_result` | `command`, `ok`, `error_name`, `message` | SessionHost |
+| `message_rejected` | `message`, `text`, `model`, `permission_mode` | SessionHost |
 | `session_poisoned` | `error_name`, `dropped` | `SessionHost` |
 | `run_resumed` | `run_id`, `trace_id`, `request_id` | `SessionHost`: the first line of a Run that resumes a suspended one (§1.5) |
 
 - `run_done` has `stop_reason` when the Run returned and `error_name` when it
-  failed without returning (a refused rewind, a run the `--web`/`serve` run
-  control refused). A Run that stopped on the model (`api_error`,
+  failed without returning (for example, a refused rewind). A Run that
+  stopped on the model (`api_error`,
   `max_tokens_exhausted`) carries the detail in `model_error`, whose
   `message` is the text to show; otherwise `model_error` is `null`.
-- `command_result.command` names the command: `SessionHost`'s `Command` tag
-  (`set_model`, …), or the verb of a `--web`/`serve` `/command` line (`mode`,
-  `edit`, `compact`, …; the name of a skill, `shell` for `!cmd`, `prompt` for
-  plain text). `error_name` is set exactly when `ok` is false. On
-  `--web`/`serve` it is the error the command failed with, if it has one;
-  `CommandUnsupported` for a line that surface does not run (a terminal verb
-  such as `/help`, a skill, a listing such as `/model` alone); and
-  `CommandRefused` for a refusal stated only in words. `message` holds those
-  words, or the outcome (`queued for run`, a shell command's output) for a
-  person. `SessionHost` writes `null` there. `message` was appended under
-  §4's additive rule 2.
-- `message_rejected` (added under §4's rule 1) is a `--web`/`serve` message,
-  or a `SessionHost` submission (#445), whose `model` or `permission_mode`
-  was refused. Neither is applied, its `text` stays out of the
-  conversation, no Run starts, and the line takes the place of the
-  message's `user_message`. `model` and `permission_mode` repeat what the
-  message asked for: `null` when not given, the mode as `/state` spells it.
-  `message` says why, in words a person reads; where both Hosts refuse
-  alike they say the same (`bypassPermissions is disabled by settings`,
-  `model not available for current provider`). A message's accepted
-  `model` and `permission_mode` are journaled before its `user_message`
-  as `config_changed`, by both Hosts, also when already in force; `model`
-  as resolved (a tier name becomes the tier's model). A route change (the
+- `command_result.command` names the command (for example, `set_model`).
+  `error_name` is set exactly when `ok` is false. Hosts can supply a text
+  `message` with the outcome. SessionHost writes `null` there. `message` was
+  appended under §4's additive rule 2.
+- `message_rejected` (added under §4's rule 1) reports a submission whose
+  `model` or `permission_mode` was refused. Neither is applied, its `text` stays
+  out of the conversation, and the line takes the place of `user_message`.
+  `model` and `permission_mode` repeat what the submission asked for, or `null`
+  for fields it did not specify. `message` says why. Accepted settings are
+  journaled before `user_message` as `config_changed`, also when already in force.
+  The model is journaled as resolved (a tier name becomes the tier's model).
+  A route change (the
   CLI's `/model` commit, `SessionHost`'s `set_route`) is announced as
   `config_changed` `{"model":...}` and then `{"route":{...}}`; the route
   names the provider, channel, protocol, request model id, offer id,
@@ -116,9 +97,6 @@ keeps its bytes; a reader takes an absent field as not given. `attributes`
 is one JSON object of string values, in the order submitted. `text` stays
 the submitted text when a submission template shaped what the provider saw
 ([API.md](API.md#sessionhost-a-multi-session-service-for-network-hosts)).
-Only `SessionHost` takes typed submissions so far: `--web` and `serve`
-refuse an `idempotency_key` and never write these fields.
-
 ```text
 {"v":1,"type":"user_message","data":{"run_id":8,"trace_id":null,"text":"heart rate high","replaces":null,"source":"device:hr-01","kind":"telemetry","idempotency_key":"hr-01:seq-42","attributes":{"bpm":"132","unit":"bpm"}}}
 ```
@@ -142,23 +120,17 @@ journal epoch tells the two apart. A Run's lines run from its
 - Every kernel event journaled while the Run is in progress has `run_id`
   after `type`, and `trace_id` when the submission had one. Events between
   Runs have neither: `session_lifecycle`, `config_changed` from a command
-  (journaled before its `command_result`, by both Hosts) or from a
+  (journaled before its `command_result`, by SessionHost) or from a
   message's `model` and `permission_mode` (journaled before its
   `user_message`), and a background agent's `agent_lifecycle` reaped after
   `run_done`.
 - UI request and capability lines carry no `run_id`. A request belongs to
   the Run in progress when it is announced.
 - No other host line falls inside a Run: `command_result` and
-  `message_rejected` are journaled between Runs. A `--web`/`serve`
-  `/command` that plans a Run (a prompt, `/edit`, `/retry`, `/commit`, …)
-  journals its `command_result` first. The Run begins once every queued
-  command has run, so commands queued together that plan a Run share one,
-  and its `user_message` lines follow. A macro or `/retry` journals none, so
-  its Run starts with a kernel event.
+  `message_rejected` are journaled between Runs.
 - `trace_id` is the opaque ID the caller attached to the submission
-  (`SessionHost`'s `Submission.trace_id`). `--web` and `serve` take none:
-  their host lines say `null` and their kernel events omit it. Where the two
-  Hosts overlap they write the same bytes.
+  (`SessionHost`'s `Submission.trace_id`). Host lines use `null` and kernel events
+  omit the field when no `trace_id` was provided.
 
 - A Run that resumes a suspended one (`SessionHost`'s suspend mode, §1.5)
   has no `user_message`: its first line is `run_resumed`, right after the
@@ -171,17 +143,8 @@ A journal holds only wire lines. A transport adds frames of its own, which
 are not journal lines: they carry no `v`, take no seq and are never
 replayed.
 
-| Transport | Frames |
-|---|---|
-| SSE (`GET /events`) | `retry: 1000` first; `: keepalive` comments; `event: resync` when a cursor cannot be continued; `event: session_closed` once the journal is closed. A journal line is a frame with `id: <epoch>-<seq>` and no `event:`. |
-| UDS `attach` | `{"type":"keepalive"}` after 15 s without a line; `{"type":"session_closed"}` once the journal is closed, after which the stream ends. |
-
-A UDS reader tells them apart by `v`: a line with `v` is a journal line and
-advances its cursor (its next `since`), and a line without one is the
-transport's. They stay unversioned on purpose. They signal the connection,
-not the session: SSE sends the same two signals as a comment and a named
-event, outside its journal frames. A `v` would also make them look like
-journal lines, which a reader would then count.
+For SSE, use `EventJournal.eventId` for the journal line's id and
+`EventJournal.planResume` to decide whether the frontend needs to resync.
 
 ### 1.4 Requests nobody answered
 
@@ -243,9 +206,7 @@ approver takes the identity from its own authentication (an HTTP token, a UDS
 peer credential, an IM platform's user id), and either fills `by` itself
 instead of passing the client's through, or records the verified identity
 separately; it never trusts `by` from an answer body for authorization. `SessionHost.respond` refuses a `by` that is not such a
-string (`error.InvalidApprover`) and the request stays open. `--web` and
-`serve`, whose `respond` has only the 409, record a valid `by` and ignore
-another, applying the answer as before.
+string (`error.InvalidApprover`) and the request stays open.
 
 ```text
 {"v":1,"type":"ui_request_closed","id":1,"outcome":"answered","by":"alice@example.com"}
@@ -425,34 +386,16 @@ already announced stays pending and is answered or cancelled as before.
 
 ### 2.3 Transports
 
-| Host | Frame in | Reply |
-|---|---|---|
-| `--web`, `serve` | `POST /capabilities` | `200` `capabilities_accepted`, `400` `capabilities_refused` |
-| `serve --sessions N` | `POST /s/<id>/capabilities` | the same, per Session |
-| `SessionHost` | `HostedSession.declareCapabilities(allocator, frame)` | the acknowledgement line, or a `DeclareError` |
-| UDS (`serve --uds`) | the frame itself as one NDJSON line, with the routing fields beside it: `{"op":"capabilities","session":"<id>","v":1,"type":"capabilities",...}` | the acknowledgement line |
-
-UDS is a full UI frontend: it carries answers too. `{"op":"respond","session":
-"<id>","id":N,...}` answers UI request `N` with the same answer fields
-`POST /respond` takes beside the routing fields (`{"ok":true}`; a stale or
-unknown id is `{"ok":false,"error":"no pending request with this id"}`, the 409
-of the HTTP surface), so a UDS-only frontend needs no HTTP side channel.
-Evidence: `tests/component/serve_sessions_test.zig` (the `uds respond` /
-`uds capabilities` cases) and the UDS leg of
-`tests/e2e/daemon_serve_multi_e2e.sh`.
-
-`GET /state` reports the declaration in force as `frontend_capabilities`: the
-last `capabilities_accepted` object, or `null` while undeclared. The bundled
-browser UI declares `permission` and `ask_question` (no custom kinds) when it
-loads.
+An embedder passes the frame to `HostedSession.declareCapabilities(allocator, frame)`
+and forwards the acknowledgement line or maps the `DeclareError` to its
+transport. See `tests/component/frontend_capabilities_test.zig`.
 
 ### 2.4 Compatibility
 
 - **Undeclared frontend.** A frontend that never sends a frame is a v1
   frontend from before this exchange: every request is announced, exactly as
   before, including custom kinds it may not render. This is the defined
-  legacy rule, not a silent default: the state is visible (`/state` reports
-  `frontend_capabilities: null`) and a frontend opts out of it by declaring.
+   legacy rule. A frontend opts out of it by declaring its capabilities.
 - **One declaration per Session.** It belongs to the Session, not to a
   connection: it holds until the next accepted frame, across reconnects and
   for every reader. A Host that multiplexes several frontends onto one Session
