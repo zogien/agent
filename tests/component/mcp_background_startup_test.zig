@@ -5,7 +5,7 @@
 //!     connecting; the REPL joins it before it assembles its first request,
 //!     and that request is the one a synchronous start sends (system prompt,
 //!     tools and messages byte for byte), with the server's tools in it.
-//!   - Every other frontend (`.app_init`: headless, web, teammate,
+//!   - Every other frontend (`.app_init`: headless, daemon, web, teammate,
 //!     dumps) still has every server registered when App.init returns.
 //!   - A `/model` switch made before the join is what the prompt names, as it
 //!     is after a synchronous start.
@@ -293,7 +293,6 @@ test "only the interactive REPL defers the MCP join" {
     try std.testing.expectEqual(cc.types_mod.McpConnect.app_init, repl.mcp_connect);
     const others = [_][]const [*:0]const u8{
         &.{ "metacodes", "-p", "hi" },
-        &.{ "metacodes", "--web", "0" },
         &.{ "metacodes", "--dump-prompt" },
         &.{ "metacodes", "--teammate", "--agent-name", "x", "--team-name", "t" },
     };

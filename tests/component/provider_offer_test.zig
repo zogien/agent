@@ -1553,7 +1553,7 @@ test "L2: a provider metadata extension round-trips through the generic client v
     const a = std.testing.allocator;
     // A control carrying an opaque provider payload: the kernel must move it
     // through `model.list` untouched, so a client can render vendor-specific
-    // metadata without any core, TUI, or Web change.
+    // metadata without any Core or TUI change.
     var definitions = try cc.provider_custom.parse(a,
         \\{"custom_providers": {"vendor-x": {
         \\  "channels": [{"id":"c","base_url":"https://x.example.com/v1","protocol":"openai_chat"}],
@@ -1591,59 +1591,6 @@ test "L2: a provider metadata extension round-trips through the generic client v
     const focused = picker.focusedOffer() orelse return error.NoFocusedRoute;
     try std.testing.expectEqual(@as(usize, 1), focused.controls.len);
     try std.testing.expectEqualStrings("thinking", picker_mod.firstEnumeration(focused.controls).?.id);
-}
-
-// ── cross-UI: an out-of-process client sees the route, not just the name ─────
-
-test "L2: a route change is broadcast as an ordered, replayable event carrying identity" {
-    const a = std.testing.allocator;
-
-    // The Web journal's own sink (also the daemon's), so the test sees exactly
-    // what a browser or an attached client reads.
-    var journal = cc.event_journal.EventJournal.init(a);
-    defer journal.deinit();
-    var wb = cc.web_backend.WebBackend.init(a, &journal);
-    defer wb.deinit();
-    var web_sink = cc.web_session.WebConfigSink{ .wb = &wb };
-    const sink = web_sink.sink();
-
-    // A route event as `bindCommittedSelection` produces one.
-    sink.emit(.{ .route = .{
-        .provider_id = "zai-coding-plan",
-        .channel_id = "cn-openai",
-        .protocol = "openai_chat",
-        .request_model_id = "glm-5.3",
-        .offer_id = "offer-0123456789abcdef0123456789abcdef",
-        .credential_ref = "work",
-        .scope = "session",
-    } });
-
-    const lines = (try journal.waitSince(a, 0, 0)) orelse return error.TestExpectedRouteEvent;
-    defer {
-        for (lines) |l| a.free(l);
-        a.free(lines);
-    }
-    try std.testing.expectEqual(@as(usize, 1), lines.len);
-    const line = lines[0];
-    // Identity, not just a display name: a second client can tell this route
-    // from another that shows the same model name.
-    for ([_][]const u8{
-        "{\"v\":1,\"type\":\"config_changed\",\"data\":{\"route\":",
-        "zai-coding-plan",
-        "cn-openai",
-        "openai_chat",
-        "glm-5.3",
-        "offer-0123456789abcdef0123456789abcdef",
-        "\"credential_ref\":\"work\"",
-        "\"scope\":\"session\"",
-    }) |needle| {
-        std.testing.expect(std.mem.indexOf(u8, line, needle) != null) catch |err| {
-            std.debug.print("missing from route event: {s}\n{s}\n", .{ needle, line });
-            return err;
-        };
-    }
-    // The credential *reference* travels; the secret never does.
-    try std.testing.expect(std.mem.indexOf(u8, line, "sk-") == null);
 }
 
 test "L2: a configured provider carries several model families and their variants" {

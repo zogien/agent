@@ -32,9 +32,8 @@
 //! baseline does not name. The baseline may only shrink: an entry whose edge
 //! is gone fails too, and no file under `src/core/` may have one at all.
 //!
-//! The last rule is a ratchet for #445: `serve` and `--web` are to become
-//! transports over `src/core/session_host.zig`, so no file under `src/daemon/`
-//! or `src/web/` may drive the kernel by importing `src/core/agent_loop.zig`.
+//! The host boundary (#445) forbids application transports under `src/daemon/`
+//! or `src/web/` from importing the agent loop directly. Hosts use SessionHost.
 //! `HOST_KERNEL`'s baseline names the files that still do; like the library's,
 //! it may only shrink.
 
@@ -269,10 +268,7 @@ const HOST_KERNEL = Ratchet{
     .name = "single session host (#445)",
     .dirs = &.{ "src/daemon/", "src/web/" },
     .target = "src/core/agent_loop.zig",
-    .baseline = &.{
-        // The Web driver runs an `App` Run itself.
-        "src/web/session.zig",
-    },
+    .baseline = &.{},
 };
 
 /// Why `ratchet` is malformed, or null when it is not.
@@ -1042,7 +1038,7 @@ test "a host baseline entry whose import is gone fails the ratchet" {
 
 test "the host ratchet's baseline is under its directories and has no duplicate" {
     try std.testing.expectEqual(@as(?[]const u8, null), ratchetError(HOST_KERNEL));
-    try std.testing.expectEqual(@as(usize, 1), HOST_KERNEL.baseline.len);
+    try std.testing.expectEqual(@as(usize, 0), HOST_KERNEL.baseline.len);
     var ratchet = TEST_RATCHET;
     ratchet.baseline = &.{"src/session_service.zig"};
     try std.testing.expect(ratchetError(ratchet) != null);

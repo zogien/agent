@@ -116,7 +116,6 @@ test "out-of-vocabulary flag values fail closed" {
         .{ .argv = .{ "metacodes", "--reasoning-effort", "bogus" }, .needle = "invalid value 'bogus'" },
         .{ .argv = .{ "metacodes", "--teammate-mode", "bogus" }, .needle = "invalid value 'bogus' for --teammate-mode" },
         .{ .argv = .{ "metacodes", "--temperature", "warm" }, .needle = "invalid value 'warm' for --temperature" },
-        .{ .argv = .{ "metacodes", "--web", "70000" }, .needle = "invalid port '70000'" },
     };
     for (cases) |case| {
         const config = cc.parseArgsForTest(&case.argv, a);
@@ -146,12 +145,17 @@ test "teammate-mode accepts its documented vocabulary" {
     try std.testing.expect(!config.teammate_out_of_process);
 }
 
-test "in-range optional web port still parses" {
+test "removed Web and serve entry points fail argument parsing" {
     const a = std.testing.allocator;
-    const argv = [_][*:0]const u8{ "metacodes", "--web", "8080" };
-    const config = cc.parseArgsForTest(&argv, a);
-    try std.testing.expect(config.parse_error == null);
-    try std.testing.expectEqual(@as(?u16, 8080), config.web_port);
+    const cases = [_]struct { arg: [:0]const u8, needle: []const u8 }{
+        .{ .arg = "--web", .needle = "unknown flag '--web'" },
+        .{ .arg = "serve", .needle = "unexpected positional argument 'serve'" },
+    };
+    for (cases) |case| {
+        const config = cc.parseArgsForTest(&.{ "metacodes", case.arg.ptr }, a);
+        defer freeErr(a, config);
+        try parseErr(config, case.needle);
+    }
 }
 
 test "U8: --resume-response 解析进 config.resume_response(内联 + @file)" {
@@ -221,7 +225,7 @@ test "--image without a value is rejected" {
     try parseErr(config, "missing value for --image");
 }
 
-test "--image without -p/--print fails closed (no silent drop into TUI/serve)" {
+test "--image without -p/--print fails closed" {
     const a = std.testing.allocator;
     const argv = [_][*:0]const u8{ "metacodes", "--image", "a.png" };
     const config = cc.parseArgsForTest(&argv, a);

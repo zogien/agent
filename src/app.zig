@@ -3740,8 +3740,7 @@ pub const App = struct {
 
     /// Rebuild the conversation persisted under this App's own session
     /// directory, for an App built with `config.session_id` naming a session
-    /// that ran before and that has not run since (#254: the daemon's
-    /// `POST /sessions/create {"resume":true}`). The same steps as `/resume`:
+    /// that ran before and that has not run since. The same steps as `/resume`:
     /// `transcript.loadTranscript`, a writer reopened past the restored
     /// messages (App.init opened one at zero, which would append them a second
     /// time), the session's goal and its own model route (`--resume <id>`

@@ -99,34 +99,14 @@ pub const Config = struct {
     /// `--version`:打印 `metacodes <semver>` 到 stdout 后退出(parse 只置位,
     /// main 早退打印,保持 parseArgsForTest 可测)。
     show_version: bool = false,
-    /// `--web [port]`:起 web UI(HTTP+SSE)驱动 agent loop,不进 TUI REPL。
-    /// null = 不启用;0 = 内核分配端口(启动时打印真实端口)。
+    // Legacy application transport fields retained for the public Zig API.
     web_port: ?u16 = null,
-    /// **U10-D:`serve [port]`**:daemon 模式(经 SessionRegistry+SessionHost 跑 session,SIGINT 优雅
-    /// 关停)。当前单 session MVP(多 session /s/<id>/* = U10-C)。null=不启用;0=内核分配端口。
     serve_port: ?u16 = null,
-    /// **U10-C/#254:`serve --sessions N`**:the multi-session daemon (serveMulti:
-    /// sessions under /s/<id>/*, created and destroyed over HTTP) with N
-    /// sessions built at startup (N ≥ 0). null = not given: plain `serve` is
-    /// the single-session daemon unless `--uds` is set (then N = 1).
     serve_sessions: ?usize = null,
-    /// **#254:`serve --max-sessions M`**:the multi-session daemon's cap on
-    /// live sessions (M ≥ 1, M ≥ N). null = serve_multi.DEFAULT_MAX_SESSIONS.
     serve_max_sessions: ?usize = null,
-    /// **U10-B:`serve --uds <path>`**:daemon 附加一条 UDS+NDJSON 本地绑定(gui/语音 UI 首选,与 web
-    /// 并存)。非 null 即启用(强制走 serveMulti,即便 N=1)。POSIX only(Windows 走 web)。null=不启用。
     uds_path: ?[]const u8 = null,
-    /// `--web-bind <addr>`, else `METACODES_WEB_BIND` (#253): the IP literal the
-    /// HTTP surface of `--web`/`serve` binds (port from `--web`/`serve`).
-    /// null = 127.0.0.1. Parsed when read, so a bad value fails before startup;
-    /// a non-loopback address needs `web_token` or `web_allow_unauth`.
     web_bind: ?std.Io.net.IpAddress = null,
-    /// `--web-token <t>`, else `METACODES_WEB_TOKEN` (#252): the bearer token
-    /// every HTTP route but `GET /health` requires. null = no authentication.
-    /// Never printed or logged. The flag is visible in `ps`; prefer the env var.
     web_token: ?[]const u8 = null,
-    /// `--web-allow-unauth` (#253): accept a non-loopback `web_bind` without a
-    /// token, handing the session to anyone who reaches the port.
     web_allow_unauth: bool = false,
     /// **task#20:`--session <id>`**:显式指定 session id(24-char)。App.init 用它替代 gen()。
     /// 用途:subprocess resume——B 进程用挂起 session 的 id 复用其 transcript 目录 + suspend.json。
