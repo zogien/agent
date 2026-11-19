@@ -254,7 +254,7 @@ test "state .env: a subscription plan run from -p says so once on stderr; a mete
     const plan = try case.run(&.{try std.fmt.allocPrint(a, "METACODES_BASE_URL={s}/api/anthropic", .{try originOf(a, plan_server)})}, &.{ "-p", "hi" });
     const plan_request = try expectOneRequest(plan, plan_server, "/api/anthropic/v1/messages", "sk-plan");
     try expectMetacodesUserAgent(plan_request);
-    const notice = "warning: Z.AI GLM Coding Plan is a subscription plan for interactive use; its terms may not cover -p, serve or CI.";
+    const notice = "warning: Z.AI GLM Coding Plan is a subscription plan for interactive use; its terms may not cover -p or CI.";
     try testing.expectEqual(@as(usize, 1), std.mem.count(u8, plan.stderr, notice));
 
     // DeepSeek bills by the token: nothing to say.

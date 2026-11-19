@@ -1,6 +1,6 @@
-//! L2: per-message runtime configuration on web and daemon messages (#255).
+//! L2: per-message runtime configuration on the Web interface (#255).
 //!
-//! `POST /message` (and the UDS `message` op) may carry `model` and
+//! `POST /message` may carry `model` and
 //! `permission_mode`. The session's driver applies them right before the turn
 //! that message starts; the journal shows `config_changed` for each given field,
 //! then the turn's `user_message`, then the turn. The provider request carries
@@ -9,19 +9,15 @@
 //! refused with 400 before anything is queued; a model the provider cannot
 //! serve applies neither field, runs no turn and journals `message_rejected`.
 //!
-//! A real App (temporary HOME, a MockServer provider) under both drivers: the
-//! `--web` loop (`web_session.run`) and the daemon driver
-//! (`daemon/app_driver.zig` behind a SessionHost, reached over HTTP and UDS).
+//! A real App (temporary HOME, a MockServer provider) drives the Web loop.
 //!
-//! The same drivers write every journal line as wire v1 (#444,
+//! The Web loop writes every journal line as wire v1 (#444,
 //! doc/WIRE_PROTOCOL.md): a session's whole journal, through a Run with a
 //! permission prompt, a command, a refused message and a Run a `/command`
 //! planned, parses line by line as `{"v":1,"type":...}` of a known type, and
-//! every line of a Run carries that Run's `run_id` (`expectWireJournal`); the
-//! SSE stream and the UDS attachment carry exactly the journal's lines.
+//! every line of a Run carries that Run's `run_id` (`expectWireJournal`).
 
 const std = @import("std");
-const builtin = @import("builtin");
 const harness = @import("harness");
 const cc = @import("cc");
 const pnet = @import("platform").net;
@@ -350,7 +346,7 @@ fn freePort() !u16 {
 
 /// One message with configuration, its order on the stream, the provider
 /// request, /state afterwards and the saved login; then a bare message that
-/// keeps it all. Shared by the `--web` and daemon drivers.
+/// keeps it all.
 fn expectAppliedBeforeTurn(a: std.mem.Allocator, fx: *AppFixture, port: u16) !void {
     var before = try getState(a, port);
     defer before.deinit();
@@ -760,222 +756,6 @@ test "L2 web: without that setting the same message and /mode apply; disableAuto
     stopped = true;
 }
 
-// ── the daemon driver: SessionHost + app_driver, over HTTP and UDS ───────────
-
-const SessionHost = cc.daemon_registry.SessionHost;
-
-/// `metacodes serve`'s single-session wiring (daemon/serve.zig), in place.
-const DaemonHost = struct {
-    host: *SessionHost,
-    wb: cc.web_backend.WebBackend,
-    dctx: cc.daemon_app_driver.DriverCtx,
-    config_sink: cc.web_session.WebConfigSink,
-    state_src: cc.web_session.StateSource,
-    srv: *cc.web_server.WebServer,
-
-    fn start(self: *DaemonHost, app: *cc.app_module.App) !void {
-        const a = std.testing.allocator;
-        self.host = try SessionHost.create(a, app.session_id, @ptrCast(&self.dctx), cc.daemon_app_driver.driverFn, null, cc.daemon_app_driver.abortFn);
-        errdefer self.host.destroy();
-        self.wb = cc.web_backend.WebBackend.init(a, &self.host.journal);
-        errdefer self.wb.deinit();
-        self.wb.abort = &app.abort;
-        self.wb.usage_totals = &app.usage;
-        self.dctx = .{ .app = app, .wb = &self.wb };
-        self.config_sink = .{ .wb = &self.wb };
-        app.setConfigEventSink(self.config_sink.sink());
-        errdefer app.setConfigEventSink(null);
-        app.permission_ctx.ui_requester = self.wb.requester();
-        errdefer app.permission_ctx.ui_requester = null;
-        self.state_src = .{ .app = app, .wb = &self.wb, .cmdbox = &self.host.cmdbox, .journal = &self.host.journal, .generating = &self.host.generating };
-        self.srv = try cc.web_server.WebServer.start(a, .{ .version = "0.0.0-test" }, .{
-            .journal = &self.host.journal,
-            .web_backend = &self.wb,
-            .inbox = &self.host.inbox,
-            .abort = &app.abort,
-            .generating = &self.host.generating,
-            .state_ctx = @ptrCast(&self.state_src),
-            .state_fn = &cc.web_session.StateSource.snapshot,
-            .command_fn = &cc.web_session.StateSource.command,
-        });
-        errdefer {
-            self.host.journal.close();
-            self.srv.stop();
-        }
-        // serve.zig's first journal line (seq 0).
-        cc.web_session.journalSessionLifecycle(&self.host.journal, a, .{ .created = app.session_id.asSlice() });
-        // The driver starts last, so no failure above leaves it running over a freed wb.
-        try self.host.start();
-    }
-
-    /// serve.zig's shutdown order: transport first, then the driver, then wb.
-    fn stop(self: *DaemonHost) void {
-        const app = self.dctx.app;
-        self.host.journal.close();
-        self.srv.stop();
-        self.host.destroy();
-        app.setConfigEventSink(null);
-        app.permission_ctx.ui_requester = null;
-        self.wb.deinit();
-    }
-
-    fn resolve(ctx: *anyopaque, id: []const u8) ?cc.web_server.Lease {
-        const self: *DaemonHost = @ptrCast(@alignCast(ctx));
-        if (!std.mem.eql(u8, id, self.dctx.app.session_id.asSlice())) return null;
-        return .{
-            .view = .{
-                .journal = &self.host.journal,
-                .web_backend = &self.wb,
-                .inbox = &self.host.inbox,
-                .abort = &self.dctx.app.abort,
-                .generating = &self.host.generating,
-                .state_ctx = @ptrCast(&self.state_src),
-                .state_fn = &cc.web_session.StateSource.snapshot,
-            },
-            .ctx = ctx,
-            .release_fn = &release,
-        };
-    }
-
-    /// The one session outlives every transport here (`stop` stops them
-    /// first), so a lease has nothing to give back (#254).
-    fn release(_: *anyopaque) void {}
-
-    /// The journal's lines since `from`, waiting (bounded) for `needle`.
-    fn linesUntil(self: *DaemonHost, a: std.mem.Allocator, from: usize, needle: []const u8) ![][]u8 {
-        const deadline = cc.util_time.nowMs() + 10_000;
-        while (cc.util_time.nowMs() <= deadline) {
-            // Returns at once while lines exist since `from`, so poll rather than spin.
-            if (try self.host.journal.waitSince(a, from, 20)) |lines| {
-                for (lines) |l| if (std.mem.indexOf(u8, l, needle) != null) return lines;
-                freeLines(a, lines);
-                cc.util_time.sleepMs(10);
-            }
-        }
-        return error.TestTimedOutWaitingForJournal;
-    }
-};
-
-fn freeLines(a: std.mem.Allocator, lines: [][]u8) void {
-    for (lines) |l| a.free(l);
-    a.free(lines);
-}
-
-test "L2 serve: the daemon driver applies message configuration the same way (HTTP)" {
-    const a = std.testing.allocator;
-    var fx: AppFixture = undefined;
-    try fx.setup(&.{TEXT_SSE});
-    defer fx.deinit();
-    try fx.saveLoginModel(START_MODEL);
-
-    var daemon: DaemonHost = undefined;
-    try daemon.start(fx.app);
-    defer daemon.stop();
-
-    try expectAppliedBeforeTurn(a, &fx, daemon.srv.port);
-}
-
-test "L2 serve: the daemon driver's run_done carries the model failure's detail too (#408)" {
-    const a = std.testing.allocator;
-    var fx: AppFixture = undefined;
-    try fx.setup(&.{ BUSINESS_ERROR_SSE, TEXT_SSE });
-    defer fx.deinit();
-    var daemon: DaemonHost = undefined;
-    try daemon.start(fx.app);
-    defer daemon.stop();
-    try expectModelFailureOnRunDone(a, daemon.srv.port);
-}
-
-test "L2 serve: the UDS message op carries the same fields, checks and order" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // UDS is POSIX-only
-    const a = std.testing.allocator;
-    var fx: AppFixture = undefined;
-    try fx.setup(&.{TEXT_SSE});
-    defer fx.deinit();
-    try fx.saveLoginModel(START_MODEL);
-
-    var daemon: DaemonHost = undefined;
-    try daemon.start(fx.app);
-    defer daemon.stop();
-
-    var nonce: [6]u8 = undefined;
-    if (!@import("platform").rng.randomBytes(&nonce)) return error.TestNoRandomness;
-    var path_buf: [256]u8 = undefined;
-    const sock_path = try std.fmt.bufPrint(&path_buf, "{s}/mc-msgcfg-{s}.sock", .{ std.mem.trimEnd(u8, ppaths.tempDir(), "/"), &std.fmt.bytesToHex(nonce, .lower) });
-    const uds = try cc.daemon_uds.UdsServer.start(a, sock_path, .{
-        .allocator = a,
-        .resolver = &DaemonHost.resolve,
-        .resolver_ctx = @ptrCast(&daemon),
-    });
-    defer uds.stop();
-
-    const conn = try pnet.connectUnix(sock_path);
-    defer pnet.closeSocket(conn);
-    pnet.setRecvTimeoutMs(conn, 500);
-
-    const sid = fx.app.session_id.asSlice();
-    var line_buf: [512]u8 = undefined;
-
-    // Refused before anything is queued.
-    {
-        const line = try std.fmt.bufPrint(&line_buf, "{{\"op\":\"message\",\"session\":\"{s}\",\"text\":\"bad\",\"permission_mode\":\"plan\"}}\n", .{sid});
-        const reply = try udsRoundtrip(a, conn, line);
-        defer a.free(reply);
-        try std.testing.expect(std.mem.startsWith(u8, reply, "{\"ok\":false,\"error\":\"invalid permission_mode"));
-        try std.testing.expectEqual(@as(usize, 0), daemon.host.inbox.len());
-    }
-
-    const from = daemon.host.journal.count();
-    const requests_before = fx.mock.requestCount();
-    {
-        const line = try std.fmt.bufPrint(&line_buf, "{{\"op\":\"message\",\"session\":\"{s}\",\"text\":\"over uds\",\"model\":\"{s}\",\"permission_mode\":\"dontAsk\"}}\n", .{ sid, TURN_MODEL });
-        const reply = try udsRoundtrip(a, conn, line);
-        defer a.free(reply);
-        try std.testing.expectEqualStrings("{\"ok\":true}", reply);
-    }
-    const lines = try daemon.linesUntil(a, from, "\"run_done\"");
-    defer freeLines(a, lines);
-    const user = try expectLine(lines, "{\"v\":1,\"type\":\"user_message\",\"data\":{\"run_id\":1,\"trace_id\":null,\"text\":\"over uds\",\"replaces\":null}}");
-    try std.testing.expectEqual(user, 2 + try expectLine(lines, "{\"v\":1,\"type\":\"config_changed\",\"data\":{\"model\":\"" ++ TURN_MODEL ++ "\"}}"));
-    try std.testing.expectEqual(user, 1 + try expectLine(lines, "{\"v\":1,\"type\":\"config_changed\",\"data\":{\"mode\":\"dont_ask\"}}"));
-    try std.testing.expect(user < try expectLine(lines, "\"run_done\""));
-    try std.testing.expectEqual(@as(usize, 0), countLines(lines, "\"bad\""));
-    try std.testing.expectEqualStrings("\"" ++ TURN_MODEL ++ "\"", try requestModel(fx.mock, requests_before));
-    try std.testing.expectEqual(cc.types_mod.PermissionMode.dont_ask, fx.app.permMode());
-    try fx.expectLoginModel(START_MODEL);
-}
-
-/// Send one NDJSON request line and read one reply line (without the newline).
-/// A timed-out recv is retried for up to 10 s (see `roundtrip`).
-fn udsRoundtrip(a: std.mem.Allocator, conn: pnet.Socket, line: []const u8) ![]u8 {
-    const deadline = cc.util_time.nowMs() + 10_000;
-    var off: usize = 0;
-    while (off < line.len) {
-        const n = pnet.send(conn, line[off..]);
-        if (n > 0) {
-            off += @intCast(n);
-        } else if (n == 0 or !pnet.recvRetriable() or cc.util_time.nowMs() > deadline) {
-            return error.WriteFailed;
-        }
-    }
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(a);
-    var chunk: [512]u8 = undefined;
-    while (std.mem.indexOfScalar(u8, out.items, '\n') == null) {
-        if (cc.util_time.nowMs() > deadline) return error.TestUdsReplyMissing;
-        const n = pnet.recv(conn, &chunk);
-        if (n == 0) return error.TestUdsReplyMissing;
-        if (n < 0) {
-            if (!pnet.recvRetriable()) return error.TestUdsReplyMissing;
-            continue;
-        }
-        try out.appendSlice(a, chunk[0..@intCast(n)]);
-    }
-    const nl = std.mem.indexOfScalar(u8, out.items, '\n').?;
-    out.shrinkRetainingCapacity(nl);
-    return out.toOwnedSlice(a);
-}
-
 // ── every journal line is wire v1; a Run's lines carry its run_id (#444) ─────
 
 /// How a journal line's `type` stands in the wire grammar.
@@ -991,7 +771,7 @@ fn classOf(type_name: []const u8) LineClass {
     return .other;
 }
 
-/// A web/serve journal, in order, against wire v1: each line is one JSON
+/// A Web journal, in order, against wire v1: each line is one JSON
 /// object with `v` 1 and a `type` of the grammar (`wire.isLineType`). A Run's
 /// lines - its `user_message`, the kernel events journaled while it runs, its
 /// `run_done` - carry its `run_id`, numbered 1, 2, … in order; no other line
@@ -1075,7 +855,7 @@ test "#444 the journal check refuses an unversioned line, an unknown type and a 
     var bad: usize = 0;
     const user1 = "{\"v\":1,\"type\":\"user_message\",\"data\":{\"run_id\":1,\"trace_id\":null,\"text\":\"hi\",\"replaces\":null}}";
     const done1 = "{\"v\":1,\"type\":\"run_done\",\"data\":{\"run_id\":1,\"trace_id\":null,\"stop_reason\":\"end_turn\",\"error_name\":null,\"model_error\":null}}";
-    // What the web/serve host wrote before #444.
+    // What the Web host wrote before #444.
     try std.testing.expectError(error.TestUnversionedLine, checkWireJournal(a, &.{"{\"user_message\":\"hi\"}"}, &bad));
     try std.testing.expectError(error.TestUnversionedLine, checkWireJournal(a, &.{"{\"session_lifecycle\":{\"created\":\"x\"}}"}, &bad));
     try std.testing.expectError(error.TestUnknownLineType, checkWireJournal(a, &.{"{\"v\":1,\"type\":\"keepalive\"}"}, &bad));
@@ -1234,99 +1014,4 @@ test "L2 web: every journal line is wire v1 and a Run's lines carry its run_id, 
 
     try web.stop();
     stopped = true;
-}
-
-/// Every NDJSON line a UDS attachment from seq 0 streams, until it has
-/// carried `want` journal lines. The transport's own keepalive frame is not
-/// a journal line (doc/WIRE_PROTOCOL.md §1.3) and is left out.
-fn udsAttachLines(a: std.mem.Allocator, sock_path: []const u8, sid: []const u8, want: usize) ![][]u8 {
-    const conn = try pnet.connectUnix(sock_path);
-    defer pnet.closeSocket(conn);
-    pnet.setRecvTimeoutMs(conn, 500);
-    var line_buf: [128]u8 = undefined;
-    const attach = try std.fmt.bufPrint(&line_buf, "{{\"op\":\"attach\",\"session\":\"{s}\",\"since\":0}}\n", .{sid});
-    var off: usize = 0;
-    while (off < attach.len) {
-        const n = pnet.send(conn, attach[off..]);
-        if (n <= 0) return error.WriteFailed;
-        off += @intCast(n);
-    }
-    var lines: std.ArrayList([]u8) = .empty;
-    errdefer {
-        for (lines.items) |l| a.free(l);
-        lines.deinit(a);
-    }
-    var pending: std.ArrayList(u8) = .empty;
-    defer pending.deinit(a);
-    var chunk: [4096]u8 = undefined;
-    const deadline = cc.util_time.nowMs() + 10_000;
-    while (lines.items.len < want) {
-        if (cc.util_time.nowMs() > deadline) return error.TestUdsAttachShort;
-        const n = pnet.recv(conn, &chunk);
-        if (n == 0) return error.TestUdsAttachShort;
-        if (n < 0) {
-            if (!pnet.recvRetriable()) return error.TestUdsAttachShort;
-            continue;
-        }
-        try pending.appendSlice(a, chunk[0..@intCast(n)]);
-        while (std.mem.indexOfScalar(u8, pending.items, '\n')) |nl| {
-            const line = pending.items[0..nl];
-            if (!std.mem.eql(u8, line, "{\"type\":\"keepalive\"}")) try lines.append(a, try a.dupe(u8, line));
-            const rest = pending.items.len - nl - 1;
-            std.mem.copyForwards(u8, pending.items[0..rest], pending.items[nl + 1 ..]);
-            pending.shrinkRetainingCapacity(rest);
-        }
-    }
-    return lines.toOwnedSlice(a);
-}
-
-test "L2 serve: the daemon driver journals the same wire v1 lines; SSE and UDS attach carry exactly them (#444)" {
-    const a = std.testing.allocator;
-    const write_path = try wireWritePath(a);
-    defer a.free(write_path);
-    defer pfs.unlinkPath(write_path.ptr) catch {};
-    const write_sse = try writeToolSse(a, write_path);
-    defer a.free(write_sse);
-    var fx: AppFixture = undefined;
-    try fx.setup(&.{ write_sse, TEXT_SSE });
-    defer fx.deinit();
-
-    var daemon: DaemonHost = undefined;
-    try daemon.start(fx.app);
-    defer daemon.stop();
-
-    var sse: []u8 = &.{};
-    const lines = try driveWireScenario(a, daemon.srv.port, write_path, &sse);
-    defer a.free(sse);
-    defer a.free(lines);
-    try expectWireScenario(a, lines, fx.app.session_id.asSlice());
-
-    // The journal itself, which SSE replayed line for line.
-    const journal = (try daemon.host.journal.waitSince(a, 0, 0)) orelse return error.TestEmptyJournal;
-    defer freeLines(a, journal);
-    try std.testing.expect(journal.len >= lines.len);
-    for (lines, journal[0..lines.len]) |streamed, journaled| try std.testing.expectEqualStrings(journaled, streamed);
-    _ = try expectWireJournal(a, journal);
-
-    if (builtin.os.tag == .windows) return; // UDS is POSIX-only
-    var nonce: [6]u8 = undefined;
-    if (!@import("platform").rng.randomBytes(&nonce)) return error.TestNoRandomness;
-    var path_buf: [256]u8 = undefined;
-    const sock_path = try std.fmt.bufPrint(&path_buf, "{s}/mc-wire-{s}.sock", .{ std.mem.trimEnd(u8, ppaths.tempDir(), "/"), &std.fmt.bytesToHex(nonce, .lower) });
-    const uds = try cc.daemon_uds.UdsServer.start(a, sock_path, .{
-        .allocator = a,
-        .resolver = &DaemonHost.resolve,
-        .resolver_ctx = @ptrCast(&daemon),
-    });
-    defer {
-        // As serve shuts down: the journal's close ends the attachment, whose
-        // thread waits on the journal, before the socket stops (`stop` closes
-        // it again, which is harmless).
-        daemon.host.journal.close();
-        uds.stop();
-    }
-    const attached = try udsAttachLines(a, sock_path, fx.app.session_id.asSlice(), journal.len);
-    defer freeLines(a, attached);
-    try std.testing.expect(attached.len >= journal.len);
-    for (journal, attached[0..journal.len]) |journaled, line| try std.testing.expectEqualStrings(journaled, line);
 }

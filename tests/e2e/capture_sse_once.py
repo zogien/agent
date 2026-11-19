@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Capture one Anthropic-compatible request and answer it with one `end_turn` stream.
 
-The answer is a complete stream, the one tests/e2e/daemon_mock_provider.py
-sends. A bare `message_stop` carries no stop reason: the agent loop reads that
+The answer is a complete stream ending with `end_turn`. A bare `message_stop`
+carries no stop reason. The agent loop reads that
 as an incomplete stream and resends the request (`isSilentRetryFailure`), and
 this server answers only once, so the resend ran into connect retries against
 a closed port. process_dag_resume_smoke.sh took 2 minutes on the Linux runner

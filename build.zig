@@ -2928,34 +2928,6 @@ pub fn build(b: *std.Build) void {
             eval_test_cmd.step.dependOn(b.getInstallStep());
             eval_test_cmd.setEnvironmentVariable("METACODES_NATIVE_E2E_BIN", b.getInstallPath(.bin, exe.out_filename));
         };
-        // The daemon HTTP surface end to end: the installed product's `serve`
-        // and `serve --sessions 2 --uds` against a loopback mock provider
-        // (paid=0, external network=0, kernel-picked ports, TinyKG autostart
-        // off): /health, bearer token, bind address, the non-loopback
-        // refusal, routing, UDS, SIGINT shutdown. Unwired, both scripts rotted
-        // (fixed ports, a `/mode plan` that no longer exists). POSIX only:
-        // they are bash, use curl and Unix-domain sockets, and send SIGINT.
-        if (@import("builtin").os.tag != .windows) {
-            for ([_][]const u8{ "tests/e2e/daemon_serve_e2e.sh", "tests/e2e/daemon_serve_multi_e2e.sh" }) |script| {
-                const daemon_e2e = b.addSystemCommand(&.{ "bash", script });
-                daemon_e2e.step.dependOn(b.getInstallStep());
-                daemon_e2e.setEnvironmentVariable("METACODES_DAEMON_E2E_BIN", b.getInstallPath(.bin, exe.out_filename));
-                product_test_step.dependOn(&daemon_e2e.step);
-            }
-        }
-        // The capability exchange (doc/WIRE_PROTOCOL.md §2) end to end: the
-        // installed `serve` against the same loopback mock provider, with the
-        // script as the second-process frontend that declares what it renders
-        // and checks what it is then asked. Python and HTTP only, so every host.
-        {
-            const caps_e2e = b.addSystemCommand(&.{
-                if (@import("builtin").os.tag == .windows) "python" else "python3",
-                "tests/e2e/frontend_capabilities_e2e.py",
-            });
-            caps_e2e.step.dependOn(b.getInstallStep());
-            caps_e2e.setEnvironmentVariable("METACODES_DAEMON_E2E_BIN", b.getInstallPath(.bin, exe.out_filename));
-            product_test_step.dependOn(&caps_e2e.step);
-        }
         // What plain `-p` says when a Run fails (#417): real exit code, stdout
         // and stderr against a loopback mock on all four wires.
         {
@@ -2964,7 +2936,7 @@ pub fn build(b: *std.Build) void {
                 "tests/e2e/headless_stop_notice_e2e.py",
             });
             stop_notice_e2e.step.dependOn(b.getInstallStep());
-            stop_notice_e2e.setEnvironmentVariable("METACODES_DAEMON_E2E_BIN", b.getInstallPath(.bin, exe.out_filename));
+            stop_notice_e2e.setEnvironmentVariable("METACODES_NATIVE_E2E_BIN", b.getInstallPath(.bin, exe.out_filename));
             product_test_step.dependOn(&stop_notice_e2e.step);
         }
         // The native project-Harness suites (E3 runtime and templates, the

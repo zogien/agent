@@ -270,9 +270,7 @@ const HOST_KERNEL = Ratchet{
     .dirs = &.{ "src/daemon/", "src/web/" },
     .target = "src/core/agent_loop.zig",
     .baseline = &.{
-        // The daemon's per-session driver runs an `App` Run itself.
-        "src/daemon/app_driver.zig",
-        // `--web`'s driver loop, which `app_driver.zig` mirrors.
+        // The Web driver runs an `App` Run itself.
         "src/web/session.zig",
     },
 };
@@ -1044,7 +1042,7 @@ test "a host baseline entry whose import is gone fails the ratchet" {
 
 test "the host ratchet's baseline is under its directories and has no duplicate" {
     try std.testing.expectEqual(@as(?[]const u8, null), ratchetError(HOST_KERNEL));
-    try std.testing.expectEqual(@as(usize, 2), HOST_KERNEL.baseline.len);
+    try std.testing.expectEqual(@as(usize, 1), HOST_KERNEL.baseline.len);
     var ratchet = TEST_RATCHET;
     ratchet.baseline = &.{"src/session_service.zig"};
     try std.testing.expect(ratchetError(ratchet) != null);

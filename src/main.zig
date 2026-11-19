@@ -360,11 +360,6 @@ pub const web_session = @import("web/session.zig");
 pub const web_submission = @import("web/submission.zig");
 pub const session_intent = @import("session_intent.zig"); // U11:UI 中立输入意图(issue #3)
 pub const session_service = @import("session_service.zig"); // U11:canonical 会话命令面 + run 装配
-pub const daemon_registry = @import("daemon/registry.zig"); // U10:SessionRegistry + SessionHost
-pub const daemon_app_driver = @import("daemon/app_driver.zig"); // U10-D:真 App driver
-pub const daemon_serve = @import("daemon/serve.zig"); // U10-D:serve(单 session daemon MVP)
-pub const daemon_serve_multi = @import("daemon/serve_multi.zig"); // U10-C/#254:multi-session daemon (component tests drive it)
-pub const daemon_uds = @import("daemon/uds.zig"); // U10-B:UDS+NDJSON 绑定(组件测试驱动 message op)
 pub const core_shutdown = @import("core/shutdown.zig"); // U9:进程级停机信号
 pub const tui_status_bar = @import("repl/tui/widget/status_bar.zig");
 pub const tui_verbs = @import("repl/tui/verbs.zig");
@@ -723,7 +718,7 @@ fn presetFactsOutOfMemory() noreturn {
 }
 
 /// A preset this start was asked for that config.json does not define
-/// (#489): `-p`, `serve`, `--web` and the rest stop, listing the presets
+/// (#489): `-p`, `--web` and the rest stop, listing the presets
 /// there; the interactive TUI starts as if it had not been named and says so
 /// once under its banner (the returned notice).
 fn presetNotice(
@@ -1469,7 +1464,7 @@ pub fn main(init: std.process.Init) !void {
     // 终端,此时也要抑制日志。verbose(用户显式要日志)/ fd 2 非 tty(无终端可写花)不关。
     // **必须在 App.init 之前**:init 期的 warn/err(如 KG 降级告警)否则抢在 gate 前直接打进终端,
     // 留在 TUI 上方成残行,且超宽行在 strict-autowrap 终端还会折行挤歪整屏。
-    // 非 TUI 模式(teammate/serve/web/resume/headless/dump)无渲染流,保留 stderr 日志。
+    // 非 TUI 模式(teammate/web/resume/headless/dump)无渲染流,保留 stderr 日志。
     const interactive_tui = interactiveRepl(config);
     const quiet_stderr = interactive_tui and !config.verbose and platform_term.isatty(2);
     if (quiet_stderr) log.setStderrEnabled(false);
@@ -1499,7 +1494,7 @@ pub fn main(init: std.process.Init) !void {
     // credential the Metask scope resolves is Metask's.
     var credential_origin: route_state_mod.CredentialOrigin = .metask;
     // Only the interactive TUI has someone to tell what is missing (#484):
-    // `-p`, `-`, `serve`, `--web`, resumed suspensions, teammates and a REPL
+    // `-p`, `-`, `--web`, resumed suspensions, teammates and a REPL
     // whose input is a pipe stop at once, non-zero, as scripts expect.
     const may_open_unbound = interactive_tui and platform_term.isatty(0);
     var unbound: ?route_state_mod.Unbound = null;
@@ -1625,14 +1620,14 @@ pub fn main(init: std.process.Init) !void {
     if (skipped_default_notice) |notice| if (!interactive_tui) std.debug.print("warning: {s}\n", .{notice});
     // A subscription plan is licensed for a person in a coding tool
     // (`ProviderProfile.subscription_plan`). Said once when nobody is at the
-    // keyboard: `-p`, `serve`, a resumed suspension, the REPL reading a pipe.
+    // keyboard: `-p`, a resumed suspension, the REPL reading a pipe.
     // `--web` is a person in a browser and a teammate answers to its lead's
     // session; neither is told. A note, never a refusal.
-    const unattended = config.prompt != null or config.serve_port != null or
+    const unattended = config.prompt != null or
         config.resume_response != null or (interactive_tui and !may_open_unbound);
     if (unattended and !introspection_only and !metask_scope and provider_secret != null) {
         if (subscriptionPlanName(allocator, config.resolved_provider_id orelse config.provider_profile.?)) |plan|
-            std.debug.print("warning: {s} is a subscription plan for interactive use; its terms may not cover -p, serve or CI. Use a pay-as-you-go key for automation.\n", .{plan});
+            std.debug.print("warning: {s} is a subscription plan for interactive use; its terms may not cover -p or CI. Use a pay-as-you-go key for automation.\n", .{plan});
     }
     // 第七节第 3 条 (#485): `.env` configures a provider, yet the start is on
     // Metask, which ranks above it (a sign-in or a stored default). Said once
@@ -1749,36 +1744,13 @@ pub fn main(init: std.process.Init) !void {
     var version_buffer: [version_info.MAX_VERSION_LEN]u8 = undefined;
     const running_version = version_info.fullVersion(&version_buffer, VERSION, version_info.BuildInfo.fromOptions(build_options));
 
-    // U10-D:`serve [port]` daemon 模式 → 经 registry/host/app_driver 跑 session,SIGINT 优雅关停。
-    // --sessions N(N ≥ 0)或 --uds → serveMulti(sessions under /s/<id>/*, created and
-    // destroyed over HTTP, U10-C/#254)。
-    if (config.serve_port) |port| {
-        const surface = webSurface(&config, port, running_version);
-        if (config.serve_sessions != null or config.uds_path != null) {
-            // serveMulti owns `app` from here: a session adopts it, or (N = 0) it is released at once.
-            const code = daemon_serve_multi.serveMulti(app, config, api_key, surface, config.serve_sessions orelse 1, multiSessionCap(config), config.uds_path) catch |err| blk: {
-                log.err("daemon", "serve-multi failed: {s}", .{@errorName(err)});
-                break :blk @as(u8, 1);
-            };
-            std.process.exit(code);
-        }
-        const code = @import("daemon/serve.zig").serve(app, gpa, surface) catch |err| blk: {
-            log.err("daemon", "serve failed: {s}", .{@errorName(err)});
-            break :blk 1;
-        };
-        // process.exit 跳过 defer app.deinit → MCP/LSP 子进程不 terminate/reap 变孤儿
-        // (serve_multi 在 teardownSlot 自行 reap,此路径须显式)。serve 返回时 driver 已 join,安全。
-        app.deinit();
-        std.process.exit(code);
-    }
-
     // Web 模式:`--web [port]` → 起 HTTP+SSE 服务器驱动 agent loop,不进 TUI REPL。
     if (config.web_port) |port| {
         const code = @import("web/session.zig").run(app, gpa, webSurface(&config, port, running_version)) catch |err| blk: {
             log.err("web", "web session failed: {s}", .{@errorName(err)});
             break :blk 1;
         };
-        // 同 serve:exit 前显式 deinit,reap MCP/LSP 子进程。run() 返回时连接线程已 drain,安全。
+        // exit 前显式 deinit,reap MCP/LSP 子进程。run() 返回时连接线程已 drain,安全。
         app.deinit();
         std.process.exit(code);
     }
@@ -1831,11 +1803,10 @@ fn printNextStep(app: *app_mod.App, allocator: std.mem.Allocator, failure: *cons
     std.debug.print("{s}\n", .{line});
 }
 
-/// Whether this run ends in the interactive REPL (`repl.run`): no daemon,
-/// web, headless, resumed-suspension, teammate or dump frontend was asked
+/// Whether this run ends in the interactive REPL (`repl.run`): no web, headless, resumed-suspension, teammate or dump frontend was asked
 /// for. Only that frontend shows a prompt before its MCP servers connect.
 pub fn interactiveRepl(config: types.Config) bool {
-    return config.serve_port == null and config.web_port == null and
+    return config.web_port == null and
         config.resume_response == null and config.prompt == null and
         config.teammate_name.len == 0 and !config.dump_prompt and !config.dump_plugins;
 }
@@ -4645,48 +4616,6 @@ fn parseArgsInto(config: *types.Config, args: *std.process.Args.Iterator, alloca
                     return;
                 }
             }
-        } else if (std.mem.eql(u8, arg, "serve")) {
-            // U10-D:`serve [port]` daemon 模式(位置子命令)。可选端口(下一个 arg 是数字才吃)。
-            config.serve_port = 7777;
-            var probe = args.*;
-            if (probe.next()) |maybe_port| {
-                if (std.fmt.parseInt(u16, maybe_port, 10)) |p| {
-                    config.serve_port = p;
-                    _ = args.next();
-                } else |_| if (isAllDigits(maybe_port)) {
-                    setParseError(config, allocator, "invalid port '{s}' for serve (0-65535)", .{maybe_port});
-                    return;
-                }
-            }
-        } else if (std.mem.eql(u8, arg, "--sessions")) {
-            // U10-C/#254:the multi-session daemon, with N sessions built at startup (N ≥ 0).
-            const v = args.next() orelse {
-                setParseError(config, allocator, "missing value for --sessions", .{});
-                return;
-            };
-            config.serve_sessions = std.fmt.parseInt(usize, v, 10) catch {
-                setParseError(config, allocator, "invalid --sessions '{s}' (a session count, 0 or more)", .{v});
-                return;
-            };
-        } else if (std.mem.eql(u8, arg, "--max-sessions")) {
-            // #254:the multi-session daemon's cap on live sessions.
-            const v = args.next() orelse {
-                setParseError(config, allocator, "missing value for --max-sessions", .{});
-                return;
-            };
-            const max = std.fmt.parseInt(usize, v, 10) catch 0;
-            if (max == 0) {
-                setParseError(config, allocator, "invalid --max-sessions '{s}' (a session count, 1 or more)", .{v});
-                return;
-            }
-            config.serve_max_sessions = max;
-        } else if (std.mem.eql(u8, arg, "--uds")) {
-            // U10-B:daemon 附加 UDS+NDJSON 绑定(路径)。设置即启用(强制走 serveMulti)。
-            const v = args.next() orelse {
-                setParseError(config, allocator, "missing value for --uds", .{});
-                return;
-            };
-            config.uds_path = allocator.dupe(u8, v) catch v;
         } else if (std.mem.eql(u8, arg, "--web-bind")) {
             // #253: validated here, so a typo fails before anything starts.
             const v = args.next() orelse {
@@ -4763,7 +4692,7 @@ fn parseArgsInto(config: *types.Config, args: *std.process.Args.Iterator, alloca
         }
     }
     // `--image` 只在 headless prompt 模式(-p/--print/stdin `-`)消费;其它任何模式
-    // (TUI/serve/web/dump)静默忽略违背 issue #10"图绝不静默丢"铁律与 flag 面
+    // (TUI/web/dump)静默忽略违背 issue #10"图绝不静默丢"铁律与 flag 面
     // fail-closed 契约。统一在 parse 尾部拒绝(parseArgsForTest 可测)。
     if (config.images != null and config.prompt == null and config.parse_error == null) {
         setParseError(config, allocator, "--image requires -p/--print (headless prompt mode)", .{});
@@ -4778,8 +4707,6 @@ fn parseArgsInto(config: *types.Config, args: *std.process.Args.Iterator, alloca
             "-p/--print or -"
         else if (config.web_port != null)
             "--web"
-        else if (config.serve_port != null)
-            "serve"
         else if (config.resume_response != null)
             "--resume-response"
         else if (config.session_id != null)
@@ -4802,31 +4729,12 @@ fn parseArgsInto(config: *types.Config, args: *std.process.Args.Iterator, alloca
     if (config.check_gate_max != null and !config.check_gate and !config.check_gate_observe and config.parse_error == null) {
         setParseError(config, allocator, "--check-gate-max requires --check-gate or --check-gate-observe", .{});
     }
-    // The --web-* flags shape the HTTP surface of --web and serve; without
-    // either they would configure nothing.
+    // The --web-* flags configure the browser interface.
     if ((config.web_bind != null or config.web_token != null or config.web_allow_unauth) and
-        config.web_port == null and config.serve_port == null and config.parse_error == null)
+        config.web_port == null and config.parse_error == null)
     {
-        setParseError(config, allocator, "--web-bind / --web-token / --web-allow-unauth require --web or serve", .{});
+        setParseError(config, allocator, "--web-bind / --web-token / --web-allow-unauth require --web", .{});
     }
-    // The daemon flags shape `serve`; anywhere else they would configure nothing.
-    if ((config.serve_sessions != null or config.serve_max_sessions != null or config.uds_path != null) and
-        config.serve_port == null and config.parse_error == null)
-    {
-        setParseError(config, allocator, "--sessions / --max-sessions / --uds require serve", .{});
-    }
-    // The cap belongs to the multi-session daemon, which --sessions or --uds selects.
-    if (config.serve_max_sessions != null and config.serve_sessions == null and config.uds_path == null and config.parse_error == null) {
-        setParseError(config, allocator, "--max-sessions requires --sessions or --uds (the multi-session daemon)", .{});
-    }
-    if (config.serve_sessions) |initial| if (initial > multiSessionCap(config.*) and config.parse_error == null) {
-        setParseError(config, allocator, "--sessions {d} exceeds --max-sessions {d}", .{ initial, multiSessionCap(config.*) });
-    };
-}
-
-/// The multi-session daemon's live-session cap: `--max-sessions`, else the default.
-fn multiSessionCap(config: types.Config) usize {
-    return config.serve_max_sessions orelse daemon_serve_multi.DEFAULT_MAX_SESSIONS;
 }
 
 fn webBindHint(err: platform_net.AddressError) []const u8 {
@@ -4930,10 +4838,10 @@ pub const WebEnv = struct {
 /// `web_bind`/`web_token` from the environment where no flag set them (a flag
 /// wins), validate them, and refuse a non-loopback bind without
 /// authentication. Returns the message main prints before exiting 2 (owned by
-/// `allocator`), or null to go on. Does nothing without --web or serve: the
+/// `allocator`), or null to go on. Does nothing without --web: the
 /// variables configure only that surface. No message quotes the token.
 pub fn resolveWebSurface(config: *types.Config, env: WebEnv, allocator: std.mem.Allocator) ?[]const u8 {
-    if (config.web_port == null and config.serve_port == null) return null;
+    if (config.web_port == null) return null;
     if (config.web_bind == null) {
         if (env.bind) |text| {
             config.web_bind = platform_net.parseIpLiteral(text, 0) catch |err|
@@ -4960,7 +4868,7 @@ pub fn resolveWebSurface(config: *types.Config, env: WebEnv, allocator: std.mem.
     return null;
 }
 
-/// The HTTP surface `--web`/`serve` start with: the resolved bind address on
+/// The HTTP surface `--web` starts with: the resolved bind address on
 /// `port`, the token, the operator's `--web-allow-unauth`, and the text
 /// `--version` prints for `GET /health`.
 fn webSurface(config: *const types.Config, port: u16, version: []const u8) web_server.Surface {
@@ -5043,13 +4951,13 @@ fn printHelp() void {
         \\  --json                Headless: emit NDJSON result event
         \\  --stream-json         Headless: also stream per-event NDJSON lines live (text/tool/usage/turn)
         \\  --web [port]          Serve a web UI (HTTP+SSE) instead of the TUI (default port 7777)
-        \\  --web-bind <addr>     --web/serve: IPv4 or IPv6 literal to bind (default 127.0.0.1; env
+        \\  --web-bind <addr>     --web: IPv4 or IPv6 literal to bind (default 127.0.0.1; env
         \\                        METACODES_WEB_BIND). A non-loopback address needs a token or
         \\                        --web-allow-unauth
-        \\  --web-token <token>   --web/serve: require 'Authorization: Bearer <token>' on every route but
+        \\  --web-token <token>   --web: require 'Authorization: Bearer <token>' on every route but
         \\                        GET /health (a GET may pass ?token=). Prefer env METACODES_WEB_TOKEN:
         \\                        the flag is visible in ps
-        \\  --web-allow-unauth    --web/serve: allow a non-loopback --web-bind without a token
+        \\  --web-allow-unauth    --web: allow a non-loopback --web-bind without a token
         \\  --resume <id>         Start the REPL in a stored session of this directory (an id or id prefix, as
         \\                        /resume takes; an interactive exit prints the command for the current one)
         \\  --resume-response <j> Resume a suspended session with a late tool response (@file to read from a file)
@@ -5103,14 +5011,6 @@ fn printHelp() void {
         \\  --dump-prompt         Print the assembled system prompt and exit
         \\  --sections            With --dump-prompt: list the named prompt sections (id, order, class, digest)
         \\  --dump-plugins        Print the immutable plugin inventory JSON and exit
-        \\  serve [port]          Daemon mode (HTTP; default port 7777; GET /health is an unauthenticated
-        \\                        liveness probe; --web-bind/--web-token apply here too)
-        \\  --sessions <n>        Daemon: multi-session mode (sessions under /s/<id>/, created and destroyed
-        \\                        over POST /sessions/create and /sessions/<id>/destroy); n sessions (0 or
-        \\                        more) are built at startup
-        \\  --max-sessions <m>    Daemon: cap on live sessions in multi-session mode (default 32); a create
-        \\                        beyond it is refused with 429
-        \\  --uds <path>          Daemon: additional UDS+NDJSON binding (implies multi-session mode)
         \\  --add-dir <path>      Extra read/write directory (repeatable)
         \\  --plugin-dir <path>   Enable a manifest-based data plugin package (repeatable)
         \\  --process-plugin-dir <path>  Enable a pinned executable plugin package (repeatable)
@@ -5170,7 +5070,6 @@ test "--resume takes a session id for the REPL and fails closed without one or b
     const conflicts = [_]Conflict{
         .{ .argv = &.{ "metacodes", "--resume", "x", "-p", "hi" }, .flag = "-p/--print or -" },
         .{ .argv = &.{ "metacodes", "--web", "--resume", "x" }, .flag = "--web" },
-        .{ .argv = &.{ "metacodes", "serve", "--resume", "x" }, .flag = "serve" },
         .{ .argv = &.{ "metacodes", "--resume", "x", "--resume-response", "{}" }, .flag = "--resume-response" },
         .{ .argv = &.{ "metacodes", "--resume", "x", "--session", "y" }, .flag = "--session" },
         .{ .argv = &.{ "metacodes", "--resume", "x", "--agent-name", "w" }, .flag = "--teammate" },
@@ -5522,10 +5421,5 @@ test {
     _ = &@import("web/server.zig");
     _ = &@import("web/session.zig");
     _ = &@import("web/submission.zig");
-    _ = &@import("daemon/registry.zig"); // U10:否则其 test 被 lazy analysis 跳过(Linus 抓的"测试从不跑")
-    _ = &@import("daemon/app_driver.zig"); // U10-D:强制编译分析(否则死代码藏编译错)
-    _ = &@import("daemon/serve.zig"); // U10-D
-    _ = &@import("daemon/serve_multi.zig"); // U10-C:强制编译分析(否则死代码藏编译错)
-    _ = &@import("daemon/uds.zig"); // U10-B:UDS+NDJSON 绑定
     _ = &@import("core/shutdown.zig");
 }

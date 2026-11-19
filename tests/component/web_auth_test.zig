@@ -1,4 +1,4 @@
-//! L2: the HTTP surface of `--web` / `serve` / `serve --sessions` (#251-#253),
+//! L2: the HTTP surface of `--web` (#251-#253),
 //! driven over real sockets.
 //!
 //!   #251 `GET /health`: answers with the version the host passed in and the
@@ -579,7 +579,7 @@ fn parse(a: std.mem.Allocator, argv: []const [*:0]const u8) Parsed {
 test "flags: --web-bind / --web-token / --web-allow-unauth parse into Config" {
     const a = std.testing.allocator;
     {
-        const p = parse(a, &.{ "metacodes", "serve", "0", "--web-bind", "::1", "--web-token", TOKEN, "--web-allow-unauth" });
+        const p = parse(a, &.{ "metacodes", "--web", "0", "--web-bind", "::1", "--web-token", TOKEN, "--web-allow-unauth" });
         defer p.deinit(a);
         try std.testing.expect(p.config.parse_error == null);
         try std.testing.expectEqualSlices(u8, &(try pnet.parseIpLiteral("::1", 0)).ip6.bytes, &p.config.web_bind.?.ip6.bytes);
@@ -607,16 +607,16 @@ test "flags: bad values and orphaned web flags fail closed, and never echo a tok
     const a = std.testing.allocator;
     const Case = struct { argv: []const [*:0]const u8, needle: []const u8 };
     const cases = [_]Case{
-        .{ .argv = &.{ "metacodes", "serve", "--web-bind", "localhost" }, .needle = "invalid --web-bind 'localhost'" },
-        .{ .argv = &.{ "metacodes", "serve", "--web-bind", "fe80::1%en0" }, .needle = "zone" },
-        .{ .argv = &.{ "metacodes", "serve", "--web-bind", "::ffff:10.0.0.1" }, .needle = "IPv4 address itself" },
-        .{ .argv = &.{ "metacodes", "serve", "--web-bind" }, .needle = "missing value for --web-bind" },
-        .{ .argv = &.{ "metacodes", "serve", "--web-token", "" }, .needle = "invalid --web-token: the token is empty" },
-        .{ .argv = &.{ "metacodes", "serve", "--web-token", "secret with space" }, .needle = "invalid --web-token: the token may only contain" },
-        .{ .argv = &.{ "metacodes", "serve", "--web-token" }, .needle = "missing value for --web-token" },
-        .{ .argv = &.{ "metacodes", "--web-bind", "127.0.0.1" }, .needle = "require --web or serve" },
-        .{ .argv = &.{ "metacodes", "--web-token", "abc" }, .needle = "require --web or serve" },
-        .{ .argv = &.{ "metacodes", "--web-allow-unauth" }, .needle = "require --web or serve" },
+        .{ .argv = &.{ "metacodes", "--web", "--web-bind", "localhost" }, .needle = "invalid --web-bind 'localhost'" },
+        .{ .argv = &.{ "metacodes", "--web", "--web-bind", "fe80::1%en0" }, .needle = "zone" },
+        .{ .argv = &.{ "metacodes", "--web", "--web-bind", "::ffff:10.0.0.1" }, .needle = "IPv4 address itself" },
+        .{ .argv = &.{ "metacodes", "--web", "--web-bind" }, .needle = "missing value for --web-bind" },
+        .{ .argv = &.{ "metacodes", "--web", "--web-token", "" }, .needle = "invalid --web-token: the token is empty" },
+        .{ .argv = &.{ "metacodes", "--web", "--web-token", "secret with space" }, .needle = "invalid --web-token: the token may only contain" },
+        .{ .argv = &.{ "metacodes", "--web", "--web-token" }, .needle = "missing value for --web-token" },
+        .{ .argv = &.{ "metacodes", "--web-bind", "127.0.0.1" }, .needle = "require --web" },
+        .{ .argv = &.{ "metacodes", "--web-token", "abc" }, .needle = "require --web" },
+        .{ .argv = &.{ "metacodes", "--web-allow-unauth" }, .needle = "require --web" },
     };
     for (cases) |case| {
         const p = parse(a, case.argv);
@@ -638,7 +638,7 @@ test "environment: METACODES_WEB_BIND / _TOKEN fill in, a flag wins, bad values 
     const resolve = cc.resolveWebSurface;
     {
         // Environment only.
-        var p = parse(a, &.{ "metacodes", "serve", "0" });
+        var p = parse(a, &.{ "metacodes", "--web", "0" });
         defer p.deinit(a);
         try std.testing.expect(resolve(&p.config, .{ .bind = "::", .token = "env-token" }, a) == null);
         try std.testing.expect(pnet.isUnspecifiedAddress(p.config.web_bind.?));
@@ -654,7 +654,7 @@ test "environment: METACODES_WEB_BIND / _TOKEN fill in, a flag wins, bad values 
     }
     {
         // Neither: loopback, no token.
-        var p = parse(a, &.{ "metacodes", "serve" });
+        var p = parse(a, &.{ "metacodes", "--web" });
         defer p.deinit(a);
         try std.testing.expect(resolve(&p.config, .{}, a) == null);
         try std.testing.expect(p.config.web_bind == null);
@@ -675,7 +675,7 @@ test "environment: METACODES_WEB_BIND / _TOKEN fill in, a flag wins, bad values 
         .{ .env = .{ .token = "" }, .needle = "invalid METACODES_WEB_TOKEN: the token is empty" },
         .{ .env = .{ .token = "two words" }, .needle = "invalid METACODES_WEB_TOKEN: the token may only contain" },
     }) |bad| {
-        var p = parse(a, &.{ "metacodes", "serve" });
+        var p = parse(a, &.{ "metacodes", "--web" });
         defer p.deinit(a);
         const message = resolve(&p.config, bad.env, a) orelse return error.TestExpectedError;
         defer a.free(message);
@@ -691,9 +691,8 @@ test "#253 refusal: a non-loopback bind without a token or --web-allow-unauth do
     const a = std.testing.allocator;
     const resolve = cc.resolveWebSurface;
     for ([_][]const [*:0]const u8{
-        &.{ "metacodes", "serve", "--web-bind", "0.0.0.0" },
+        &.{ "metacodes", "--web", "--web-bind", "0.0.0.0" },
         &.{ "metacodes", "--web", "--web-bind", "::" },
-        &.{ "metacodes", "serve", "--sessions", "2", "--web-bind", "192.168.1.20" },
     }) |argv| {
         var p = parse(a, argv);
         defer p.deinit(a);
@@ -706,14 +705,14 @@ test "#253 refusal: a non-loopback bind without a token or --web-allow-unauth do
     }
     {
         // The environment's bind is held to the same rule.
-        var p = parse(a, &.{ "metacodes", "serve" });
+        var p = parse(a, &.{ "metacodes", "--web" });
         defer p.deinit(a);
         const message = resolve(&p.config, .{ .bind = "0.0.0.0" }, a) orelse return error.TestExpectedError;
         defer a.free(message);
         try std.testing.expect(std.mem.indexOf(u8, message, "refusing to serve on 0.0.0.0 ") != null);
     }
     {
-        var p = parse(a, &.{ "metacodes", "serve", "--web-bind", "::" });
+        var p = parse(a, &.{ "metacodes", "--web", "--web-bind", "::" });
         defer p.deinit(a);
         const message = resolve(&p.config, .{}, a) orelse return error.TestExpectedError;
         defer a.free(message);
@@ -722,22 +721,22 @@ test "#253 refusal: a non-loopback bind without a token or --web-allow-unauth do
     // Either authentication (flag or environment) or the explicit opt-out lets
     // it start; so does any loopback address.
     {
-        var p = parse(a, &.{ "metacodes", "serve", "--web-bind", "0.0.0.0", "--web-token", TOKEN });
+        var p = parse(a, &.{ "metacodes", "--web", "--web-bind", "0.0.0.0", "--web-token", TOKEN });
         defer p.deinit(a);
         try std.testing.expect(resolve(&p.config, .{}, a) == null);
     }
     {
-        var p = parse(a, &.{ "metacodes", "serve", "--web-bind", "0.0.0.0" });
+        var p = parse(a, &.{ "metacodes", "--web", "--web-bind", "0.0.0.0" });
         defer p.deinit(a);
         try std.testing.expect(resolve(&p.config, .{ .token = "from-env" }, a) == null);
     }
     {
-        var p = parse(a, &.{ "metacodes", "serve", "--web-bind", "::", "--web-allow-unauth" });
+        var p = parse(a, &.{ "metacodes", "--web", "--web-bind", "::", "--web-allow-unauth" });
         defer p.deinit(a);
         try std.testing.expect(resolve(&p.config, .{}, a) == null);
     }
     {
-        var p = parse(a, &.{ "metacodes", "serve", "--web-bind", "::1" });
+        var p = parse(a, &.{ "metacodes", "--web", "--web-bind", "::1" });
         defer p.deinit(a);
         try std.testing.expect(resolve(&p.config, .{}, a) == null);
     }
