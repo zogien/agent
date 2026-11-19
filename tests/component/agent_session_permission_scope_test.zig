@@ -11,9 +11,13 @@
 //! session_rules) + Write tool.
 
 const std = @import("std");
-const pfs = @import("platform").fs;
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
+const fixture = @import("../_harness/agent_session_fixture.zig");
+
+const AllowAlways = fixture.AllowAlways(core, core.protocol.ui_request);
+const subdir = fixture.subdir;
+const existsUnder = fixture.existsUnder;
 
 const FINAL_SSE =
     "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_final\",\"role\":\"assistant\",\"model\":\"x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n" ++
@@ -32,58 +36,11 @@ fn writeToolSse(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
         "data: {{\"type\":\"message_stop\"}}\n\n", .{path});
 }
 
-/// Answers every permission prompt with "allow always" and counts them.
-const AllowAlways = struct {
-    prompts: usize = 0,
-
-    fn request(
-        raw: *anyopaque,
-        _: cc.session_id.SessionId,
-        _: std.mem.Allocator,
-        req: *const cc.ui_request.UiRequest,
-        out: *cc.ui_request.UiResponse,
-    ) anyerror!cc.ui_request.RequestOutcome {
-        const self: *AllowAlways = @ptrCast(@alignCast(raw));
-        switch (req.*) {
-            .permission => |prompt| {
-                try std.testing.expectEqualStrings("Write", prompt.tool);
-                self.prompts += 1;
-                out.* = .{ .permission = .allow_always };
-                return .answered;
-            },
-            else => return error.UnexpectedUiRequest,
-        }
-    }
-
-    fn requester(self: *AllowAlways) cc.agent_session.UiRequester {
-        return .{ .ctx = self, .requestFn = request };
-    }
-};
-
 const Sink = struct {
-    fn emit(_: *anyopaque, _: cc.session_id.SessionId, _: u64, _: cc.ui_event.CoreEvent) bool {
+    fn emit(_: *anyopaque, _: core.session_id.SessionId, _: u64, _: core.protocol.ui_event.CoreEvent) bool {
         return true;
     }
 };
-
-/// Forward-slash absolute path of a fresh subdirectory of `tmp` (it is spliced
-/// into JSON string literals, where a Windows backslash is an escape).
-fn subdir(tmp: *std.testing.TmpDir, name: []const u8, buffer: []u8) ![]const u8 {
-    try tmp.dir.createDirPath(std.testing.io, name);
-    var sub = try tmp.dir.openDir(std.testing.io, name, .{});
-    defer sub.close(std.testing.io);
-    const len = try sub.realPath(std.testing.io, buffer);
-    for (buffer[0..len]) |*c| {
-        if (c.* == '\\') c.* = '/';
-    }
-    return buffer[0..len];
-}
-
-fn existsUnder(root: []const u8, relative: []const u8) !bool {
-    var buf: [std.fs.max_path_bytes + 1]u8 = undefined;
-    const path = try std.fmt.bufPrintZ(&buf, "{s}/{s}", .{ root, relative });
-    return pfs.exists(path.ptr);
-}
 
 test "L2 AgentSession allow_always holds for its Session only and writes no settings file" {
     const a = std.testing.allocator;
@@ -113,10 +70,10 @@ test "L2 AgentSession allow_always holds for its Session only and writes no sett
     const url = try server.urlOwned(a);
     defer a.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{"Write"} });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{"Write"} });
     defer runtime.destroy() catch unreachable;
     var ui = AllowAlways{};
-    const config: cc.agent_session.SessionConfig = .{
+    const config: core.agent_session.SessionConfig = .{
         .provider_kind = .anthropic,
         .api_key = "test-key",
         .model = "test-model",
@@ -132,7 +89,7 @@ test "L2 AgentSession allow_always holds for its Session only and writes no sett
         const session = try runtime.createSession(config);
         defer session.destroy() catch unreachable;
         const result = try session.runText(1, "write two files", 6, .{ .ctx = &sink_state, .emit = Sink.emit });
-        try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
+        try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, result.stop_reason);
         try std.testing.expectEqual(@as(u32, 2), result.tool_calls);
     }
     // The second Write of the same Session was not asked about again.
@@ -144,7 +101,7 @@ test "L2 AgentSession allow_always holds for its Session only and writes no sett
         const session = try runtime.createSession(config);
         defer session.destroy() catch unreachable;
         const result = try session.runText(1, "write one file", 4, .{ .ctx = &sink_state, .emit = Sink.emit });
-        try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
+        try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, result.stop_reason);
     }
     // A new Session of the same Runtime and workspace starts without the grant.
     try std.testing.expectEqual(@as(usize, 2), ui.prompts);
@@ -154,66 +111,4 @@ test "L2 AgentSession allow_always holds for its Session only and writes no sett
     try std.testing.expect(!try existsUnder(workspace, ".claude/settings.local.json"));
     try std.testing.expect(!try existsUnder(workspace, ".claude/settings.json"));
     try std.testing.expect(!try existsUnder(home, ".claude/settings.json"));
-}
-
-// ── The App product keeps its settings-file memory ─────────────────────────
-
-const ppaths = @import("platform").paths;
-
-const EnvGuard = struct {
-    allocator: std.mem.Allocator,
-    name: [*:0]const u8,
-    previous: ?[:0]u8,
-
-    fn set(allocator: std.mem.Allocator, name: [*:0]const u8, value: [*:0]const u8) !EnvGuard {
-        const previous = if (std.c.getenv(name)) |raw| try allocator.dupeZ(u8, std.mem.span(raw)) else null;
-        ppaths.setEnv(name, value);
-        return .{ .allocator = allocator, .name = name, .previous = previous };
-    }
-
-    fn restore(self: *EnvGuard) void {
-        if (self.previous) |previous| {
-            ppaths.setEnv(self.name, previous.ptr);
-            self.allocator.free(previous);
-        } else {
-            ppaths.unsetEnv(self.name);
-        }
-        self.* = undefined;
-    }
-};
-
-test "L2 App answers allow_always into the project settings file its loader reads" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var project_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const project = try subdir(&tmp, "project", &project_buf);
-    var home_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const home = try subdir(&tmp, "home", &home_buf);
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    var home_guard = try EnvGuard.set(std.testing.allocator, "HOME", (try allocator.dupeZ(u8, home)).ptr);
-    defer home_guard.restore();
-    var probe_guard = try EnvGuard.set(std.testing.allocator, "METACODES_NO_PROBE", "1");
-    defer probe_guard.restore();
-
-    const argv = [_][*:0]const u8{"metacodes"};
-    const config = cc.parseArgsForTest(&argv, allocator);
-    try std.testing.expect(config.parse_error == null);
-    var io_rt = @import("platform").signal.threadedIo(allocator, .{});
-    defer io_rt.deinit();
-    const app = try cc.app_module.App.init(allocator, io_rt.io(), config, "test-key");
-    defer app.deinit();
-
-    // The App opted in; point its project at the scratch directory instead of
-    // the test process cwd before answering a prompt through the real path.
-    try std.testing.expectEqual(cc.permission.AlwaysAllowScope.settings_file, app.permission_ctx.always_allow);
-    app.permission_ctx.match_ctx.project_root = project;
-    var ui = AllowAlways{};
-    app.permission_ctx.ui_requester = ui.requester();
-    try std.testing.expect(try cc.permission.promptUser(&app.permission_ctx, "Write", "{\"file_path\":\"x\"}"));
-    try std.testing.expectEqual(@as(usize, 1), ui.prompts);
-    try std.testing.expect(app.session_rules.isAllowed("Write"));
-    try std.testing.expect(try existsUnder(project, ".claude/settings.local.json"));
 }

@@ -16,6 +16,8 @@ test {
         _ = @import("component/agent_session_ui_test.zig");
         _ = @import("component/agent_session_transcript_resume_test.zig");
         _ = @import("component/agent_session_runtime_config_test.zig");
+        _ = @import("component/agent_session_permission_scope_test.zig");
+        _ = @import("component/agent_session_credential_test.zig");
     } else {
         cliTests();
     }
@@ -49,8 +51,6 @@ fn cliTests() void {
     _ = @import("component/recovery_allowance_test.zig");
     _ = @import("component/plugin_runtime_test.zig");
     _ = @import("component/plugin_process_test.zig");
-    _ = @import("component/agent_session_permission_scope_test.zig");
-    _ = @import("component/agent_session_credential_test.zig");
     _ = @import("component/skill_fork_test.zig");
     _ = @import("component/sealed_skill_test.zig");
     _ = @import("component/prompt_tool_coupling_test.zig");
@@ -58,6 +58,8 @@ fn cliTests() void {
     _ = @import("component/answer_queue_test.zig");
     _ = @import("component/base_url_flag_test.zig");
     _ = @import("component/unknown_flag_test.zig");
+    _ = @import("component/app_permission_scope_test.zig");
+    _ = @import("component/provider_connection_gate_test.zig");
     _ = @import("component/cli_help_test.zig");
     _ = @import("component/launcher_hint_test.zig");
     _ = @import("component/state_env_test.zig");
