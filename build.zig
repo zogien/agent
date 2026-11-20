@@ -773,6 +773,8 @@ fn createIntegrationModule(
     const options = b.addOptions();
     options.addOption(bool, "use_core", suite == .core);
     options.addOptionPath("mock_mcp_server", mock_mcp_server);
+    options.addOptionPath("mock_mcp_http_script", b.path("tests/_harness/mock_mcp_http_server.py"));
+    options.addOptionPath("mock_mcp_auth_script", b.path("tests/_harness/mock_mcp_auth_server.py"));
     mod.addOptions("integration_options", options);
     mod.addImport("harness", harness);
     mod.addImport(switch (suite) {

@@ -4,74 +4,16 @@
 //! 401 as an authentication error.
 
 const std = @import("std");
-const builtin = @import("builtin");
-const cc = @import("cc");
-const process = @import("platform").process;
-
-const MOCK = "tests/_harness/mock_mcp_http_server.py";
-
-const Mock = struct {
-    child: process.PipeChild,
-    port: u16,
-
-    fn start() !?Mock {
-        if (builtin.os.tag == .windows) return null; // POSIX: shebang script
-        if (std.c.access(MOCK, 1) != 0) return null;
-        const argv = [_]?[*:0]const u8{ MOCK, null };
-        const child = process.spawnPipes(&argv, true, null) catch return null;
-        var buffer: [16]u8 = undefined;
-        var length: usize = 0;
-        while (length < buffer.len) {
-            var byte: [1]u8 = undefined;
-            if (!child.pollReadable(5000)) break;
-            if (child.read(&byte) != 1) break;
-            if (byte[0] == '\n') break;
-            buffer[length] = byte[0];
-            length += 1;
-        }
-        const port = std.fmt.parseInt(u16, buffer[0..length], 10) catch {
-            child.closeStdin();
-            child.closeStdout();
-            child.terminate();
-            return null;
-        };
-        return .{ .child = child, .port = port };
-    }
-
-    fn stop(self: *Mock) void {
-        self.child.closeStdin();
-        self.child.closeStdout();
-        self.child.terminate();
-    }
-
-    fn url(self: *const Mock, buffer: []u8, path: []const u8) ![]const u8 {
-        return std.fmt.bufPrint(buffer, "http://127.0.0.1:{d}/{s}", .{ self.port, path });
-    }
-
-    fn log(self: *const Mock, allocator: std.mem.Allocator) ![]u8 {
-        return self.get(allocator, "log");
-    }
-
-    /// GET `path` on a connection of its own; returns the body.
-    fn get(self: *const Mock, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-        var client: std.http.Client = .{ .allocator = allocator, .io = std.testing.io };
-        defer client.deinit();
-        var buffer: [128]u8 = undefined;
-        const target = try self.url(&buffer, path);
-        var body: std.Io.Writer.Allocating = .init(allocator);
-        defer body.deinit();
-        _ = try client.fetch(.{ .location = .{ .url = target }, .response_writer = &body.writer });
-        return body.toOwnedSlice();
-    }
-};
+const core = @import("metacodes-core");
+const fixture = @import("../_harness/mcp_http_fixture.zig");
 
 test "MCP HTTP: Classic session, SSE with a server ping, and DELETE on close" {
-    var mock = (try Mock.start()) orelse return error.SkipZigTest;
+    var mock = try fixture.Server.start(fixture.http_script);
     defer mock.stop();
     const a = std.testing.allocator;
     var buffer: [128]u8 = undefined;
     {
-        var client = try cc.mcp_client.McpClient.connectHttp(a, .{
+        var client = try core.mcp_client.McpClient.connectHttp(a, .{
             .io = std.testing.io,
             .url = try mock.url(&buffer, "classic"),
             .headers = &.{ .{ .name = "X-Team", .value = "t1" }, .{ .name = "Authorization", .value = "Bearer tok" } },
@@ -79,7 +21,7 @@ test "MCP HTTP: Classic session, SSE with a server ping, and DELETE on close" {
         defer client.close();
         try std.testing.expect(!client.modern);
         try std.testing.expectEqualStrings("2025-06-18", client.protocol_version);
-        client.transport.setDeadline(cc.util_time.nowMs() + 10_000);
+        client.transport.setDeadline(core.util_time.nowMs() + 10_000);
         const tools = try client.listTools();
         defer a.free(tools);
         try std.testing.expect(std.mem.indexOf(u8, tools, "\"sse_tool\"") != null);
@@ -88,7 +30,7 @@ test "MCP HTTP: Classic session, SSE with a server ping, and DELETE on close" {
         defer a.free(called);
         try std.testing.expect(std.mem.indexOf(u8, called, "classic:sse_tool") != null);
     }
-    const log = try mock.log(a);
+    const log = try mock.get(a, "log");
     defer a.free(log);
     try std.testing.expect(std.mem.indexOf(u8, log, "\"ping_answered\": true") != null);
     try std.testing.expect(std.mem.indexOf(u8, log, "\"authorization\": \"Bearer tok\"") != null);
@@ -97,7 +39,7 @@ test "MCP HTTP: Classic session, SSE with a server ping, and DELETE on close" {
 }
 
 test "MCP HTTP: 2026-07-28 headers, empty-cursor pagination and x-mcp-header" {
-    var mock = (try Mock.start()) orelse return error.SkipZigTest;
+    var mock = try fixture.Server.start(fixture.http_script);
     defer mock.stop();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -105,16 +47,16 @@ test "MCP HTTP: 2026-07-28 headers, empty-cursor pagination and x-mcp-header" {
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var buffer: [128]u8 = undefined;
-    var client = try cc.mcp_client.McpClient.connectHttp(a, .{
+    var client = try core.mcp_client.McpClient.connectHttp(a, .{
         .io = std.testing.io,
         .url = try mock.url(&buffer, "modern"),
     }, .{ .spawn = undefined, .startup_timeout_ms = 10_000 });
     defer client.close();
     try std.testing.expect(client.modern);
 
-    var registry = cc.tools_dynamic.DynRegistry.init(a);
+    var registry = core.tools_dynamic.DynRegistry.init(a);
     defer registry.deinit();
-    var session = cc.mcp_registry_bridge.McpSession.init(a, &client);
+    var session = core.mcp_registry_bridge.McpSession.init(a, &client);
     defer session.deinit();
     try session.registerToolsFiltered(&registry, "m", .{ .http_param_headers = true });
     // The tool with an invalid annotation is excluded; the second page is listed.
@@ -122,7 +64,7 @@ test "MCP HTTP: 2026-07-28 headers, empty-cursor pagination and x-mcp-header" {
     try std.testing.expect(registry.find("mcp__m__badannot") == null);
     try std.testing.expect(registry.find("mcp__m__second_page") != null);
 
-    var ctx = cc.tools.ToolContext.simple(a);
+    var ctx = core.tools.ToolContext.simple(a);
     ctx.artifact_root = root;
     const entry = registry.find("mcp__m__regional").?;
     var body = try entry.execute(&ctx, "{\"region\":\"eu-west\",\"q\":\"x\"}");
@@ -133,10 +75,10 @@ test "MCP HTTP: 2026-07-28 headers, empty-cursor pagination and x-mcp-header" {
 }
 
 test "MCP HTTP: 401 is an authentication error, not a protocol fallback" {
-    var mock = (try Mock.start()) orelse return error.SkipZigTest;
+    var mock = try fixture.Server.start(fixture.http_script);
     defer mock.stop();
     var buffer: [128]u8 = undefined;
-    try std.testing.expectError(error.McpAuthRequired, cc.mcp_client.McpClient.connectHttp(std.testing.allocator, .{
+    try std.testing.expectError(error.McpAuthRequired, core.mcp_client.McpClient.connectHttp(std.testing.allocator, .{
         .io = std.testing.io,
         .url = try mock.url(&buffer, "auth"),
     }, .{ .spawn = undefined, .startup_timeout_ms = 5_000 }));
@@ -172,14 +114,14 @@ fn seenOn(arena: std.mem.Allocator, log: []const u8, path: []const u8) ![]Seen {
 }
 
 test "MCP HTTP: one kept-alive connection carries the handshake and later calls" {
-    var mock = (try Mock.start()) orelse return error.SkipZigTest;
+    var mock = try fixture.Server.start(fixture.http_script);
     defer mock.stop();
     const a = std.testing.allocator;
     var buffer: [128]u8 = undefined;
     {
         // The mock drops any request that asks for `Connection: close`, as
         // developers.openai.com does intermittently.
-        var client = try cc.mcp_client.McpClient.connectHttp(a, .{
+        var client = try core.mcp_client.McpClient.connectHttp(a, .{
             .io = std.testing.io,
             .url = try mock.url(&buffer, "keepalive"),
         }, .{ .spawn = undefined, .startup_timeout_ms = 10_000 });
@@ -192,7 +134,7 @@ test "MCP HTTP: one kept-alive connection carries the handshake and later calls"
         defer a.free(called);
         try std.testing.expect(std.mem.indexOf(u8, called, "kept-call") != null);
     }
-    const log = try mock.log(a);
+    const log = try mock.get(a, "log");
     defer a.free(log);
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -207,12 +149,12 @@ test "MCP HTTP: one kept-alive connection carries the handshake and later calls"
 }
 
 test "MCP HTTP: a pooled connection the server closed is replaced, the request sent once" {
-    var mock = (try Mock.start()) orelse return error.SkipZigTest;
+    var mock = try fixture.Server.start(fixture.http_script);
     defer mock.stop();
     const a = std.testing.allocator;
     var buffer: [128]u8 = undefined;
     {
-        var client = try cc.mcp_client.McpClient.connectHttp(a, .{
+        var client = try core.mcp_client.McpClient.connectHttp(a, .{
             .io = std.testing.io,
             .url = try mock.url(&buffer, "idleclose"),
         }, .{ .spawn = undefined, .startup_timeout_ms = 10_000 });
@@ -226,7 +168,7 @@ test "MCP HTTP: a pooled connection the server closed is replaced, the request s
         defer a.free(tools);
         try std.testing.expect(std.mem.indexOf(u8, tools, "\"kept\"") != null);
     }
-    const log = try mock.log(a);
+    const log = try mock.get(a, "log");
     defer a.free(log);
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -240,12 +182,12 @@ test "MCP HTTP: a pooled connection the server closed is replaced, the request s
 }
 
 test "MCP HTTP: a connection idle past the reuse window is not reused" {
-    var mock = (try Mock.start()) orelse return error.SkipZigTest;
+    var mock = try fixture.Server.start(fixture.http_script);
     defer mock.stop();
     const a = std.testing.allocator;
     var buffer: [128]u8 = undefined;
     {
-        var client = try cc.mcp_client.McpClient.connectHttp(a, .{
+        var client = try core.mcp_client.McpClient.connectHttp(a, .{
             .io = std.testing.io,
             .url = try mock.url(&buffer, "keepalive"),
         }, .{ .spawn = undefined, .startup_timeout_ms = 10_000 });
@@ -253,11 +195,11 @@ test "MCP HTTP: a connection idle past the reuse window is not reused" {
         client.transport.http.reuse_idle_ms = 100;
         const tools = try client.listTools();
         defer a.free(tools);
-        cc.util_time.sleepMs(300);
+        core.util_time.sleepMs(300);
         const called = try client.callTool("kept", "{}");
         defer a.free(called);
     }
-    const log = try mock.log(a);
+    const log = try mock.get(a, "log");
     defer a.free(log);
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -268,7 +210,7 @@ test "MCP HTTP: a connection idle past the reuse window is not reused" {
 }
 
 test "MCP HTTP: a tools/call whose connection dies unanswered is indeterminate, and never sent twice" {
-    var mock = (try Mock.start()) orelse return error.SkipZigTest;
+    var mock = try fixture.Server.start(fixture.http_script);
     defer mock.stop();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -277,7 +219,7 @@ test "MCP HTTP: a tools/call whose connection dies unanswered is indeterminate, 
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var buffer: [128]u8 = undefined;
     {
-        var client = try cc.mcp_client.McpClient.connectHttp(a, .{
+        var client = try core.mcp_client.McpClient.connectHttp(a, .{
             .io = std.testing.io,
             .url = try mock.url(&buffer, "dropcall"),
         }, .{ .spawn = undefined, .startup_timeout_ms = 10_000 });
@@ -291,14 +233,14 @@ test "MCP HTTP: a tools/call whose connection dies unanswered is indeterminate, 
 
         // Through the registry, as the model reaches it: the failure says the
         // call may have run. The next call is the model's decision.
-        var registry = cc.tools_dynamic.DynRegistry.init(a);
+        var registry = core.tools_dynamic.DynRegistry.init(a);
         defer registry.deinit();
-        var session = cc.mcp_registry_bridge.McpSession.init(a, &client);
+        var session = core.mcp_registry_bridge.McpSession.init(a, &client);
         defer session.deinit();
         try session.registerToolsFiltered(&registry, "d", .{ .http_param_headers = true });
         var detail: ?[]const u8 = null;
         defer if (detail) |text| a.free(text);
-        var ctx = cc.tools.ToolContext.simple(a);
+        var ctx = core.tools.ToolContext.simple(a);
         ctx.artifact_root = root;
         ctx.error_detail = &detail;
         try std.testing.expectError(
@@ -307,7 +249,7 @@ test "MCP HTTP: a tools/call whose connection dies unanswered is indeterminate, 
         );
         try std.testing.expect(std.mem.indexOf(u8, detail.?, "may have executed") != null);
     }
-    const log = try mock.log(a);
+    const log = try mock.get(a, "log");
     defer a.free(log);
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -319,23 +261,24 @@ test "MCP HTTP: a tools/call whose connection dies unanswered is indeterminate, 
 }
 
 test "MCP HTTP: a tools/call does not reuse a connection idle past its shorter window" {
-    var mock = (try Mock.start()) orelse return error.SkipZigTest;
+    var mock = try fixture.Server.start(fixture.http_script);
     defer mock.stop();
     const a = std.testing.allocator;
     var buffer: [128]u8 = undefined;
     {
-        var client = try cc.mcp_client.McpClient.connectHttp(a, .{
+        var client = try core.mcp_client.McpClient.connectHttp(a, .{
             .io = std.testing.io,
             .url = try mock.url(&buffer, "keepalive"),
         }, .{ .spawn = undefined, .startup_timeout_ms = 10_000 });
         defer client.close();
         const tools = try client.listTools();
         defer a.free(tools);
-        cc.util_time.sleepMs(cc.mcp_transport_http.TOOL_CALL_REUSE_IDLE_MS + 200);
+        // Past the one-second tool-call limit but inside the general reuse window.
+        core.util_time.sleepMs(1_200);
         const called = try client.callTool("kept", "{}");
         defer a.free(called);
     }
-    const log = try mock.log(a);
+    const log = try mock.get(a, "log");
     defer a.free(log);
     var arena = std.heap.ArenaAllocator.init(a);
     defer arena.deinit();
@@ -345,7 +288,7 @@ test "MCP HTTP: a tools/call does not reuse a connection idle past its shorter w
 }
 
 test "MCP HTTP: a stale answer is skipped and tools/list_changed is recorded, on both call paths" {
-    var mock = (try Mock.start()) orelse return error.SkipZigTest;
+    var mock = try fixture.Server.start(fixture.http_script);
     defer mock.stop();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -353,7 +296,7 @@ test "MCP HTTP: a stale answer is skipped and tools/list_changed is recorded, on
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var buffer: [128]u8 = undefined;
-    var client = try cc.mcp_client.McpClient.connectHttp(a, .{
+    var client = try core.mcp_client.McpClient.connectHttp(a, .{
         .io = std.testing.io,
         .url = try mock.url(&buffer, "noisy"),
     }, .{ .spawn = undefined, .startup_timeout_ms = 10_000 });
@@ -373,7 +316,7 @@ test "MCP HTTP: a stale answer is skipped and tools/list_changed is recorded, on
 }
 
 test "MCP HTTP: a tool's isError reaches the model as a tool error through the registry" {
-    var mock = (try Mock.start()) orelse return error.SkipZigTest;
+    var mock = try fixture.Server.start(fixture.http_script);
     defer mock.stop();
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -381,17 +324,17 @@ test "MCP HTTP: a tool's isError reaches the model as a tool error through the r
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     var buffer: [128]u8 = undefined;
-    var client = try cc.mcp_client.McpClient.connectHttp(a, .{
+    var client = try core.mcp_client.McpClient.connectHttp(a, .{
         .io = std.testing.io,
         .url = try mock.url(&buffer, "noisy"),
     }, .{ .spawn = undefined, .startup_timeout_ms = 10_000 });
     defer client.close();
-    var registry = cc.tools_dynamic.DynRegistry.init(a);
+    var registry = core.tools_dynamic.DynRegistry.init(a);
     defer registry.deinit();
-    var session = cc.mcp_registry_bridge.McpSession.init(a, &client);
+    var session = core.mcp_registry_bridge.McpSession.init(a, &client);
     defer session.deinit();
     try session.registerToolsFromJson(&registry, "m", "{\"tools\":[{\"name\":\"toolerror\"}]}");
-    var ctx = cc.tools.ToolContext.simple(a);
+    var ctx = core.tools.ToolContext.simple(a);
     ctx.artifact_root = root;
     var body = try registry.find("mcp__m__toolerror").?.execute(&ctx, "{}");
     defer body.deinit(a);

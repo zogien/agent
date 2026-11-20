@@ -18,6 +18,8 @@ test {
         _ = @import("component/agent_session_runtime_config_test.zig");
         _ = @import("component/agent_session_permission_scope_test.zig");
         _ = @import("component/agent_session_credential_test.zig");
+        _ = @import("integration/mcp_http_test.zig");
+        _ = @import("integration/mcp_sse_oauth_test.zig");
         _ = @import("integration/mcp_e2e_test.zig");
         _ = @import("integration/mcp_protocol_test.zig");
         _ = @import("integration/http_stream_e2e_test.zig");
@@ -31,8 +33,6 @@ test {
 
 fn cliTests() void {
     _ = @import("integration/tool_abort_test.zig");
-    _ = @import("integration/mcp_http_test.zig");
-    _ = @import("integration/mcp_sse_oauth_test.zig");
     _ = @import("integration/skills_e2e_test.zig");
     _ = @import("integration/agents_e2e_test.zig");
     _ = @import("component/provider_offer_test.zig");
@@ -93,6 +93,7 @@ fn cliTests() void {
     _ = @import("component/message_origin_test.zig");
     _ = @import("component/startup_catalogs_test.zig");
     _ = @import("component/mcp_background_startup_test.zig");
+    _ = @import("integration/app_mcp_oauth_startup_test.zig");
     _ = @import("component/mcp_permission_test.zig");
     _ = @import("component/prompt_model_identity_test.zig");
     _ = @import("component/stream_terminator_test.zig");
