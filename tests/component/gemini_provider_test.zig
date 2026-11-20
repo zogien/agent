@@ -6,12 +6,12 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 
-const agent_loop = cc.agent_loop;
-const gemini = cc.api_gemini;
-const writer_backend = cc.writer_backend;
-const subagent = cc.core_subagent;
+const agent_loop = core.agent_loop;
+const gemini = core.api_gemini;
+const writer_backend = core.writer_backend;
+const subagent = core.subagent;
 
 // Gemini SSE(alt=sse):每 chunk 是完整 GenerateContentResponse。文本在 candidates[].content.parts[].text。
 const GEMINI_TEXT_SSE =
@@ -30,11 +30,11 @@ test "C3: 同一 agent_loop 喂 Gemini provider(异协议)跑通到 end_turn" {
     var client = gemini.GeminiClient.init(a, io_rt.io(), "test-key", "gemini-2.5-flash", url);
     defer client.deinit();
 
-    var conv = cc.conversation.Conversation.init(a);
+    var conv = core.conversation.Conversation.init(a);
     defer conv.deinit();
     try conv.appendText(.user, "hi");
-    const perm = cc.permission.createContext(.bypass_permissions, a);
-    const empty_defs: []const cc.json_mod.ToolDefinition = &.{};
+    const perm = core.permission.createContext(.bypass_permissions, a);
+    const empty_defs: []const core.json.ToolDefinition = &.{};
 
     var render = writer_backend.WriterBackend.initNull();
     const be = render.backend();
@@ -78,8 +78,8 @@ test "P0.5: parent=Gemini → spawnAgentSink 继承 Gemini provider(子请求是
     var client = gemini.GeminiClient.init(a, io_rt.io(), "test-key", "gemini-2.5-flash", url);
     defer client.deinit();
 
-    const perm = cc.permission.createContext(.bypass_permissions, a);
-    const empty_defs: []const cc.json_mod.ToolDefinition = &.{};
+    const perm = core.permission.createContext(.bypass_permissions, a);
+    const empty_defs: []const core.json.ToolDefinition = &.{};
     var render = writer_backend.WriterBackend.initNull();
     const be = render.backend();
 
@@ -118,7 +118,7 @@ const GEMINI_TOOLCALL_SSE =
 const GEMINI_FINAL_SSE =
     "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"the time is now\"}]},\"finishReason\":\"STOP\"}]}\n\n";
 
-fn getTimeExec(ctx: *const cc.tool_context.ToolContext, _: []const u8, _: ?*anyopaque) anyerror![]u8 {
+fn getTimeExec(ctx: *const core.tool_context.ToolContext, _: []const u8, _: ?*anyopaque) anyerror![]u8 {
     return ctx.allocator.dupe(u8, "{\"t\":42}");
 }
 
@@ -134,15 +134,15 @@ test "C3: Gemini functionCall → 中立工具循环 → 第二轮 end_turn(工�
     var client = gemini.GeminiClient.init(a, io_rt.io(), "test-key", "gemini-2.5-flash", url);
     defer client.deinit();
 
-    var dyn = cc.tools_dynamic.DynRegistry.init(a);
+    var dyn = core.tools_dynamic.DynRegistry.init(a);
     defer dyn.deinit();
     try dyn.register("get_time", "Get current time", &.{}, getTimeExec, null, false);
 
-    var conv = cc.conversation.Conversation.init(a);
+    var conv = core.conversation.Conversation.init(a);
     defer conv.deinit();
     try conv.appendText(.user, "what time is it");
-    const perm = cc.permission.createContext(.bypass_permissions, a);
-    const tool_defs = try cc.tools.toToolDefinitionsFull(a, &dyn, null);
+    const perm = core.permission.createContext(.bypass_permissions, a);
+    const tool_defs = try core.tools.toToolDefinitionsFull(a, &dyn, null);
     defer a.free(tool_defs);
 
     var render = writer_backend.WriterBackend.initNull();
@@ -190,16 +190,16 @@ test "C3/P0.1: 并行 functionCall 两个都执行 + name 干净 + 第二轮双 
     var client = gemini.GeminiClient.init(a, io_rt.io(), "test-key", "gemini-2.5-flash", url);
     defer client.deinit();
 
-    var dyn = cc.tools_dynamic.DynRegistry.init(a);
+    var dyn = core.tools_dynamic.DynRegistry.init(a);
     defer dyn.deinit();
     try dyn.register("get_time", "Get current time", &.{}, getTimeExec, null, false);
     try dyn.register("get_date", "Get current date", &.{}, getTimeExec, null, false);
 
-    var conv = cc.conversation.Conversation.init(a);
+    var conv = core.conversation.Conversation.init(a);
     defer conv.deinit();
     try conv.appendText(.user, "time and date");
-    const perm = cc.permission.createContext(.bypass_permissions, a);
-    const tool_defs = try cc.tools.toToolDefinitionsFull(a, &dyn, null);
+    const perm = core.permission.createContext(.bypass_permissions, a);
+    const tool_defs = try core.tools.toToolDefinitionsFull(a, &dyn, null);
     defer a.free(tool_defs);
 
     var render = writer_backend.WriterBackend.initNull();
@@ -252,11 +252,11 @@ test "C3/缓存: 有状态句柄命中 → 请求体带 cachedContent 引用(sta
     const prefix_hash = gemini.hashPrefixForTest("gemini-2.5-flash", system_prompt, null);
     try client.registerCache(prefix_hash, "cachedContents/test123", std.math.maxInt(i64)); // 永不过期(mono_ms max)
 
-    var conv = cc.conversation.Conversation.init(a);
+    var conv = core.conversation.Conversation.init(a);
     defer conv.deinit();
     try conv.appendText(.user, "hi");
-    const perm = cc.permission.createContext(.bypass_permissions, a);
-    const empty_defs: []const cc.json_mod.ToolDefinition = &.{};
+    const perm = core.permission.createContext(.bypass_permissions, a);
+    const empty_defs: []const core.json.ToolDefinition = &.{};
 
     var render = writer_backend.WriterBackend.initNull();
     const be = render.backend();
@@ -288,8 +288,8 @@ test "C3/缓存: usage 与 content 同 chunk 时 usage 不丢(E 修复)" {
     defer client.deinit();
 
     const p = client.provider();
-    const msgs = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
+    const msgs = [_]core.types.ApiMessage{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "hi" }} },
     };
     var handle = p.sendStream(&msgs, null, null, null, null, null, "") catch |e| {
         std.debug.print("gemini sendStream failed: {s}\n", .{@errorName(e)});
@@ -334,7 +334,7 @@ const GEMINI_NULL_USAGE_SSE =
 
 test "issue #258: Gemini usageMetadata:null 不产 usage 事件,对象才计且数值来自对象" {
     const a = std.testing.allocator;
-    const Case = struct { sse: []const u8, usages: []const cc.api_stream.UsageDelta };
+    const Case = struct { sse: []const u8, usages: []const core.api_stream.UsageDelta };
     const cases = [_]Case{
         .{ .sse = GEMINI_NULL_USAGE_SSE, .usages = &.{} },
         // promptTokenCount 含 cachedContentTokenCount:input = 10 -| 3000 = 0(饱和减)。
@@ -352,15 +352,15 @@ test "issue #258: Gemini usageMetadata:null 不产 usage 事件,对象才计且�
         defer client.deinit();
 
         const p = client.provider();
-        const msgs = [_]cc.types_mod.ApiMessage{
-            .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
+        const msgs = [_]core.types.ApiMessage{
+            .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "hi" }} },
         };
         var handle = try p.sendStream(&msgs, null, null, null, null, null, "");
         defer handle.deinit();
 
         var text_buf: std.ArrayList(u8) = .empty;
         defer text_buf.deinit(a);
-        var usages: std.ArrayList(cc.api_stream.UsageDelta) = .empty;
+        var usages: std.ArrayList(core.api_stream.UsageDelta) = .empty;
         defer usages.deinit(a);
         while (try handle.next()) |ev| switch (ev) {
             .text => |t| {
@@ -376,8 +376,8 @@ test "issue #258: Gemini usageMetadata:null 不产 usage 事件,对象才计且�
             else => {},
         };
         try std.testing.expectEqualStrings("hello world", text_buf.items);
-        try std.testing.expectEqualSlices(cc.api_stream.UsageDelta, case.usages, usages.items);
-        try std.testing.expectEqual(cc.api_stream.StopReason.end_turn, handle.stopReason());
+        try std.testing.expectEqualSlices(core.api_stream.UsageDelta, case.usages, usages.items);
+        try std.testing.expectEqual(core.api_stream.StopReason.end_turn, handle.stopReason());
     }
 }
 
@@ -400,8 +400,8 @@ test "Gemini functionCall id 跨请求唯一(掺 RequestId,防跨轮碰撞)" {
     defer client.deinit();
 
     const p = client.provider();
-    const msgs = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
+    const msgs = [_]core.types.ApiMessage{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "hi" }} },
     };
 
     var ids: [2][]const u8 = undefined;

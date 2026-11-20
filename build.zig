@@ -3230,7 +3230,6 @@ pub fn build(b: *std.Build) void {
         "tests/component/recovery_allowance_test.zig",
         "tests/component/plugin_runtime_test.zig",
         "tests/component/plugin_process_test.zig",
-        "tests/component/http_error_test.zig",
         "tests/component/answer_queue_test.zig",
         "tests/component/base_url_flag_test.zig",
         "tests/component/task_error_test.zig",
@@ -3266,7 +3265,6 @@ pub fn build(b: *std.Build) void {
         "tests/component/provider_vtable_test.zig",
         "tests/component/capability_gate_test.zig",
         "tests/component/openai_provider_test.zig",
-        "tests/component/gemini_provider_test.zig",
         "tests/component/background_main_test.zig",
         "tests/component/suspend_resume_test.zig",
         "tests/component/diff_highlight_test.zig",
@@ -3282,6 +3280,8 @@ pub fn build(b: *std.Build) void {
         "tests/component/dialect_matrix_test.zig",
     };
     const new_core_files = [_][]const u8{
+        "tests/component/gemini_provider_test.zig",
+        "tests/component/http_error_test.zig",
         "tests/component/agent_session_tools_test.zig",
         "tests/component/agent_session_host_tools_test.zig",
         "tests/component/agent_session_ui_test.zig",
