@@ -1,28 +1,28 @@
-# @zogien/agentcore
+# @zogien/agent-sdk
 
 Prebuilt AgentCore SDK bundles: the C ABI library (static and shared), the C
 header, Zig and Rust bindings, and the runtime helpers AgentCore ships with.
 
 ```sh
-npm install @zogien/agentcore
+npm install @zogien/agent-sdk
 ```
 
 This package holds no binaries. Each platform's bundle is its own package, and
 npm installs the one that matches the machine:
 
-| Platform            | Package                             | AgentCore target       |
-| ------------------- | ----------------------------------- | ---------------------- |
-| Windows x64         | `@zogien/agentcore-win32-x64`       | `x86_64-windows-msvc`  |
-| Windows ARM64       | `@zogien/agentcore-win32-arm64`     | `aarch64-windows-msvc` |
-| macOS ARM64         | `@zogien/agentcore-darwin-arm64`    | `aarch64-macos`        |
-| macOS x64           | `@zogien/agentcore-darwin-x64`      | `x86_64-macos`         |
-| Linux x64 (glibc)   | `@zogien/agentcore-linux-x64-gnu`   | `x86_64-linux-gnu`     |
-| Linux ARM64 (glibc) | `@zogien/agentcore-linux-arm64-gnu` | `aarch64-linux-gnu`    |
+| Platform            | Package                             | AgentCore target      |
+| ------------------- | ----------------------------------- | --------------------- |
+| Windows x64         | `@zogien/agent-sdk-win32-x64`        | `x86_64-windows-msvc`  |
+| Windows ARM64       | `@zogien/agent-sdk-win32-arm64`      | `aarch64-windows-msvc` |
+| macOS ARM64         | `@zogien/agent-sdk-darwin-arm64`     | `aarch64-macos`        |
+| macOS x64           | `@zogien/agent-sdk-darwin-x64`       | `x86_64-macos`         |
+| Linux x64 (glibc)    | `@zogien/agent-sdk-linux-x64-gnu`    | `x86_64-linux-gnu`     |
+| Linux ARM64 (glibc)  | `@zogien/agent-sdk-linux-arm64-gnu`  | `aarch64-linux-gnu`    |
 
 ## Finding the bundle
 
 ```js
-const agentcore = require("@zogien/agentcore");
+const agentcore = require("@zogien/agent-sdk");
 
 const bundle = agentcore.resolve();
 bundle.root; // the bundle directory, with manifest.json directly inside

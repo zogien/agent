@@ -8,6 +8,7 @@
 
 const path = require("node:path");
 
+const { name: packageName } = require("./package.json");
 const PACKAGES = Object.freeze(require("./platforms.json"));
 
 function isMusl() {
@@ -21,10 +22,10 @@ function resolve(options = {}) {
   const arch = options.arch || process.arch;
   const entry = PACKAGES[`${platform}-${arch}`];
   if (!entry)
-    throw new Error(`@zogien/agentcore has no bundle for ${platform}-${arch}`);
+    throw new Error(`${packageName} has no bundle for ${platform}-${arch}`);
   if (!options.platform && !options.arch && isMusl())
     throw new Error(
-      "@zogien/agentcore has no bundle for musl; the Linux bundles are built for glibc",
+      `${packageName} has no bundle for musl; the Linux bundles are built for glibc`,
     );
 
   let manifestPath;
@@ -32,8 +33,8 @@ function resolve(options = {}) {
     manifestPath = require.resolve(`${entry.package}/manifest.json`);
   } catch (cause) {
     const error = new Error(
-      `${entry.package} is not installed. It is an optional dependency of ` +
-        "@zogien/agentcore: reinstall without --omit=optional, or, for a " +
+      `${entry.package} is not installed. It is an optional dependency of ${packageName}: ` +
+        "reinstall without --omit=optional, or, for a " +
         `platform other than this machine's, install with --os=${platform} --cpu=${arch}.`,
     );
     error.cause = cause;

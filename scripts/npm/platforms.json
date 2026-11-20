@@ -1,8 +1,8 @@
 {
   "scope": "@zogien",
-  "name": "agentcore",
-  "repository": "git+https://github.com/zogien/agentcore.git",
-  "homepage": "https://github.com/zogien/agentcore#readme",
+  "name": "agent-sdk",
+  "repository": "git+https://github.com/zogien/agent.git",
+  "homepage": "https://github.com/zogien/agent#readme",
   "license": "MIT",
   "platforms": [
     {
