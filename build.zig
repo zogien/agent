@@ -762,6 +762,7 @@ fn createIntegrationModule(
     harness: *std.Build.Module,
     suite: IntegrationSuite,
     implementation: *std.Build.Module,
+    mock_mcp_server: std.Build.LazyPath,
 ) *std.Build.Module {
     const mod = b.createModule(.{
         .root_source_file = b.path("tests/integration_suite.zig"),
@@ -771,6 +772,7 @@ fn createIntegrationModule(
     });
     const options = b.addOptions();
     options.addOption(bool, "use_core", suite == .core);
+    options.addOptionPath("mock_mcp_server", mock_mcp_server);
     mod.addOptions("integration_options", options);
     mod.addImport("harness", harness);
     mod.addImport(switch (suite) {
@@ -3043,7 +3045,7 @@ pub fn build(b: *std.Build) void {
 
     // Both suites read the same source inventory. The CLI suite still compiles
     // once and partitions individual test names only after compilation.
-    const integration_suite_mod = createIntegrationModule(b, target, optimize, test_harness_mod, .cli, test_cc_mod);
+    const integration_suite_mod = createIntegrationModule(b, target, optimize, test_harness_mod, .cli, test_cc_mod, mock_mcp_exe.getEmittedBin());
     const integration_suite_test = b.addTest(.{
         .name = "integration-suite",
         .root_module = integration_suite_mod,
@@ -3114,7 +3116,7 @@ pub fn build(b: *std.Build) void {
     const integration_times_step = b.step("test:integration-times", "Run aggregate component/integration tests with per-test timings");
     integration_times_step.dependOn(&integration_timed_run.step);
 
-    const core_integration_mod = createIntegrationModule(b, target, optimize, test_harness_mod, .core, core_mod);
+    const core_integration_mod = createIntegrationModule(b, target, optimize, test_harness_mod, .core, core_mod, mock_mcp_exe.getEmittedBin());
     const core_integration_test = b.addTest(.{
         .name = "core-integration-suite",
         .root_module = core_integration_mod,

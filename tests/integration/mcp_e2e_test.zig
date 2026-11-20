@@ -4,6 +4,7 @@ const std = @import("std");
 const cc = @import("cc");
 const pfs = @import("platform").fs;
 const sync = @import("platform").sync;
+const mock_mcp_path: [:0]const u8 = @import("integration_options").mock_mcp_server ++ "";
 
 fn dispatchOk(ctx: *const cc.tools.ToolContext, name: []const u8, args: []const u8) ![]u8 {
     var outcome = try cc.tools.dispatch(ctx, name, args);
@@ -60,8 +61,7 @@ fn readResourceBody(
 ) !cc.tools.ToolResultBody {
     const allocator = std.testing.allocator;
     if (fill_quota) try fillSessionArtifactQuota(allocator, root);
-    const mock_path: [*:0]const u8 = "zig-out/bin/mock_mcp_server";
-    const argv = [_]?[*:0]const u8{ mock_path, null };
+    const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
     var client = try cc.mcp_client.McpClient.connect(allocator, argv[0..]);
     defer client.close();
 
@@ -274,8 +274,7 @@ test "MCP unhinted read clears stale detail after Zig error" {
     defer tmp.cleanup();
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    const mock_path: [*:0]const u8 = "zig-out/bin/mock_mcp_server";
-    const argv = [_]?[*:0]const u8{ mock_path, null };
+    const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
     var first_client = try cc.mcp_client.McpClient.connect(allocator, argv[0..]);
     defer first_client.close();
     var second_client = try cc.mcp_client.McpClient.connect(allocator, argv[0..]);
@@ -335,8 +334,7 @@ test "MCP unhinted read clears stale detail after Zig error" {
 
 test "MCP: full cycle initialize + listTools + callTool echo" {
     const a = std.testing.allocator;
-    const mock_path: [*:0]const u8 = "zig-out/bin/mock_mcp_server";
-    const argv = [_]?[*:0]const u8{ mock_path, null };
+    const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
 
     // connect 内做了 initialize
     var client = cc.mcp_client.McpClient.connect(a, argv[0..]) catch |err| {
@@ -387,8 +385,7 @@ const ConcurrentCall = struct {
 
 test "MCP: parallel tool calls serialize one stdio JSON-RPC stream" {
     const a = std.heap.c_allocator;
-    const mock_path: [*:0]const u8 = "zig-out/bin/mock_mcp_server";
-    const argv = [_]?[*:0]const u8{ mock_path, null };
+    const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
     var client = try cc.mcp_client.McpClient.connect(a, argv[0..]);
     defer client.close();
 
@@ -422,8 +419,7 @@ fn elicitAcceptHandler(ctx: *anyopaque, _: []const u8, alloc: std.mem.Allocator)
 
 test "MCP P0.3: elicitation 往返 — server 发 elicitation/create,client handler accept,tool 完成" {
     const a = std.testing.allocator;
-    const mock_path: [*:0]const u8 = "zig-out/bin/mock_mcp_server";
-    const argv = [_]?[*:0]const u8{ mock_path, null };
+    const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
     var client = cc.mcp_client.McpClient.connect(a, argv[0..]) catch |err| {
         std.debug.print("connect failed: {s}\n", .{@errorName(err)});
         return err;
@@ -441,8 +437,7 @@ test "MCP P0.3: elicitation 往返 — server 发 elicitation/create,client hand
 
 test "MCP P0.3: 无 elicitation handler → 自动 decline,tool 仍完成(不 hang,不破协议)" {
     const a = std.testing.allocator;
-    const mock_path: [*:0]const u8 = "zig-out/bin/mock_mcp_server";
-    const argv = [_]?[*:0]const u8{ mock_path, null };
+    const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
     var client = cc.mcp_client.McpClient.connect(a, argv[0..]) catch return;
     defer client.close();
     // 不设 handler → elicitation/create 被自动 decline。tool 仍拿到响应(不因未处理 server 请求而卡死)。
@@ -457,8 +452,7 @@ test "MCP: dispatch via DynRegistry routes mcp__mock__echo to MCP server" {
     defer tmp.cleanup();
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    const mock_path: [*:0]const u8 = "zig-out/bin/mock_mcp_server";
-    const argv = [_]?[*:0]const u8{ mock_path, null };
+    const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
 
     var client = try cc.mcp_client.McpClient.connect(a, argv[0..]);
     defer client.close();
@@ -484,8 +478,7 @@ test "MCP: CLI stdio captures 17MiB from byte zero and dispatch preserves typed 
     defer tmp.cleanup();
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    const mock_path: [*:0]const u8 = "zig-out/bin/mock_mcp_server";
-    const argv = [_]?[*:0]const u8{ mock_path, null };
+    const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
     var client = try cc.mcp_client.McpClient.connect(a, argv[0..]);
     defer client.close();
     var dyn = cc.tools_dynamic.DynRegistry.init(a);
@@ -525,8 +518,7 @@ test "MCP: CLI stdio captures 17MiB from byte zero and dispatch preserves typed 
 
 test "MCP: registerResourceTools adds list_resources + read_resource" {
     const a = std.testing.allocator;
-    const mock_path: [*:0]const u8 = "zig-out/bin/mock_mcp_server";
-    const argv = [_]?[*:0]const u8{ mock_path, null };
+    const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
 
     var client = try cc.mcp_client.McpClient.connect(a, argv[0..]);
     defer client.close();
@@ -547,8 +539,7 @@ test "MCP: static resource tools preserve byte-zero artifact recovery" {
     defer tmp.cleanup();
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    const mock_path: [*:0]const u8 = "zig-out/bin/mock_mcp_server";
-    const argv = [_]?[*:0]const u8{ mock_path, null };
+    const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
     var client = try cc.mcp_client.McpClient.connect(a, argv[0..]);
     defer client.close();
 

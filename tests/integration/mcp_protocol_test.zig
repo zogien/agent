@@ -9,11 +9,11 @@ const std = @import("std");
 const builtin = @import("builtin");
 const cc = @import("cc");
 
-const MOCK: [*:0]const u8 = "zig-out/bin/mock_mcp_server";
+const mock_mcp_path: [:0]const u8 = @import("integration_options").mock_mcp_server ++ "";
 
 fn connectMock(flags: []const [*:0]const u8, options: cc.mcp_client.ConnectOptions) !cc.mcp_client.McpClient {
     var argv: [8]?[*:0]const u8 = .{null} ** 8;
-    argv[0] = MOCK;
+    argv[0] = mock_mcp_path;
     for (flags, 1..) |flag, index| argv[index] = flag;
     var resolved = options;
     resolved.spawn = .{ .argv = argv[0 .. flags.len + 2] };
@@ -158,12 +158,12 @@ test "L2 MCP config: env, env_vars, the allowlist, cwd and enabled_tools reach t
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     const repo_cwd = try cc.util_fs.getCwd(arena.allocator());
-    const mock_abs = try std.fs.path.join(arena.allocator(), &.{ repo_cwd, "zig-out/bin/mock_mcp_server" });
+    const mock_abs = try std.fs.path.resolve(arena.allocator(), &.{ repo_cwd, mock_mcp_path });
 
     const config_json = try std.fmt.allocPrint(arena.allocator(),
-        \\{{"mcpServers":{{"probe":{{"command":"{s}","env":{{"CONFIGURED":"${{FROM_PARENT}}-x"}},
-        \\  "envVars":["PASSED_THROUGH"],"cwd":"{s}","enabledTools":["env","cwd"]}}}}}}
-    , .{ mock_abs, root });
+        \\{{"mcpServers":{{"probe":{{"command":{f},"env":{{"CONFIGURED":"${{FROM_PARENT}}-x"}},
+        \\  "envVars":["PASSED_THROUGH"],"cwd":{f},"enabledTools":["env","cwd"]}}}}}}
+    , .{ std.json.fmt(mock_abs, .{}), std.json.fmt(root, .{}) });
     const environment = cc.mcp_config.Environment{ .entries = &.{
         "PATH=/usr/bin:/bin", "HOME=/home/test", "FROM_PARENT=parent", "PASSED_THROUGH=yes", "NOT_ALLOWED=secret",
     } };
