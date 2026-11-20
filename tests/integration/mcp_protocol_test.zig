@@ -7,18 +7,18 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 
 const mock_mcp_path: [:0]const u8 = @import("integration_options").mock_mcp_server ++ "";
 
-fn connectMock(flags: []const [*:0]const u8, options: cc.mcp_client.ConnectOptions) !cc.mcp_client.McpClient {
+fn connectMock(flags: []const [*:0]const u8, options: core.mcp_client.ConnectOptions) !core.mcp_client.McpClient {
     var argv: [8]?[*:0]const u8 = .{null} ** 8;
     argv[0] = mock_mcp_path;
     for (flags, 1..) |flag, index| argv[index] = flag;
     var resolved = options;
     resolved.spawn = .{ .argv = argv[0 .. flags.len + 2] };
     if (resolved.startup_timeout_ms == null) resolved.startup_timeout_ms = 10_000;
-    return cc.mcp_client.McpClient.connectWith(std.testing.allocator, resolved);
+    return core.mcp_client.McpClient.connectWith(std.testing.allocator, resolved);
 }
 
 fn expectTool(tools_json: []const u8, name: []const u8) !void {
@@ -92,7 +92,7 @@ test "MCP: a server ping is answered and pagination follows an empty-string curs
     var pinging = try connectMock(&.{"--ping"}, .{ .spawn = undefined });
     defer pinging.close();
     // Without a ping reply the mock never sends the list: bound the wait.
-    pinging.transport.setDeadline(@import("cc").util_time.nowMs() + 5_000);
+    pinging.transport.setDeadline(core.util_time.nowMs() + 5_000);
     const listed = try pinging.listTools();
     defer std.testing.allocator.free(listed);
     try expectTool(listed, "echo");
@@ -157,30 +157,30 @@ test "L2 MCP config: env, env_vars, the allowlist, cwd and enabled_tools reach t
     defer tmp.cleanup();
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
-    const repo_cwd = try cc.util_fs.getCwd(arena.allocator());
+    const repo_cwd = try core.util_fs.getCwd(arena.allocator());
     const mock_abs = try std.fs.path.resolve(arena.allocator(), &.{ repo_cwd, mock_mcp_path });
 
     const config_json = try std.fmt.allocPrint(arena.allocator(),
         \\{{"mcpServers":{{"probe":{{"command":{f},"env":{{"CONFIGURED":"${{FROM_PARENT}}-x"}},
         \\  "envVars":["PASSED_THROUGH"],"cwd":{f},"enabledTools":["env","cwd"]}}}}}}
     , .{ std.json.fmt(mock_abs, .{}), std.json.fmt(root, .{}) });
-    const environment = cc.mcp_config.Environment{ .entries = &.{
+    const environment = core.mcp_config.Environment{ .entries = &.{
         "PATH=/usr/bin:/bin", "HOME=/home/test", "FROM_PARENT=parent", "PASSED_THROUGH=yes", "NOT_ALLOWED=secret",
     } };
-    const resolved = try cc.mcp_config.resolve(arena.allocator(), .{
+    const resolved = try core.mcp_config.resolve(arena.allocator(), .{
         .metacodes_config = .{ .path = "/state/config.json", .bytes = config_json },
     }, .{ .cwd = repo_cwd, .workspace_root = repo_cwd, .env = environment });
     try std.testing.expectEqual(@as(usize, 1), resolved.servers.len);
     const server = resolved.servers[0];
-    const launch = try cc.mcp_launch.prepare(arena.allocator(), server.transport.stdio, environment, repo_cwd);
-    var client = try cc.mcp_client.McpClient.connectWith(a, .{
+    const launch = try core.mcp_launch.prepare(arena.allocator(), server.transport.stdio, environment, repo_cwd);
+    var client = try core.mcp_client.McpClient.connectWith(a, .{
         .spawn = .{ .argv = launch.argv, .env = launch.env, .cwd = launch.cwd },
         .startup_timeout_ms = 10_000,
     });
     defer client.close();
 
     const expectCall = struct {
-        fn run(c: *cc.mcp_client.McpClient, tool: []const u8, args: []const u8, needle: []const u8) !void {
+        fn run(c: *core.mcp_client.McpClient, tool: []const u8, args: []const u8, needle: []const u8) !void {
             const out = try c.callTool(tool, args);
             defer std.testing.allocator.free(out);
             if (std.mem.indexOf(u8, out, needle) == null) {
@@ -196,9 +196,9 @@ test "L2 MCP config: env, env_vars, the allowlist, cwd and enabled_tools reach t
     const cwd_needle = try std.fmt.allocPrint(arena.allocator(), "cwd:{s}", .{root});
     try expectCall(&client, "cwd", "{}", cwd_needle);
 
-    var registry = cc.tools_dynamic.DynRegistry.init(a);
+    var registry = core.tools_dynamic.DynRegistry.init(a);
     defer registry.deinit();
-    var session = cc.mcp_registry_bridge.McpSession.init(a, &client);
+    var session = core.mcp_registry_bridge.McpSession.init(a, &client);
     defer session.deinit();
     try session.registerToolsFiltered(&registry, server.name, .{ .enabled = server.enabled_tools, .disabled = server.disabled_tools });
     try std.testing.expectEqual(@as(usize, 2), registry.entries.items.len);

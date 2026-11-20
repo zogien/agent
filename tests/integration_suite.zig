@@ -18,6 +18,8 @@ test {
         _ = @import("component/agent_session_runtime_config_test.zig");
         _ = @import("component/agent_session_permission_scope_test.zig");
         _ = @import("component/agent_session_credential_test.zig");
+        _ = @import("integration/mcp_e2e_test.zig");
+        _ = @import("integration/mcp_protocol_test.zig");
         _ = @import("integration/http_stream_e2e_test.zig");
         _ = @import("component/gemini_provider_test.zig");
         _ = @import("component/http_error_test.zig");
@@ -28,8 +30,6 @@ test {
 
 fn cliTests() void {
     _ = @import("integration/tool_abort_test.zig");
-    _ = @import("integration/mcp_e2e_test.zig");
-    _ = @import("integration/mcp_protocol_test.zig");
     _ = @import("integration/mcp_http_test.zig");
     _ = @import("integration/mcp_sse_oauth_test.zig");
     _ = @import("integration/skills_e2e_test.zig");

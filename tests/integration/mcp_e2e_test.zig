@@ -1,13 +1,13 @@
 //! MCP 端到端测试：spawn mock_mcp_server → initialize → tools/list → tools/call。
 
 const std = @import("std");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 const pfs = @import("platform").fs;
 const sync = @import("platform").sync;
 const mock_mcp_path: [:0]const u8 = @import("integration_options").mock_mcp_server ++ "";
 
-fn dispatchOk(ctx: *const cc.tools.ToolContext, name: []const u8, args: []const u8) ![]u8 {
-    var outcome = try cc.tools.dispatch(ctx, name, args);
+fn dispatchOk(ctx: *const core.tools.ToolContext, name: []const u8, args: []const u8) ![]u8 {
+    var outcome = try core.tools.dispatch(ctx, name, args);
     return switch (outcome) {
         .ok => |*body| (try body.takeModelBytes(ctx.allocator)).bytes,
         else => {
@@ -29,7 +29,7 @@ fn expectedSizedResourceResult(allocator: std.mem.Allocator, payload_bytes: usiz
 }
 
 fn fillSessionArtifactQuota(allocator: std.mem.Allocator, root: []const u8) !void {
-    const seed = try cc.tool_result_artifact.persist(allocator, root, "seed");
+    const seed = try core.tool_result_artifact.persist(allocator, root, "seed");
     _ = seed;
     const filler = try std.fmt.allocPrintSentinel(
         allocator,
@@ -45,7 +45,7 @@ fn fillSessionArtifactQuota(allocator: std.mem.Allocator, root: []const u8) !voi
     );
     if (fd < 0) return error.QuotaFixtureOpenFailed;
     defer _ = pfs.close(fd);
-    try pfs.setSize(fd, cc.tool_result_artifact.MAX_SESSION_BYTES);
+    try pfs.setSize(fd, core.tool_result_artifact.MAX_SESSION_BYTES);
 }
 
 const ExpectedBody = enum { inline_body, artifact, structured_error };
@@ -58,25 +58,25 @@ fn readResourceBody(
     uri: []const u8,
     server_hint: bool,
     fill_quota: bool,
-) !cc.tools.ToolResultBody {
+) !core.tools.ToolResultBody {
     const allocator = std.testing.allocator;
     if (fill_quota) try fillSessionArtifactQuota(allocator, root);
     const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
-    var client = try cc.mcp_client.McpClient.connect(allocator, argv[0..]);
+    var client = try core.mcp_client.McpClient.connect(allocator, argv[0..]);
     defer client.close();
 
     const server_name = try allocator.dupe(u8, "mock");
     defer allocator.free(server_name);
-    var entries = [_]cc.mcp_session.McpSessionEntry{.{
+    var entries = [_]core.mcp_session.McpSessionEntry{.{
         .name = server_name,
         .client = &client,
-        .session = cc.mcp_registry_bridge.McpSession.init(allocator, &client),
+        .session = core.mcp_registry_bridge.McpSession.init(allocator, &client),
     }};
     defer entries[0].session.deinit();
-    var sessions: []cc.mcp_session.McpSessionEntry = entries[0..];
-    const budget = cc.result_budget.Budget.fromModel(200_000);
+    var sessions: []core.mcp_session.McpSessionEntry = entries[0..];
+    const budget = core.result_budget.Budget.fromModel(200_000);
     try std.testing.expectEqual(@as(usize, 25_000), budget.per_result_bytes);
-    var ctx = cc.tools.ToolContext.simple(allocator);
+    var ctx = core.tools.ToolContext.simple(allocator);
     ctx.artifact_root = root;
     ctx.result_budget = budget;
     ctx.mcp_sessions = &sessions;
@@ -88,7 +88,7 @@ fn readResourceBody(
     if (server_hint) try args.writer.writeAll(",\"server\":\"mock\"");
     try args.writer.writeByte('}');
 
-    var outcome = try cc.tools.dispatch(&ctx, "ReadMcpResourceTool", args.written());
+    var outcome = try core.tools.dispatch(&ctx, "ReadMcpResourceTool", args.written());
     return switch (outcome) {
         .ok => |body| body,
         else => {
@@ -109,10 +109,10 @@ const Committed = struct {
     }
 };
 
-fn commitSealedBody(allocator: std.mem.Allocator, body: *cc.tools.ToolResultBody) !Committed {
+fn commitSealedBody(allocator: std.mem.Allocator, body: *core.tools.ToolResultBody) !Committed {
     var rendered = try body.render(allocator);
     defer rendered.deinit(allocator);
-    var slots = [_]cc.tool_exec.Slot{.{
+    var slots = [_]core.tool_exec.Slot{.{
         .decision = .run,
         .name = "ReadMcpResourceTool",
         .id = "sid",
@@ -121,7 +121,7 @@ fn commitSealedBody(allocator: std.mem.Allocator, body: *cc.tools.ToolResultBody
         .sealed = body.takeSealedHandles(),
     }};
     errdefer for (&slots) |*slot| slot.deinit(allocator);
-    try cc.tool_exec.publishSealedResults(&slots, allocator, .{ .bytes = [_]u8{'0'} ** 12 });
+    try core.tool_exec.publishSealedResults(&slots, allocator, .{ .bytes = [_]u8{'0'} ** 12 });
     const content = slots[0].content.?;
     slots[0].content = null;
     const is_error = slots[0].is_error;
@@ -275,9 +275,9 @@ test "MCP unhinted read clears stale detail after Zig error" {
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
-    var first_client = try cc.mcp_client.McpClient.connect(allocator, argv[0..]);
+    var first_client = try core.mcp_client.McpClient.connect(allocator, argv[0..]);
     defer first_client.close();
-    var second_client = try cc.mcp_client.McpClient.connect(allocator, argv[0..]);
+    var second_client = try core.mcp_client.McpClient.connect(allocator, argv[0..]);
     var second_client_closed = false;
     defer if (!second_client_closed) second_client.close();
 
@@ -285,16 +285,16 @@ test "MCP unhinted read clears stale detail after Zig error" {
     defer allocator.free(first_name);
     const second_name = try allocator.dupe(u8, "second");
     defer allocator.free(second_name);
-    var entries = [_]cc.mcp_session.McpSessionEntry{
+    var entries = [_]core.mcp_session.McpSessionEntry{
         .{
             .name = first_name,
             .client = &first_client,
-            .session = cc.mcp_registry_bridge.McpSession.init(allocator, &first_client),
+            .session = core.mcp_registry_bridge.McpSession.init(allocator, &first_client),
         },
         .{
             .name = second_name,
             .client = &second_client,
-            .session = cc.mcp_registry_bridge.McpSession.init(allocator, &second_client),
+            .session = core.mcp_registry_bridge.McpSession.init(allocator, &second_client),
         },
     };
     defer entries[0].session.deinit();
@@ -302,11 +302,11 @@ test "MCP unhinted read clears stale detail after Zig error" {
     second_client.close();
     second_client_closed = true;
 
-    var sessions: []cc.mcp_session.McpSessionEntry = entries[0..];
-    var ctx = cc.tools.ToolContext.simple(allocator);
+    var sessions: []core.mcp_session.McpSessionEntry = entries[0..];
+    var ctx = core.tools.ToolContext.simple(allocator);
     ctx.artifact_root = root;
     ctx.mcp_sessions = &sessions;
-    var outcome = try cc.tools.dispatch(
+    var outcome = try core.tools.dispatch(
         &ctx,
         "ReadMcpResourceTool",
         "{\"uri\":\"mock://sized/notanumber\"}",
@@ -337,7 +337,7 @@ test "MCP: full cycle initialize + listTools + callTool echo" {
     const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
 
     // connect 内做了 initialize
-    var client = cc.mcp_client.McpClient.connect(a, argv[0..]) catch |err| {
+    var client = core.mcp_client.McpClient.connect(a, argv[0..]) catch |err| {
         std.debug.print("McpClient.connect failed: {s}\n", .{@errorName(err)});
         return err;
     };
@@ -370,7 +370,7 @@ const ConcurrentStart = struct {
 };
 
 const ConcurrentCall = struct {
-    client: *cc.mcp_client.McpClient,
+    client: *core.mcp_client.McpClient,
     start: *ConcurrentStart,
     message: []const u8,
     output: ?[]u8 = null,
@@ -386,7 +386,7 @@ const ConcurrentCall = struct {
 test "MCP: parallel tool calls serialize one stdio JSON-RPC stream" {
     const a = std.heap.c_allocator;
     const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
-    var client = try cc.mcp_client.McpClient.connect(a, argv[0..]);
+    var client = try core.mcp_client.McpClient.connect(a, argv[0..]);
     defer client.close();
 
     var start = ConcurrentStart{};
@@ -420,7 +420,7 @@ fn elicitAcceptHandler(ctx: *anyopaque, _: []const u8, alloc: std.mem.Allocator)
 test "MCP P0.3: elicitation 往返 — server 发 elicitation/create,client handler accept,tool 完成" {
     const a = std.testing.allocator;
     const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
-    var client = cc.mcp_client.McpClient.connect(a, argv[0..]) catch |err| {
+    var client = core.mcp_client.McpClient.connect(a, argv[0..]) catch |err| {
         std.debug.print("connect failed: {s}\n", .{@errorName(err)});
         return err;
     };
@@ -438,7 +438,7 @@ test "MCP P0.3: elicitation 往返 — server 发 elicitation/create,client hand
 test "MCP P0.3: 无 elicitation handler → 自动 decline,tool 仍完成(不 hang,不破协议)" {
     const a = std.testing.allocator;
     const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
-    var client = cc.mcp_client.McpClient.connect(a, argv[0..]) catch return;
+    var client = core.mcp_client.McpClient.connect(a, argv[0..]) catch return;
     defer client.close();
     // 不设 handler → elicitation/create 被自动 decline。tool 仍拿到响应(不因未处理 server 请求而卡死)。
     const result = try client.callTool("elicit", "{}");
@@ -454,17 +454,17 @@ test "MCP: dispatch via DynRegistry routes mcp__mock__echo to MCP server" {
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
 
-    var client = try cc.mcp_client.McpClient.connect(a, argv[0..]);
+    var client = try core.mcp_client.McpClient.connect(a, argv[0..]);
     defer client.close();
 
-    var dyn = cc.tools_dynamic.DynRegistry.init(a);
+    var dyn = core.tools_dynamic.DynRegistry.init(a);
     defer dyn.deinit();
-    var session = cc.mcp_registry_bridge.McpSession.init(a, &client);
+    var session = core.mcp_registry_bridge.McpSession.init(a, &client);
     defer session.deinit();
     try session.registerTools(&dyn, "mock");
 
     // 现在 dispatch 应当能找到 mcp__mock__echo 并调用,得到包含 "hi via dispatch" 的结果
-    var ctx = cc.tools.ToolContext.simple(a);
+    var ctx = core.tools.ToolContext.simple(a);
     ctx.artifact_root = root;
     ctx.dyn_registry = &dyn;
     const out = try dispatchOk(&ctx, "mcp__mock__echo", "{\"message\":\"hi via dispatch\"}");
@@ -479,16 +479,16 @@ test "MCP: CLI stdio captures 17MiB from byte zero and dispatch preserves typed 
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
-    var client = try cc.mcp_client.McpClient.connect(a, argv[0..]);
+    var client = try core.mcp_client.McpClient.connect(a, argv[0..]);
     defer client.close();
-    var dyn = cc.tools_dynamic.DynRegistry.init(a);
+    var dyn = core.tools_dynamic.DynRegistry.init(a);
     defer dyn.deinit();
-    var session = cc.mcp_registry_bridge.McpSession.init(a, &client);
+    var session = core.mcp_registry_bridge.McpSession.init(a, &client);
     defer session.deinit();
     try session.registerTools(&dyn, "mock");
     const entry = dyn.find("mcp__mock__large") orelse return error.MissingLargeMcpTool;
     try std.testing.expect(entry.executor == .result_body);
-    var ctx = cc.tools.ToolContext.simple(a);
+    var ctx = core.tools.ToolContext.simple(a);
     ctx.artifact_root = root;
     var body = try entry.execute(&ctx, "{}");
     defer body.deinit(a);
@@ -500,7 +500,7 @@ test "MCP: CLI stdio captures 17MiB from byte zero and dispatch preserves typed 
     defer large.spool.deinit();
     const large_completed = try large.spool.publish();
     body = .{ .artifact = .{ .stored = large_completed.receipt, .preview = large_completed.preview, .media_type = .json } };
-    var first = try cc.tool_result_artifact.readChunk(
+    var first = try core.tool_result_artifact.readChunk(
         a,
         root,
         large_completed.receipt.id(),
@@ -520,12 +520,12 @@ test "MCP: registerResourceTools adds list_resources + read_resource" {
     const a = std.testing.allocator;
     const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
 
-    var client = try cc.mcp_client.McpClient.connect(a, argv[0..]);
+    var client = try core.mcp_client.McpClient.connect(a, argv[0..]);
     defer client.close();
 
-    var dyn = cc.tools_dynamic.DynRegistry.init(a);
+    var dyn = core.tools_dynamic.DynRegistry.init(a);
     defer dyn.deinit();
-    var session = cc.mcp_registry_bridge.McpSession.init(a, &client);
+    var session = core.mcp_registry_bridge.McpSession.init(a, &client);
     defer session.deinit();
     try session.registerResourceTools(&dyn, "mock");
 
@@ -540,23 +540,23 @@ test "MCP: static resource tools preserve byte-zero artifact recovery" {
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
     const root = root_buffer[0..try tmp.dir.realPath(std.testing.io, &root_buffer)];
     const argv = [_]?[*:0]const u8{ mock_mcp_path, null };
-    var client = try cc.mcp_client.McpClient.connect(a, argv[0..]);
+    var client = try core.mcp_client.McpClient.connect(a, argv[0..]);
     defer client.close();
 
     const server_name = try a.dupe(u8, "mock");
     defer a.free(server_name);
-    var entries = [_]cc.mcp_session.McpSessionEntry{.{
+    var entries = [_]core.mcp_session.McpSessionEntry{.{
         .name = server_name,
         .client = &client,
-        .session = cc.mcp_registry_bridge.McpSession.init(a, &client),
+        .session = core.mcp_registry_bridge.McpSession.init(a, &client),
     }};
     defer entries[0].session.deinit();
-    var sessions: []cc.mcp_session.McpSessionEntry = entries[0..];
-    var ctx = cc.tools.ToolContext.simple(a);
+    var sessions: []core.mcp_session.McpSessionEntry = entries[0..];
+    var ctx = core.tools.ToolContext.simple(a);
     ctx.artifact_root = root;
     ctx.mcp_sessions = &sessions;
 
-    var listed = try cc.tools.dispatch(&ctx, "ListMcpResourcesTool", "{}");
+    var listed = try core.tools.dispatch(&ctx, "ListMcpResourcesTool", "{}");
     defer listed.deinit(a);
     switch (listed) {
         .ok => |body| switch (body) {
@@ -569,7 +569,7 @@ test "MCP: static resource tools preserve byte-zero artifact recovery" {
         else => return error.UnexpectedResourceListOutcome,
     }
 
-    var read = try cc.tools.dispatch(
+    var read = try core.tools.dispatch(
         &ctx,
         "ReadMcpResourceTool",
         "{\"uri\":\"mock://large\",\"server\":\"mock\"}",
@@ -585,7 +585,7 @@ test "MCP: static resource tools preserve byte-zero artifact recovery" {
     var large = body.takeSealed().?;
     defer large.spool.deinit();
     const large_completed = try large.spool.publish();
-    var tail = try cc.tool_result_artifact.readChunk(
+    var tail = try core.tool_result_artifact.readChunk(
         a,
         root,
         large_completed.receipt.id(),
