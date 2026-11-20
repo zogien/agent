@@ -20,10 +20,10 @@
 //! to <dir> instead of comparing.
 
 const std = @import("std");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 
-const CoreEvent = cc.ui_event.CoreEvent;
-const UiRequest = cc.ui_request.UiRequest;
+const CoreEvent = core.protocol.ui_event.CoreEvent;
+const UiRequest = core.protocol.ui_request.UiRequest;
 
 const EVENTS_FIXTURE = @embedFile("../fixtures/wire/v1/events.jsonl");
 const REQUESTS_FIXTURE = @embedFile("../fixtures/wire/v1/requests.jsonl");
@@ -33,10 +33,10 @@ const REPLIES_FIXTURE = @embedFile("../fixtures/wire/v1/capability_replies.jsonl
 
 const trace: [12]u8 = "0123456789ab".*;
 
-const file_refs = [_]cc.file_reference.FileReference{
+const file_refs = [_]core.file_reference.FileReference{
     .{ .locator = .{ .workspace_path = "src/a.zig" }, .title = "a.zig", .kind = "source", .range = .{ .start = .{ .line = 1, .column = 0 }, .end = .{ .line = 2, .column = 4 } } },
 };
-const changes = [_]cc.file_change.Record{
+const changes = [_]core.file_change.Record{
     .{
         .locator = .{ .workspace_path = "src/b.zig" },
         .from_locator = .{ .workspace_path = "src/old_b.zig" },
@@ -52,7 +52,7 @@ const changes = [_]cc.file_change.Record{
     },
 };
 
-const sample_goal = cc.core_goal.Goal{
+const sample_goal = core.goal.Goal{
     .id = "0123456789abcdef01234567".*,
     .objective = @constCast("ship \"wire\""),
     .status = .budget_limited,
@@ -63,7 +63,7 @@ const sample_goal = cc.core_goal.Goal{
     .updated_at_ms = 2,
 };
 
-fn samples(manifest_entries: []cc.prompt_sections.ManifestEntry) [49]CoreEvent {
+fn samples(manifest_entries: []core.prompt_sections.ManifestEntry) [49]CoreEvent {
     return .{
         .{ .text_chunk = "hello \"wire\"\n" },
         .{ .thinking_chunk = "considering" },
@@ -117,11 +117,11 @@ fn samples(manifest_entries: []cc.prompt_sections.ManifestEntry) [49]CoreEvent {
     };
 }
 
-const options = [_]cc.ui_request.AskOption{
+const options = [_]core.protocol.ui_request.AskOption{
     .{ .label = "Ship", .description = "Release now", .preview = "" },
     .{ .label = "Wait", .description = "Hold the release", .preview = "## Plan\n- wait" },
 };
-const questions = [_]cc.ui_request.AskQuestion{
+const questions = [_]core.protocol.ui_request.AskQuestion{
     .{ .question = "Ship now?", .header = "Decision", .multi = false, .options = &options },
     .{ .question = "Which targets?", .header = "Targets", .multi = true, .options = &options },
 };
@@ -166,7 +166,7 @@ fn compareOrDump(allocator: std.mem.Allocator, lines: []const []const u8, fixtur
 
 test "wire_contract: every CoreEvent tag has a pinned v1 line" {
     const a = std.testing.allocator;
-    var manifest_entries = [_]cc.prompt_sections.ManifestEntry{
+    var manifest_entries = [_]core.prompt_sections.ManifestEntry{
         .{ .id = "metacodes:identity", .order = 0, .origin = .kernel, .class = .replaceable, .sha256 = [_]u8{0xab} ** 32 },
         .{ .id = "host:rules", .order = 500, .origin = .host, .class = .removable, .sha256 = [_]u8{0x01} ** 32 },
     };
@@ -185,7 +185,7 @@ test "wire_contract: every CoreEvent tag has a pinned v1 line" {
     var written: usize = 0;
     defer for (lines[0..written]) |line| a.free(line);
     for (events, 0..) |event, index| {
-        lines[index] = try cc.wire.writeEvent(a, event);
+        lines[index] = try core.protocol.wire.writeEvent(a, event);
         written += 1;
     }
     try compareOrDump(a, &lines, EVENTS_FIXTURE, "events.jsonl");
@@ -201,7 +201,7 @@ const routed_away = [_]UiRequest{
 
 test "wire_contract: every UiRequest kind, close outcome and unavailable reason has a pinned v1 line" {
     const a = std.testing.allocator;
-    const closed_count = std.meta.fields(cc.wire.RequestClosed).len;
+    const closed_count = std.meta.fields(core.protocol.wire.RequestClosed).len;
     // One close per outcome, then one naming its approver (#446).
     var lines: [requests.len + closed_count + 1 + routed_away.len][]u8 = undefined;
     var written: usize = 0;
@@ -217,27 +217,27 @@ test "wire_contract: every UiRequest kind, close outcome and unavailable reason 
     }
 
     for (&requests, 0..) |*request, index| {
-        lines[index] = try cc.wire.writeRequest(a, index + 1, request);
+        lines[index] = try core.protocol.wire.writeRequest(a, index + 1, request);
         written += 1;
     }
-    inline for (std.meta.fields(cc.wire.RequestClosed), 0..) |field, index| {
-        lines[requests.len + index] = try cc.wire.writeRequestClosed(a, index + 1, @enumFromInt(field.value));
+    inline for (std.meta.fields(core.protocol.wire.RequestClosed), 0..) |field, index| {
+        lines[requests.len + index] = try core.protocol.wire.writeRequestClosed(a, index + 1, @enumFromInt(field.value));
         written += 1;
     }
-    lines[requests.len + closed_count] = try cc.wire.writeRequestClosedBy(a, 1, .answered, "alice@example.com");
+    lines[requests.len + closed_count] = try core.protocol.wire.writeRequestClosedBy(a, 1, .answered, "alice@example.com");
     written += 1;
 
     // The unavailable lines come from routing, not from naming a reason.
-    var declaration = try cc.wire.parseCapabilities(a, "{\"v\":1,\"type\":\"capabilities\",\"ui_requests\":[\"permission\"],\"custom\":[\"video_timeline@1\"]}");
+    var declaration = try core.protocol.wire.parseCapabilities(a, "{\"v\":1,\"type\":\"capabilities\",\"ui_requests\":[\"permission\"],\"custom\":[\"video_timeline@1\"]}");
     defer declaration.deinit();
     const capabilities = &declaration.capabilities;
-    try std.testing.expectEqual(cc.frontend_capabilities.Route.deliver, cc.frontend_capabilities.route(capabilities, &requests[0]));
+    try std.testing.expectEqual(core.protocol.frontend_capabilities.Route.deliver, core.protocol.frontend_capabilities.route(capabilities, &requests[0]));
     const timeline_v1 = UiRequest{ .custom = .{ .kind = "video_timeline@1", .payload_json = "{}" } };
-    try std.testing.expectEqual(cc.frontend_capabilities.Route.deliver, cc.frontend_capabilities.route(capabilities, &timeline_v1));
-    inline for (std.meta.fields(cc.frontend_capabilities.Unavailable), 0..) |field, index| {
-        const route = cc.frontend_capabilities.route(capabilities, &routed_away[index]);
-        try std.testing.expectEqual(cc.frontend_capabilities.Route{ .unavailable = @enumFromInt(field.value) }, route);
-        lines[requests.len + closed_count + 1 + index] = try cc.wire.writeRequestUnavailable(a, &routed_away[index], route.unavailable);
+    try std.testing.expectEqual(core.protocol.frontend_capabilities.Route.deliver, core.protocol.frontend_capabilities.route(capabilities, &timeline_v1));
+    inline for (std.meta.fields(core.protocol.frontend_capabilities.Unavailable), 0..) |field, index| {
+        const route = core.protocol.frontend_capabilities.route(capabilities, &routed_away[index]);
+        try std.testing.expectEqual(core.protocol.frontend_capabilities.Route{ .unavailable = @enumFromInt(field.value) }, route);
+        lines[requests.len + closed_count + 1 + index] = try core.protocol.wire.writeRequestUnavailable(a, &routed_away[index], route.unavailable);
         written += 1;
     }
     try compareOrDump(a, &lines, REQUESTS_FIXTURE, "requests.jsonl");
@@ -254,7 +254,7 @@ test "wire_contract: each capability frame gets its pinned reply; every refusal 
     defer refused.deinit(a);
     var frames = std.mem.splitScalar(u8, fixtureLines(FRAMES_FIXTURE), '\n');
     while (frames.next()) |frame| {
-        const reply = if (cc.wire.acceptCapabilities(a, frame)) |accepted| blk: {
+        const reply = if (core.protocol.wire.acceptCapabilities(a, frame)) |accepted| blk: {
             var declaration = accepted.declaration;
             declaration.deinit();
             break :blk accepted.line;
@@ -262,14 +262,14 @@ test "wire_contract: each capability frame gets its pinned reply; every refusal 
             error.OutOfMemory => return err,
             else => |reason| blk: {
                 try refused.append(a, @errorName(reason));
-                break :blk try cc.wire.writeCapabilitiesRefused(a, reason);
+                break :blk try core.protocol.wire.writeCapabilitiesRefused(a, reason);
             },
         };
         try replies.append(a, reply);
     }
     try compareOrDump(a, replies.items, REPLIES_FIXTURE, "capability_replies.jsonl");
 
-    inline for (@typeInfo(cc.wire.RefusalError).error_set.?) |reason| {
+    inline for (@typeInfo(core.protocol.wire.RefusalError).error_set.?) |reason| {
         var seen = std.mem.eql(u8, reason.name, "FrameTooLarge");
         for (refused.items) |name| seen = seen or std.mem.eql(u8, name, reason.name);
         if (!seen) {
@@ -279,7 +279,7 @@ test "wire_contract: each capability frame gets its pinned reply; every refusal 
     }
 }
 
-const host_events = [_]cc.wire.HostEvent{
+const host_events = [_]core.protocol.wire.HostEvent{
     .{ .user_message = .{ .run_id = 3, .trace_id = "trace-1", .text = "fix the build" } },
     .{ .run_done = .{ .run_id = 3, .trace_id = "trace-1", .stop_reason = "end_turn" } },
     .{ .run_done = .{ .run_id = 4, .error_name = "ProviderUnavailable" } },
@@ -317,7 +317,7 @@ const host_events = [_]cc.wire.HostEvent{
 
 test "wire_contract: every HostEvent tag and the Run context form have a pinned v1 line" {
     const a = std.testing.allocator;
-    inline for (std.meta.fields(cc.wire.HostEvent)) |field| {
+    inline for (std.meta.fields(core.protocol.wire.HostEvent)) |field| {
         var sampled = false;
         for (host_events) |event| sampled = sampled or std.mem.eql(u8, @tagName(event), field.name);
         if (!sampled) {
@@ -329,12 +329,12 @@ test "wire_contract: every HostEvent tag and the Run context form have a pinned 
     var written: usize = 0;
     defer for (lines[0..written]) |line| a.free(line);
     for (host_events, 0..) |event, index| {
-        lines[index] = try cc.wire.writeHostEvent(a, event);
+        lines[index] = try core.protocol.wire.writeHostEvent(a, event);
         written += 1;
     }
-    lines[host_events.len] = try cc.wire.writeRunEvent(a, .{ .run_id = 3, .trace_id = "trace-1" }, .{ .text_chunk = "on it" });
+    lines[host_events.len] = try core.protocol.wire.writeRunEvent(a, .{ .run_id = 3, .trace_id = "trace-1" }, .{ .text_chunk = "on it" });
     written += 1;
-    lines[host_events.len + 1] = try cc.wire.writeRunEvent(a, .{ .run_id = 4 }, .stream_done);
+    lines[host_events.len + 1] = try core.protocol.wire.writeRunEvent(a, .{ .run_id = 4 }, .stream_done);
     written += 1;
     try compareOrDump(a, &lines, HOST_FIXTURE, "host_events.jsonl");
 }

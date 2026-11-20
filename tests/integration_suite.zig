@@ -1,11 +1,29 @@
-//! Single compilation root for the complete component/integration gate.
+//! Source inventory for the Core and CLI component/integration suites.
 //!
-//! Keep the inventory here as the source of truth. `build.zig` compiles this
-//! graph once and the deterministic runner partitions individual test names
-//! across processes. This replaces dozens of near-identical binaries without
-//! changing any test body or assertion.
+//! Each build selects one suite before importing its tests. Importing both
+//! would put src/lib.zig and src/main.zig in the same compilation graph.
 
 test {
+    if (@import("integration_options").use_core) {
+        _ = @import("component/wire_contract_test.zig");
+        _ = @import("component/frontend_capabilities_test.zig");
+        _ = @import("component/session_host_test.zig");
+        _ = @import("component/session_host_requests_test.zig");
+        _ = @import("component/session_host_submission_test.zig");
+        _ = @import("component/agent_session_tools_test.zig");
+        _ = @import("component/agent_session_team_test.zig");
+        _ = @import("component/agent_session_host_tools_test.zig");
+        _ = @import("component/agent_session_ui_test.zig");
+        _ = @import("component/agent_session_transcript_resume_test.zig");
+        _ = @import("component/agent_session_runtime_config_test.zig");
+        _ = @import("component/agent_session_permission_scope_test.zig");
+        _ = @import("component/agent_session_credential_test.zig");
+    } else {
+        cliTests();
+    }
+}
+
+fn cliTests() void {
     _ = @import("integration/http_stream_e2e_test.zig");
     _ = @import("integration/tool_abort_test.zig");
     _ = @import("integration/mcp_e2e_test.zig");
@@ -30,22 +48,9 @@ test {
     _ = @import("component/subagent_agentdef_fields_test.zig");
     _ = @import("component/web_search_test.zig");
     _ = @import("component/allowed_tools_test.zig");
-    _ = @import("component/agent_session_tools_test.zig");
-    _ = @import("component/agent_session_team_test.zig");
     _ = @import("component/recovery_allowance_test.zig");
-    _ = @import("component/agent_session_host_tools_test.zig");
-    _ = @import("component/session_host_requests_test.zig");
     _ = @import("component/plugin_runtime_test.zig");
     _ = @import("component/plugin_process_test.zig");
-    _ = @import("component/agent_session_ui_test.zig");
-    _ = @import("component/agent_session_permission_scope_test.zig");
-    _ = @import("component/agent_session_transcript_resume_test.zig");
-    _ = @import("component/agent_session_runtime_config_test.zig");
-    _ = @import("component/agent_session_credential_test.zig");
-    _ = @import("component/wire_contract_test.zig");
-    _ = @import("component/frontend_capabilities_test.zig");
-    _ = @import("component/session_host_test.zig");
-    _ = @import("component/session_host_submission_test.zig");
     _ = @import("component/skill_fork_test.zig");
     _ = @import("component/sealed_skill_test.zig");
     _ = @import("component/prompt_tool_coupling_test.zig");
@@ -53,6 +58,8 @@ test {
     _ = @import("component/answer_queue_test.zig");
     _ = @import("component/base_url_flag_test.zig");
     _ = @import("component/unknown_flag_test.zig");
+    _ = @import("component/app_permission_scope_test.zig");
+    _ = @import("component/provider_connection_gate_test.zig");
     _ = @import("component/cli_help_test.zig");
     _ = @import("component/launcher_hint_test.zig");
     _ = @import("component/state_env_test.zig");

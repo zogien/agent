@@ -753,6 +753,34 @@ fn createCoreModule(
     return mod;
 }
 
+const IntegrationSuite = enum { cli, core };
+
+fn createIntegrationModule(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    harness: *std.Build.Module,
+    suite: IntegrationSuite,
+    implementation: *std.Build.Module,
+) *std.Build.Module {
+    const mod = b.createModule(.{
+        .root_source_file = b.path("tests/integration_suite.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const options = b.addOptions();
+    options.addOption(bool, "use_core", suite == .core);
+    mod.addOptions("integration_options", options);
+    mod.addImport("harness", harness);
+    mod.addImport(switch (suite) {
+        .cli => "cc",
+        .core => "metacodes-core",
+    }, implementation);
+    addPlatform(b, mod);
+    return mod;
+}
+
 /// The complete metacodes-core suite as one test executable whose tests
 /// scripts/sharded_test_runner.zig partitions deterministically. `test:lib`
 /// builds it at the invocation's -Doptimize and `gate:pr` at ReleaseSafe; both
@@ -2482,7 +2510,7 @@ pub fn build(b: *std.Build) void {
     // harness, the smokes, the daemon and the TinyKG transport).
     const test_step = b.step("test", "Run tests");
     const units_test_step = b.step("test:units", "Run the unit and component test binaries and the script unit suites (part of `test`)");
-    const integration_test_step = b.step("test:integration", "Run the integration suite against the installed CLI, and the spikes (part of `test`)");
+    const integration_test_step = b.step("test:integration", "Run Core and CLI integration suites and the spikes (part of `test`)");
     const product_test_step = b.step("test:product", "Run the built product end to end: evaluation harness, smokes, daemon (part of `test`)");
     test_step.dependOn(units_test_step);
     test_step.dependOn(integration_test_step);
@@ -3013,19 +3041,9 @@ pub fn build(b: *std.Build) void {
         spike_step.dependOn(&run_t.step);
     }
 
-    // Integration / Component tests share one compilation root. The old graph
-    // built 67 near-identical binaries (409 CPU-seconds in the 2026-08-06
-    // baseline). tests/integration_suite.zig is now the inventory source of
-    // truth; individual test names are partitioned only after one compilation.
-    const integration_suite_mod = b.createModule(.{
-        .root_source_file = b.path("tests/integration_suite.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    integration_suite_mod.addImport("harness", test_harness_mod);
-    integration_suite_mod.addImport("cc", test_cc_mod);
-    addPlatform(b, integration_suite_mod);
+    // Both suites read the same source inventory. The CLI suite still compiles
+    // once and partitions individual test names only after compilation.
+    const integration_suite_mod = createIntegrationModule(b, target, optimize, test_harness_mod, .cli, test_cc_mod);
     const integration_suite_test = b.addTest(.{
         .name = "integration-suite",
         .root_module = integration_suite_mod,
@@ -3071,7 +3089,7 @@ pub fn build(b: *std.Build) void {
     wireTinyKgdTestInput(integration_monolithic_run, staged_tinykgd);
     wireLeanKernelTestInputs(integration_monolithic_run, staged_lean_kernels);
     wirePinnedRipgrepTestInput(b, integration_monolithic_run, ripgrep_bundle);
-    const integration_monolithic_step = b.step("test:integration-monolithic", "Run the aggregate component/integration suite in one process");
+    const integration_monolithic_step = b.step("test:integration-monolithic", "Run the Core and CLI integration suites in one process each");
     integration_monolithic_step.dependOn(&integration_monolithic_run.step);
 
     const integration_timed_test = b.addTest(.{
@@ -3095,6 +3113,32 @@ pub fn build(b: *std.Build) void {
     wirePinnedRipgrepTestInput(b, integration_timed_run, ripgrep_bundle);
     const integration_times_step = b.step("test:integration-times", "Run aggregate component/integration tests with per-test timings");
     integration_times_step.dependOn(&integration_timed_run.step);
+
+    const core_integration_mod = createIntegrationModule(b, target, optimize, test_harness_mod, .core, core_mod);
+    const core_integration_test = b.addTest(.{
+        .name = "core-integration-suite",
+        .root_module = core_integration_mod,
+        .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
+    });
+    const core_integration_run = addTestRunArtifact(b, core_integration_test);
+    wireLeanKernelTestInputs(core_integration_run, staged_lean_kernels);
+    const core_integration_step = b.step("test:core-integration", "Run integration tests against the Core library");
+    core_integration_step.dependOn(&core_integration_run.step);
+    spike_step.dependOn(core_integration_step);
+    integration_monolithic_step.dependOn(core_integration_step);
+
+    const core_integration_timed_test = b.addTest(.{
+        .name = "core-integration-suite-times",
+        .root_module = core_integration_mod,
+        .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
+        .test_runner = .{
+            .path = b.path("scripts/time_test_runner.zig"),
+            .mode = .simple,
+        },
+    });
+    const core_integration_timed_run = addTestRunArtifact(b, core_integration_timed_test);
+    wireLeanKernelTestInputs(core_integration_timed_run, staged_lean_kernels);
+    integration_times_step.dependOn(&core_integration_timed_run.step);
 
     // ToolDispatcher metadata 验收(issue #5):直接消费 AgentCore 包装层
     // (session_budget/mcp_session/model_skill_tool)与 metacodes-core 目录的
@@ -3177,18 +3221,15 @@ pub fn build(b: *std.Build) void {
     integration_test_step.dependOn(spike_step);
 
     // test:new —— 只跑本次 e2e 框架新增的 L2 component 测试(隔离运行,绕开主套件已知
-    // 的 integration 挂起)。每个文件独立 artifact,带 cc + harness imports。
+    // 的 integration 挂起)。每个文件独立 artifact,使用所属套件的实现入口。
     const new_step = b.step("test:new", "Run only the new e2e-framework L2 component tests");
     const new_files = [_][]const u8{
         "tests/component/user_context_inject_test.zig",
         "tests/component/subagent_agentdef_fields_test.zig",
-        "tests/component/agent_session_tools_test.zig",
         "tests/component/sealed_publication_test.zig",
         "tests/component/recovery_allowance_test.zig",
-        "tests/component/agent_session_host_tools_test.zig",
         "tests/component/plugin_runtime_test.zig",
         "tests/component/plugin_process_test.zig",
-        "tests/component/agent_session_ui_test.zig",
         "tests/component/http_error_test.zig",
         "tests/component/answer_queue_test.zig",
         "tests/component/base_url_flag_test.zig",
@@ -3196,7 +3237,6 @@ pub fn build(b: *std.Build) void {
         "tests/component/tool_loop_breaker_test.zig",
         "tests/component/rule_author_test.zig",
         "tests/component/self_evolution_test.zig",
-        "tests/component/plan_mode_inject_test.zig",
         "tests/component/agent_background_test.zig",
         "tests/component/skill_fileref_test.zig",
         "tests/component/transcript_roundtrip_test.zig",
@@ -3241,22 +3281,37 @@ pub fn build(b: *std.Build) void {
         "tests/component/add_dir_test.zig",
         "tests/component/dialect_matrix_test.zig",
     };
-    for (new_files) |f| {
-        const m = b.createModule(.{
-            .root_source_file = b.path(f),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        m.addImport("harness", test_harness_mod); // 共享模块(见 integ 循环前注释:perf)
-        m.addImport("cc", test_cc_mod);
-        addPlatform(b, m); // 测试文件用 platform 的可移植 env/net 封装(setEnv、clientRoundtrip)
-        const t = b.addTest(.{
-            .name = "new-l2",
-            .root_module = m,
-            .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
-        });
-        new_step.dependOn(&addTestRunArtifact(b, t).step);
+    const new_core_files = [_][]const u8{
+        "tests/component/agent_session_tools_test.zig",
+        "tests/component/agent_session_host_tools_test.zig",
+        "tests/component/agent_session_ui_test.zig",
+    };
+    const new_test_groups = [_]struct {
+        files: []const []const u8,
+        import_name: []const u8,
+        implementation: *std.Build.Module,
+    }{
+        .{ .files = &new_files, .import_name = "cc", .implementation = test_cc_mod },
+        .{ .files = &new_core_files, .import_name = "metacodes-core", .implementation = core_mod },
+    };
+    for (new_test_groups) |group| {
+        for (group.files) |f| {
+            const m = b.createModule(.{
+                .root_source_file = b.path(f),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            });
+            m.addImport("harness", test_harness_mod); // 共享模块(见 integ 循环前注释:perf)
+            m.addImport(group.import_name, group.implementation);
+            addPlatform(b, m); // 测试文件用 platform 的可移植 env/net 封装(setEnv、clientRoundtrip)
+            const t = b.addTest(.{
+                .name = "new-l2",
+                .root_module = m,
+                .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
+            });
+            new_step.dependOn(&addTestRunArtifact(b, t).step);
+        }
     }
 
     // 五个 AgentDef 运行字段的聚焦门；开发时无需编译整套 component artifacts。

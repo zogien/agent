@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 const pfs = @import("platform").fs; // 可移植文件 IO(std.c.open 的 O 在 Windows 是 void)
 
 const FINAL_SSE =
@@ -23,15 +23,15 @@ var dialect_test_ctx: u8 = 0;
 
 fn injectPluginDialectMarker(
     _: *anyopaque,
-    _: cc.model_adapter.ModelProfile,
-    _: ?cc.api_dialect.ReasoningEffort,
+    _: core.model_adapter.ModelProfile,
+    _: ?core.api_dialect.ReasoningEffort,
     system: *std.ArrayList(u8),
     allocator: std.mem.Allocator,
 ) anyerror!void {
     try system.appendSlice(allocator, "\nPLUGIN_DIALECT_MARKER");
 }
 
-const plugin_test_dialect = cc.api_dialect.Dialect{
+const plugin_test_dialect = core.api_dialect.Dialect{
     .ctx = @ptrCast(&dialect_test_ctx),
     .injectSystemModsFn = injectPluginDialectMarker,
 };
@@ -40,14 +40,14 @@ var skill_surface_ctx: u8 = 0;
 
 fn rejectSkillDispatch(
     _: *const anyopaque,
-    _: *const cc.tool_context.ToolContext,
+    _: *const core.tool_context.ToolContext,
     _: []const u8,
     _: []const u8,
-) anyerror!cc.tools.ToolDispatchOutcome {
+) anyerror!core.tools.ToolDispatchOutcome {
     return error.UnexpectedToolDispatch;
 }
 
-fn skillSurfaceMetadata(_: *const anyopaque, _: []const u8) ?cc.tools.ToolMeta {
+fn skillSurfaceMetadata(_: *const anyopaque, _: []const u8) ?core.tools.ToolMeta {
     return .{ .kind = .external, .category = .execute, .replay = .never, .prefetch_safe = false };
 }
 
@@ -55,7 +55,7 @@ fn skillSurfaceNameAt(_: *const anyopaque, index: usize) ?[]const u8 {
     return if (index == 0) "Skill" else null;
 }
 
-fn skillSurfaceDispatcher() cc.tools.ToolDispatcher {
+fn skillSurfaceDispatcher() core.tools.ToolDispatcher {
     return .{
         .ctx = @ptrCast(&skill_surface_ctx),
         .dispatchFn = rejectSkillDispatch,
@@ -132,7 +132,7 @@ fn writeFile(path: [*:0]const u8, content: []const u8) !void {
 }
 
 const Sink = struct {
-    fn emit(_: *anyopaque, _: cc.session_id.SessionId, _: u64, _: cc.ui_event.CoreEvent) bool {
+    fn emit(_: *anyopaque, _: core.session_id.SessionId, _: u64, _: core.protocol.ui_event.CoreEvent) bool {
         return true;
     }
 };
@@ -153,7 +153,7 @@ test "L2 artifact-enabled Host-only Session advertises its mandatory recovery pl
     const disabled_url = try disabled_server.urlOwned(allocator);
     defer allocator.free(disabled_url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(allocator, .{ .builtin_tools = &.{} });
+    const runtime = try core.agent_session.AgentRuntime.create(allocator, .{ .builtin_tools = &.{} });
     defer runtime.destroy() catch unreachable;
     const inventory = try runtime.describePlugins(allocator);
     defer allocator.free(inventory);
@@ -221,7 +221,7 @@ test "L2 AgentSession resolves selected built-in file tools against its workspac
     const url = try srv.urlOwned(a);
     defer a.free(url);
 
-    const Runtime = cc.agent_session.AgentRuntime;
+    const Runtime = core.agent_session.AgentRuntime;
     const runtime = try Runtime.create(a, .{ .builtin_tools = &.{ "Read", "Glob", "Bash" } });
     defer runtime.destroy() catch unreachable;
     const session = try runtime.createSession(.{
@@ -237,7 +237,7 @@ test "L2 AgentSession resolves selected built-in file tools against its workspac
 
     var sink_state: u8 = 0;
     const result = try session.runText(1, "read the file", 4, .{ .ctx = &sink_state, .emit = Sink.emit });
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, result.stop_reason);
     try std.testing.expectEqual(@as(u32, 2), result.tool_calls);
 
     const request = srv.lastRequest() orelse return error.NoRequestCaptured;
@@ -283,7 +283,7 @@ test "L2 RuntimeHost hot-swaps first-party core profiles without mutating live S
     const new_url = try new_server.urlOwned(a);
     defer a.free(new_url);
 
-    const host = try cc.agent_session.RuntimeHost.create(a, .{ .core_profile = .minimal });
+    const host = try core.agent_session.RuntimeHost.create(a, .{ .core_profile = .minimal });
     defer host.destroy() catch unreachable;
     const initial_inventory = try host.describePlugins(a);
     defer a.free(initial_inventory);
@@ -326,8 +326,8 @@ test "L2 RuntimeHost hot-swaps first-party core profiles without mutating live S
     var sink_state: u8 = 0;
     const old_result = try old_session.runText(1, "read through generation one", 3, .{ .ctx = &sink_state, .emit = Sink.emit });
     const new_result = try new_session.runText(1, "write through generation two", 3, .{ .ctx = &sink_state, .emit = Sink.emit });
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, old_result.stop_reason);
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, new_result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, old_result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, new_result.stop_reason);
     try std.testing.expectEqual(@as(u32, 1), old_result.tool_calls);
     try std.testing.expectEqual(@as(u32, 1), new_result.tool_calls);
     const old_body = (old_server.lastRequest() orelse return error.NoRequestCaptured).body();
@@ -366,12 +366,12 @@ test "L2 provider dialect plugin is generation-pinned and equivalent replacement
     const equivalent_url = try equivalent_server.urlOwned(a);
     defer a.free(equivalent_url);
 
-    const dialect_plugin = cc.plugin.runtime.StaticPlugin{
+    const dialect_plugin = core.plugin.runtime.StaticPlugin{
         .descriptor = .{
-            .id = try cc.plugin.contract.PluginId.parse("acme.model-dialect"),
-            .version = try cc.plugin.contract.Version.parse("1.0.0"),
+            .id = try core.plugin.contract.PluginId.parse("acme.model-dialect"),
+            .version = try core.plugin.contract.Version.parse("1.0.0"),
             .form = .static_trusted,
-            .capabilities = cc.plugin.contract.CapabilitySet.from(&.{.provider_dialect}),
+            .capabilities = core.plugin.contract.CapabilitySet.from(&.{.provider_dialect}),
         },
         .provider_dialects = &.{.{
             .provider_kind = .openai,
@@ -380,7 +380,7 @@ test "L2 provider dialect plugin is generation-pinned and equivalent replacement
         }},
     };
 
-    const host = try cc.agent_session.RuntimeHost.create(a, .{ .core_profile = .none });
+    const host = try core.agent_session.RuntimeHost.create(a, .{ .core_profile = .none });
     defer host.destroy() catch unreachable;
     const baseline_session = try host.createSession(.{
         .provider_kind = .openai,
@@ -459,7 +459,7 @@ test "L2 durable effect journal preserves exact provider request cache bytes" {
     const durable_url = try durable_server.urlOwned(a);
     defer a.free(durable_url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .core_profile = .none });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .core_profile = .none });
     defer runtime.destroy() catch unreachable;
     const ephemeral = try runtime.createSession(.{
         .provider_kind = .anthropic,
@@ -498,7 +498,7 @@ test "L2 durable effect journal preserves exact provider request cache bytes" {
     const durable_body = (durable_server.lastRequest() orelse
         return error.NoRequestCaptured).body();
     try std.testing.expectEqualStrings(ephemeral_body, durable_body);
-    const summary = try cc.tool_observation_journal.validate(
+    const summary = try core.tool_observation_journal.validate(
         journal_root,
         durable.session_id,
     );
@@ -519,7 +519,7 @@ test "L2 Anthropic GLM sees typed Skill capability activation in the real AgentS
     const url = try server.urlOwned(allocator);
     defer allocator.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(allocator, .{ .core_profile = .none });
+    const runtime = try core.agent_session.AgentRuntime.create(allocator, .{ .core_profile = .none });
     defer runtime.destroy() catch unreachable;
     const session = try runtime.createSession(.{
         .provider_kind = .anthropic,
@@ -532,7 +532,7 @@ test "L2 Anthropic GLM sees typed Skill capability activation in the real AgentS
     });
     defer session.destroy() catch unreachable;
 
-    const skill = cc.json_mod.ToolDefinition{
+    const skill = core.json.ToolDefinition{
         .name = "Skill",
         .description = "Invoke the exact bound skill before other work when it clearly matches.",
         .input_schema = .{ .type = "object", .prop_specs = &.{
@@ -547,7 +547,7 @@ test "L2 Anthropic GLM sees typed Skill capability activation in the real AgentS
         null,
         .{ .definitions = &.{skill}, .dispatcher = skillSurfaceDispatcher() },
     );
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, result.stop_reason);
 
     const body = (server.lastRequest() orelse return error.NoRequestCaptured).body();
     try std.testing.expect(std.mem.indexOf(u8, body, "\"name\":\"Skill\"") != null);
@@ -573,7 +573,7 @@ test "L2 AgentSession exposes WebSearch as a builtin and dispatches its isolated
     const url = try srv.urlOwned(a);
     defer a.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{
         .builtin_tools = &.{"WebSearch"},
     });
     defer runtime.destroy() catch unreachable;
@@ -590,7 +590,7 @@ test "L2 AgentSession exposes WebSearch as a builtin and dispatches its isolated
 
     var sink_state: u8 = 0;
     const result = try session.runText(1, "search and fetch", 3, .{ .ctx = &sink_state, .emit = Sink.emit });
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, result.stop_reason);
     try std.testing.expectEqual(@as(u32, 1), result.tool_calls);
 
     const body = (srv.lastRequest() orelse return error.NoRequestCaptured).body();
@@ -620,7 +620,7 @@ test "L2 AgentSession rejects an unadvertised Runtime tool before prefetch or di
     const url = try srv.urlOwned(a);
     defer a.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{ "Read", "Bash" } });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &.{ "Read", "Bash" } });
     defer runtime.destroy() catch unreachable;
     const session = try runtime.createSession(.{
         .provider_kind = .anthropic,
@@ -635,7 +635,7 @@ test "L2 AgentSession rejects an unadvertised Runtime tool before prefetch or di
 
     var sink_state: u8 = 0;
     const result = try session.runText(1, "do not trust the provider", 4, .{ .ctx = &sink_state, .emit = Sink.emit });
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, result.stop_reason);
     try std.testing.expect(!pfs.exists(marker.ptr));
     const body = (srv.lastRequest() orelse return error.NoRequestCaptured).body();
     try std.testing.expect(std.mem.indexOf(u8, body, "unknown_tool") != null);
@@ -663,7 +663,7 @@ test "L2 AgentSession Bash 子进程 cwd 绑 workspace.root(缺陷 B 回归)" {
     const url = try srv.urlOwned(a);
     defer a.free(url);
 
-    const Runtime = cc.agent_session.AgentRuntime;
+    const Runtime = core.agent_session.AgentRuntime;
     const runtime = try Runtime.create(a, .{ .builtin_tools = &.{ "Read", "Bash" } });
     defer runtime.destroy() catch unreachable;
     const session = try runtime.createSession(.{
@@ -679,7 +679,7 @@ test "L2 AgentSession Bash 子进程 cwd 绑 workspace.root(缺陷 B 回归)" {
 
     var sink_state: u8 = 0;
     const result = try session.runText(1, "print working dir", 4, .{ .ctx = &sink_state, .emit = Sink.emit });
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, result.stop_reason);
     try std.testing.expectEqual(@as(u32, 1), result.tool_calls);
 
     // 下一请求 body 应含 tool_result,其 stdout 含 workspace.root(子进程在 root 下跑 pwd)。
@@ -702,7 +702,7 @@ test "L2 AgentSession.setModel keeps the route's auth scheme and the Host's imag
     const url = try server.urlOwned(a);
     defer a.free(url);
 
-    const host = try cc.agent_session.RuntimeHost.create(a, .{ .core_profile = .minimal });
+    const host = try core.agent_session.RuntimeHost.create(a, .{ .core_profile = .minimal });
     defer host.destroy() catch unreachable;
     const session = try host.createSession(.{
         .provider_kind = .anthropic,
@@ -718,19 +718,19 @@ test "L2 AgentSession.setModel keeps the route's auth scheme and the Host's imag
     defer session.destroy() catch unreachable;
     const before = session.provider.provider().imageInput(null);
     try std.testing.expect(!before.supported);
-    try std.testing.expectEqual(cc.image_capability.Source.unknown, before.source);
+    try std.testing.expectEqual(core.image_capability.Source.unknown, before.source);
 
     try session.setModel("vendor-vision-3");
     // The replacement provider carries the Host's declaration...
     const after = session.provider.provider().imageInput(null);
     try std.testing.expect(after.supported);
-    try std.testing.expectEqual(cc.image_capability.Source.host, after.source);
+    try std.testing.expectEqual(core.image_capability.Source.host, after.source);
 
     // ...and the route's authentication: before the fix a model switch fell
     // back to `authorization: Bearer` on an `x-api-key` endpoint.
     var sink_state: u8 = 0;
     const result = try session.runText(1, "after the model switch", 1, .{ .ctx = &sink_state, .emit = Sink.emit });
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, result.stop_reason);
     const request = server.lastRequest() orelse return error.MissingRequest;
     try std.testing.expect(std.mem.indexOf(u8, request.raw, "x-api-key: test-key") != null);
     try std.testing.expect(std.ascii.indexOfIgnoreCase(request.raw, "authorization: Bearer") == null);

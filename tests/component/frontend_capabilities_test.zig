@@ -11,10 +11,10 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 const pfs = @import("platform").fs;
 
-const EventJournal = cc.event_journal.EventJournal;
+const EventJournal = core.event_journal.EventJournal;
 
 // ── journal helpers ──────────────────────────────────────────────────────────
 
@@ -23,7 +23,7 @@ fn waitFor(journal: *EventJournal, needle: []const u8, count: usize) !void {
     var waited: u64 = 0;
     while (waited < 10_000) : (waited += 20) {
         if (try countLines(journal, needle) >= count) return;
-        cc.util_time.sleepMs(20);
+        core.util_time.sleepMs(20);
     }
     std.debug.print("journal never showed {d}x {s}\n", .{ count, needle });
     return error.JournalTimeout;
@@ -135,9 +135,9 @@ test "L2 SessionHost: AskUserQuestion and permission prompts are routed by the d
     defer a.free(url);
 
     const tools = [_][]const u8{ "AskUserQuestion", "Write" };
-    const runtime = try cc.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &tools });
+    const runtime = try core.agent_session.AgentRuntime.create(a, .{ .builtin_tools = &tools });
     defer runtime.destroy() catch unreachable;
-    var host = cc.session_host.SessionHost.init(a, runtime, .{});
+    var host = core.session_host.SessionHost.init(a, runtime, .{});
     defer host.deinit();
     const hosted = try host.open(.{ .config = .{
         .provider_kind = .anthropic,

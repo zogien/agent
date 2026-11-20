@@ -6,9 +6,9 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 
-const AgentRuntime = cc.agent_session.AgentRuntime;
+const AgentRuntime = core.agent_session.AgentRuntime;
 
 fn textSse(comptime text: []const u8) []const u8 {
     return "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"role\":\"assistant\",\"model\":\"x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n" ++
@@ -29,7 +29,7 @@ fn toolSse(comptime id: []const u8, comptime name: []const u8, comptime input_js
 }
 
 const Sink = struct {
-    fn emit(_: *anyopaque, _: cc.session_id.SessionId, _: u64, _: cc.ui_event.CoreEvent) bool {
+    fn emit(_: *anyopaque, _: core.session_id.SessionId, _: u64, _: core.protocol.ui_event.CoreEvent) bool {
         return true;
     }
 };
@@ -77,7 +77,7 @@ test "L2 issue #277: a host-scheduled lead delegates by recording a spawn reques
 
     var sink: u8 = 0;
     const lead_result = try lead.runText(1, "form a team and delegate", 4, .{ .ctx = &sink, .emit = Sink.emit });
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, lead_result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, lead_result.stop_reason);
 
     // The team exists on disk, the lead keeps no in-process registry, and the
     // delegation is a pending host spawn request — not a running teammate.
@@ -91,7 +91,7 @@ test "L2 issue #277: a host-scheduled lead delegates by recording a spawn reques
 
     // The Host fulfils the request: a member Session named solver, joining the
     // same team under the lead's session id and a fresh lease.
-    const lease = cc.session_id.gen();
+    const lease = core.session_id.gen();
     const member_bodies = [_][]const u8{
         toolSse("s1", "SendMessage", "{\\\"to\\\":\\\"team-lead\\\",\\\"message\\\":\\\"done: 42\\\",\\\"summary\\\":\\\"done\\\"}"),
         textSse("idle"),
@@ -120,10 +120,10 @@ test "L2 issue #277: a host-scheduled lead delegates by recording a spawn reques
     defer member.destroy() catch unreachable;
 
     const member_result = try member.runText(1, "work and report", 3, .{ .ctx = &sink, .emit = Sink.emit });
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, member_result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, member_result.stop_reason);
 
     // The lead reads the member's reply from its inbox, formatted for the model.
-    const mail = (try cc.swarm_tools.pollLeadInbox(a, sw)) orelse return error.NoLeadMail;
+    const mail = (try core.swarm_tools.pollLeadInbox(a, sw)) orelse return error.NoLeadMail;
     defer a.free(mail);
     try std.testing.expect(std.mem.indexOf(u8, mail, "done: 42") != null);
     try std.testing.expect(std.mem.indexOf(u8, mail, "teammate_id=\"solver\"") != null);

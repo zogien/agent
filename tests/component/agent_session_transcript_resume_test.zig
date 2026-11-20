@@ -16,7 +16,7 @@
 const std = @import("std");
 const pfs = @import("platform").fs;
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 
 fn textSse(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "data: {{\"type\":\"message_start\",\"message\":{{\"id\":\"msg_t\",\"role\":\"assistant\",\"model\":\"x\",\"usage\":{{\"input_tokens\":1,\"output_tokens\":1}}}}}}\n\n" ++
@@ -28,7 +28,7 @@ fn textSse(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
 }
 
 const Sink = struct {
-    fn emit(_: *anyopaque, _: cc.session_id.SessionId, _: u64, _: cc.ui_event.CoreEvent) bool {
+    fn emit(_: *anyopaque, _: core.session_id.SessionId, _: u64, _: core.protocol.ui_event.CoreEvent) bool {
         return true;
     }
 };
@@ -44,7 +44,7 @@ fn subdir(tmp: *std.testing.TmpDir, name: []const u8, buffer: []u8) ![]const u8 
 /// Runs one turn, persists it the way a Host does, restores the Session from
 /// disk in the same Runtime and runs a second turn. Returns the transcript
 /// directory the Host wrote (caller-owned).
-fn persistAndResume(allocator: std.mem.Allocator, workspace: cc.workspace_policy.Config) ![]u8 {
+fn persistAndResume(allocator: std.mem.Allocator, workspace: core.workspace_policy.Config) ![]u8 {
     const first = try textSse(allocator, "pelican noted");
     defer allocator.free(first);
     const second = try textSse(allocator, "it was the pelican");
@@ -55,9 +55,9 @@ fn persistAndResume(allocator: std.mem.Allocator, workspace: cc.workspace_policy
     const url = try server.urlOwned(allocator);
     defer allocator.free(url);
 
-    const runtime = try cc.agent_session.AgentRuntime.create(allocator, .{ .builtin_tools = &.{} });
+    const runtime = try core.agent_session.AgentRuntime.create(allocator, .{ .builtin_tools = &.{} });
     defer runtime.destroy() catch unreachable;
-    const config: cc.agent_session.SessionConfig = .{
+    const config: core.agent_session.SessionConfig = .{
         .provider_kind = .anthropic,
         .api_key = "test-key",
         .model = "test-model",
@@ -68,13 +68,13 @@ fn persistAndResume(allocator: std.mem.Allocator, workspace: cc.workspace_policy
     var sink_state: u8 = 0;
 
     // Live Session: the Host flushes the committed Conversation after a Run.
-    var sid: cc.session_id.SessionId = undefined;
+    var sid: core.session_id.SessionId = undefined;
     const written_dir = blk: {
         const session = try runtime.createSession(config);
         defer session.destroy() catch unreachable;
         sid = session.session_id;
         _ = try session.runText(1, "remember the word pelican", 4, .{ .ctx = &sink_state, .emit = Sink.emit });
-        var writer = try cc.transcript.Writer.init(allocator, session.workspace.root, session.workspace.stateRoot(), "test-model", sid);
+        var writer = try core.transcript.Writer.init(allocator, session.workspace.root, session.workspace.stateRoot(), "test-model", sid);
         defer writer.deinit();
         var lease = try session.snapshotCommitted();
         defer lease.deinit();
@@ -85,15 +85,15 @@ fn persistAndResume(allocator: std.mem.Allocator, workspace: cc.workspace_policy
 
     // Restart: the Session is gone. Resolve the same config again and derive
     // the directory instead of spelling the layout out.
-    var policy = try cc.workspace_policy.WorkspacePolicy.init(allocator, workspace);
+    var policy = try core.workspace_policy.WorkspacePolicy.init(allocator, workspace);
     defer policy.deinit();
-    const resume_dir = try cc.transcript.sessionDir(allocator, policy.stateRoot(), policy.root, sid);
+    const resume_dir = try core.transcript.sessionDir(allocator, policy.stateRoot(), policy.root, sid);
     defer allocator.free(resume_dir);
     try std.testing.expectEqualStrings(written_dir, resume_dir);
 
-    var conversation = cc.conversation.Conversation.init(allocator);
+    var conversation = core.conversation.Conversation.init(allocator);
     defer conversation.deinit();
-    try cc.transcript.loadTranscript(&conversation, resume_dir, allocator);
+    try core.transcript.loadTranscript(&conversation, resume_dir, allocator);
     try std.testing.expectEqual(@as(usize, 2), conversation.len());
 
     const restored = try runtime.createRestoredSession(config, .{
@@ -104,7 +104,7 @@ fn persistAndResume(allocator: std.mem.Allocator, workspace: cc.workspace_policy
     });
     defer restored.destroy() catch unreachable;
     const result = try restored.runText(2, "which word was it?", 4, .{ .ctx = &sink_state, .emit = Sink.emit });
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
+    try std.testing.expectEqual(core.agent_loop.StopReason.end_turn, result.stop_reason);
 
     // The provider saw the turn that only the transcript carried across.
     const body = (server.lastRequest() orelse return error.NoRequestCaptured).body();
@@ -130,7 +130,7 @@ test "L2 AgentSession Host resumes its transcript under the default state root <
     const dir = try persistAndResume(a, .{ .root = workspace, .home = home });
     defer a.free(dir);
     // Hosts that name no state root keep the layout they always had.
-    const legacy = try cc.util_state_root.legacyDefault(a, home);
+    const legacy = try core.util_state_root.legacyDefault(a, home);
     defer a.free(legacy);
     try std.testing.expect(isUnder(dir, legacy));
 }
