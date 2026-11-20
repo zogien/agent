@@ -1,6 +1,6 @@
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 const MockServer = harness.MockServer;
 
 test "MockServer + std.http.Client + EventIterator: text_delta event" {
@@ -29,7 +29,7 @@ test "MockServer + std.http.Client + EventIterator: text_delta event" {
 
     var redirect_buf: [4096]u8 = undefined;
     var http_resp = try req.receiveHead(&redirect_buf);
-    const status = cc.api_http_status.ResponseStatus.capture(&http_resp);
+    const status = core.api_http_status.ResponseStatus.capture(&http_resp);
     defer req.deinit();
 
     try std.testing.expect(status.isOk());
@@ -37,16 +37,16 @@ test "MockServer + std.http.Client + EventIterator: text_delta event" {
     var transfer_buf: [8192]u8 = undefined;
     const reader = http_resp.reader(&transfer_buf);
 
-    var it = cc.api_stream.EventIterator.init(reader);
+    var it = core.api_stream.EventIterator.init(reader);
 
     const e1 = (try it.next(a)).?;
     defer e1.deinit(a);
-    try std.testing.expect(@as(std.meta.Tag(cc.api_stream.Event), e1) == .text_delta);
+    try std.testing.expect(@as(std.meta.Tag(core.api_stream.Event), e1) == .text_delta);
     try std.testing.expectEqualStrings("hello", e1.text_delta);
 
     const e2 = (try it.next(a)).?;
     defer e2.deinit(a);
-    try std.testing.expect(@as(std.meta.Tag(cc.api_stream.Event), e2) == .done);
+    try std.testing.expect(@as(std.meta.Tag(core.api_stream.Event), e2) == .done);
 }
 
 test "MockServer + EventIterator: abort cuts stream" {
@@ -82,8 +82,8 @@ test "MockServer + EventIterator: abort cuts stream" {
     var transfer_buf: [8192]u8 = undefined;
     const reader = http_resp.reader(&transfer_buf);
 
-    var sig = cc.util_abort.AbortSignal.init();
-    var it = cc.api_stream.EventIterator.initWithAbort(reader, &sig);
+    var sig = core.util_abort.AbortSignal.init();
+    var it = core.api_stream.EventIterator.initWithAbort(reader, &sig);
 
     const e1 = (try it.next(a)).?;
     defer e1.deinit(a);

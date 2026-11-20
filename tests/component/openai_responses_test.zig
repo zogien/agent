@@ -11,11 +11,12 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
+const failure_fixture = @import("../_harness/openai_responses_failure.zig");
 
-const agent_loop = cc.agent_loop;
-const openai = cc.api_openai;
-const writer_backend = cc.writer_backend;
+const agent_loop = core.agent_loop;
+const openai = core.api_openai;
+const writer_backend = core.writer_backend;
 
 // ── cassettes ────────────────────────────────────────────────────────────────
 
@@ -52,14 +53,6 @@ const RESPONSES_INCOMPLETE_SSE =
     "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":0,\"delta\":\"partial\"}\n\n" ++
     "event: response.incomplete\n" ++
     "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_4\",\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":5,\"input_tokens_details\":{\"cached_tokens\":0},\"output_tokens\":9}}}\n\n";
-
-const RESPONSES_FAILED_SSE =
-    "event: response.failed\n" ++
-    "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_5\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n\n";
-
-const RESPONSES_ERROR_SSE =
-    "event: error\n" ++
-    "data: {\"type\":\"error\",\"code\":\"rate_limited\",\"message\":\"slow down\",\"param\":null,\"sequence_number\":1}\n\n";
 
 const RESPONSES_ESCAPED_TEXT_SSE =
     "event: response.output_text.delta\n" ++
@@ -165,7 +158,7 @@ fn initResponsesClient(a: std.mem.Allocator, io: std.Io, model: []const u8, url:
     return client;
 }
 
-fn getTimeExec(ctx: *const cc.tool_context.ToolContext, _: []const u8, _: ?*anyopaque) anyerror![]u8 {
+fn getTimeExec(ctx: *const core.tool_context.ToolContext, _: []const u8, _: ?*anyopaque) anyerror![]u8 {
     return ctx.allocator.dupe(u8, "{\"t\":42}");
 }
 
@@ -181,7 +174,7 @@ const CapturedTool = struct {
 const DrainResult = struct {
     text: std.ArrayList(u8) = .empty,
     tools: std.ArrayList(CapturedTool) = .empty,
-    usage: ?cc.api_stream.UsageDelta = null,
+    usage: ?core.api_stream.UsageDelta = null,
     saw_done: bool = false,
     /// provider 私有的推理续传项(owned item JSON,按到达顺序)。
     reasoning: std.ArrayList([]const u8) = .empty,
@@ -198,7 +191,7 @@ const DrainResult = struct {
     }
 };
 
-fn drainAll(a: std.mem.Allocator, handle: *cc.api_stream.StreamHandle, out: *DrainResult) !void {
+fn drainAll(a: std.mem.Allocator, handle: *core.api_stream.StreamHandle, out: *DrainResult) !void {
     while (try handle.next()) |ev| switch (ev) {
         .text => |t| {
             try out.text.appendSlice(a, t);
@@ -241,11 +234,11 @@ test "Responses(a): agent_loop e2e 文本流 → end_turn;请求是 input/instru
     var client = initResponsesClient(a, io_rt.io(), "gpt-5.2", url);
     defer client.deinit();
 
-    var conv = cc.conversation.Conversation.init(a);
+    var conv = core.conversation.Conversation.init(a);
     defer conv.deinit();
     try conv.appendText(.user, "hi");
-    const perm = cc.permission.createContext(.bypass_permissions, a);
-    const empty_defs: []const cc.json_mod.ToolDefinition = &.{};
+    const perm = core.permission.createContext(.bypass_permissions, a);
+    const empty_defs: []const core.json.ToolDefinition = &.{};
     var render = writer_backend.WriterBackend.initNull();
     const be = render.backend();
 
@@ -294,15 +287,15 @@ test "Responses(b): function_call 闭环 → 第二请求含 function_call_outpu
     var client = initResponsesClient(a, io_rt.io(), "gpt-5.2", url);
     defer client.deinit();
 
-    var dyn = cc.tools_dynamic.DynRegistry.init(a);
+    var dyn = core.tools_dynamic.DynRegistry.init(a);
     defer dyn.deinit();
     try dyn.register("get_time", "Get current time", &.{}, getTimeExec, null, false);
 
-    var conv = cc.conversation.Conversation.init(a);
+    var conv = core.conversation.Conversation.init(a);
     defer conv.deinit();
     try conv.appendText(.user, "what time is it");
-    const perm = cc.permission.createContext(.bypass_permissions, a);
-    const tool_defs = try cc.tools.toToolDefinitionsFull(a, &dyn, null);
+    const perm = core.permission.createContext(.bypass_permissions, a);
+    const tool_defs = try core.tools.toToolDefinitionsFull(a, &dyn, null);
     defer a.free(tool_defs);
     var render = writer_backend.WriterBackend.initNull();
     const be = render.backend();
@@ -357,8 +350,8 @@ test "Responses(c): usage 归一(input 减 cached)+ 补发 .done + stopReason=en
     defer client.deinit();
 
     const p = client.provider();
-    const msgs = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
+    const msgs = [_]core.types.ApiMessage{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "hi" }} },
     };
     var handle = p.sendStream(&msgs, null, null, null, null, null, "") catch |e| {
         std.debug.print("responses sendStream failed: {s}\n", .{@errorName(e)});
@@ -376,7 +369,7 @@ test "Responses(c): usage 归一(input 减 cached)+ 补发 .done + stopReason=en
     try std.testing.expectEqual(@as(u64, 1920), out.usage.?.cache_read_input_tokens);
     try std.testing.expectEqual(@as(u64, 10), out.usage.?.output_tokens);
     try std.testing.expect(out.saw_done); // 无 [DONE] 行 → completed 后补发 .done
-    try std.testing.expectEqual(cc.api_stream.StopReason.end_turn, handle.stopReason());
+    try std.testing.expectEqual(core.api_stream.StopReason.end_turn, handle.stopReason());
 }
 
 // ── (c2) issue #258:usage 只在 response.usage 是 object 时计,只从该对象读 ─────────
@@ -405,9 +398,9 @@ const RESPONSES_TOOLS_ECHO_USAGE_SSE =
 const UsageCapture = struct {
     allocator: std.mem.Allocator,
     text: std.ArrayList(u8) = .empty,
-    usages: std.ArrayList(cc.api_stream.UsageDelta) = .empty,
+    usages: std.ArrayList(core.api_stream.UsageDelta) = .empty,
 
-    fn emit(ctx: *anyopaque, _: cc.session_id.SessionId, ev: cc.ui_backend.CoreEvent) void {
+    fn emit(ctx: *anyopaque, _: core.session_id.SessionId, ev: core.protocol.ui_backend.CoreEvent) void {
         const self: *UsageCapture = @ptrCast(@alignCast(ctx));
         switch (ev) {
             .text_chunk => |t| self.text.appendSlice(self.allocator, t) catch @panic("capture OOM"),
@@ -415,14 +408,14 @@ const UsageCapture = struct {
             else => {},
         }
     }
-    fn poll(_: *anyopaque, _: cc.session_id.SessionId) ?cc.ui_event.UiEvent {
+    fn poll(_: *anyopaque, _: core.session_id.SessionId) ?core.protocol.ui_event.UiEvent {
         return null;
     }
 };
 
 test "issue #258 Responses L2: response.usage null → Host 无 usage 事件;有对象 → 数值只从对象读" {
     const a = std.testing.allocator;
-    const Case = struct { sse: []const u8, usages: []const cc.api_stream.UsageDelta, anchor: ?usize };
+    const Case = struct { sse: []const u8, usages: []const core.api_stream.UsageDelta, anchor: ?usize };
     const cases = [_]Case{
         .{ .sse = RESPONSES_NULL_USAGE_SSE, .usages = &.{}, .anchor = null },
         .{
@@ -442,20 +435,20 @@ test "issue #258 Responses L2: response.usage null → Host 无 usage 事件;有
         var client = initResponsesClient(a, io_rt.io(), "gpt-5.2", url);
         defer client.deinit();
 
-        var conv = cc.conversation.Conversation.init(a);
+        var conv = core.conversation.Conversation.init(a);
         defer conv.deinit();
         try conv.appendText(.user, "hi");
-        const perm = cc.permission.createContext(.bypass_permissions, a);
-        const empty_defs: []const cc.json_mod.ToolDefinition = &.{};
+        const perm = core.permission.createContext(.bypass_permissions, a);
+        const empty_defs: []const core.json.ToolDefinition = &.{};
         var cap = UsageCapture{ .allocator = a };
         defer cap.text.deinit(a);
         defer cap.usages.deinit(a);
-        const be = cc.ui_backend.UiBackend{ .ctx = @ptrCast(&cap), .emit = UsageCapture.emit, .poll = UsageCapture.poll };
+        const be = core.protocol.ui_backend.UiBackend{ .ctx = @ptrCast(&cap), .emit = UsageCapture.emit, .poll = UsageCapture.poll };
 
         const result = try agent_loop.run(&conv, client.provider(), empty_defs, &perm, .{ .max_turns = 2 }, &be, a);
         try std.testing.expectEqual(agent_loop.StopReason.end_turn, result.stop_reason);
         try std.testing.expectEqualStrings("hi", cap.text.items);
-        try std.testing.expectEqualSlices(cc.api_stream.UsageDelta, case.usages, cap.usages.items);
+        try std.testing.expectEqualSlices(core.api_stream.UsageDelta, case.usages, cap.usages.items);
         if (case.anchor) |tokens| {
             try std.testing.expectEqual(tokens, conv.usageAnchor().?.context_tokens);
         } else {
@@ -479,8 +472,8 @@ test "Responses(d): response.incomplete reason=max_output_tokens → stopReason=
     defer client.deinit();
 
     const p = client.provider();
-    const msgs = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
+    const msgs = [_]core.types.ApiMessage{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "hi" }} },
     };
     var handle = p.sendStream(&msgs, null, null, null, null, null, "") catch |e| {
         std.debug.print("responses incomplete sendStream failed: {s}\n", .{@errorName(e)});
@@ -494,7 +487,7 @@ test "Responses(d): response.incomplete reason=max_output_tokens → stopReason=
 
     try std.testing.expectEqualStrings("partial", out.text.items);
     try std.testing.expect(out.saw_done);
-    try std.testing.expectEqual(cc.api_stream.StopReason.max_tokens, handle.stopReason());
+    try std.testing.expectEqual(core.api_stream.StopReason.max_tokens, handle.stopReason());
 }
 
 // ── (e) failed / error → ApiError ────────────────────────────────────────────
@@ -502,39 +495,15 @@ test "Responses(d): response.incomplete reason=max_output_tokens → stopReason=
 // midStreamReadError 的名字约定),agent_loop 据此不为它兜底重发。
 
 test "Responses(e): response.failed 与流级 error 事件都上抛 ApiError,并记 API 错误帧现场" {
-    const a = std.testing.allocator;
-    const cassettes = [_][]const u8{ RESPONSES_FAILED_SSE, RESPONSES_ERROR_SSE };
-    for (cassettes) |sse| {
-        var srv = try harness.MockServer.startCassette(&[_][]const u8{sse}, 0);
-        defer srv.stop();
-        const url = try srv.urlOwned(a);
-        defer a.free(url);
+    for (failure_fixture.cases) |failure| {
+        var capture: core.api_model_error.Capture = .{};
+        const scope = core.api_model_error.Scope.enter(&capture);
+        defer scope.exit();
+        try failure_fixture.expectApiError(core.api_openai.OpenAIClient, core.types.ApiMessage, failure.sse);
 
-        var io_rt = @import("platform").signal.threadedIo(a, .{});
-        defer io_rt.deinit();
-        var client = initResponsesClient(a, io_rt.io(), "gpt-5.2", url);
-        defer client.deinit();
-
-        const p = client.provider();
-        const msgs = [_]cc.types_mod.ApiMessage{
-            .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
-        };
-        var handle = p.sendStream(&msgs, null, null, null, null, null, "") catch |e| {
-            std.debug.print("responses failed-case sendStream failed: {s}\n", .{@errorName(e)});
-            return error.SkipZigTest;
-        };
-        defer handle.deinit();
-
-        var out = DrainResult{};
-        defer out.deinit(a);
-        var last: [cc.api_last_error.SUMMARY_BUF_LEN]u8 = undefined;
-        _ = cc.api_last_error.take(&last);
-        try std.testing.expectError(error.ApiError, drainAll(a, &handle, &out));
-        const detail = cc.api_last_error.take(&last) orelse return error.TestExpectedLastError;
-        try std.testing.expect(std.mem.startsWith(u8, detail, "API 错误帧: "));
-        // The server's own words reach the user: the nested error of response.failed,
-        // or the event itself for a stream-level error.
-        try std.testing.expect(std.mem.indexOf(u8, detail, "boom") != null or std.mem.indexOf(u8, detail, "slow down") != null);
+        var detail: core.api_model_error.Detail = undefined;
+        capture.finish(&detail);
+        try std.testing.expectEqualStrings(failure.message, detail.view().message);
     }
 }
 
@@ -553,8 +522,8 @@ test "Responses(f): output_text.delta 解除 JSON 转义(真实换行进 .text)"
     defer client.deinit();
 
     const p = client.provider();
-    const msgs = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
+    const msgs = [_]core.types.ApiMessage{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "hi" }} },
     };
     var handle = p.sendStream(&msgs, null, null, null, null, null, "") catch |e| {
         std.debug.print("responses escaped sendStream failed: {s}\n", .{@errorName(e)});
@@ -573,10 +542,10 @@ test "Responses(f): output_text.delta 解除 JSON 转义(真实换行进 .text)"
 
 test "Responses(g): 序列化字节断言(reasoning effort=high / xhigh、max 原样 / 无多余字段)" {
     const a = std.testing.allocator;
-    const msgs = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
+    const msgs = [_]core.types.ApiMessage{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "hi" }} },
     };
-    const dialect = cc.api_dialect.dialectFor(.openai, "gpt-5.2");
+    const dialect = core.api_dialect.dialectFor(.openai, "gpt-5.2");
 
     const body = try openai.serializeOpenAIResponsesRequest(a, "gpt-5.2", &msgs, "sys", null, .{ .reasoning_effort = .high }, dialect);
     defer a.free(body);
@@ -607,20 +576,20 @@ test "Responses(g): 序列化字节断言(reasoning effort=high / xhigh、max �
 
 test "Responses(g2): tool_use/tool_result → function_call/function_call_output items" {
     const a = std.testing.allocator;
-    const msgs = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "go" }} },
+    const msgs = [_]core.types.ApiMessage{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "go" }} },
         .{
             .role = .assistant,
-            .content = &[_]cc.types_mod.ApiContent{
+            .content = &[_]core.types.ApiContent{
                 .{ .thinking = "hidden" }, // thinking block 跳过,不回传
                 .{ .tool_use = .{ .id = "call_x", .name = "get_time", .input = "{\"q\":\"now\"}" } },
             },
         },
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{
             .{ .tool_result = .{ .tool_use_id = "call_x", .content = "{\"t\":42}" } },
         } },
     };
-    const dialect = cc.api_dialect.dialectFor(.openai, "gpt-5.2");
+    const dialect = core.api_dialect.dialectFor(.openai, "gpt-5.2");
     const body = try openai.serializeOpenAIResponsesRequest(a, "gpt-5.2", &msgs, null, null, .{}, dialect);
     defer a.free(body);
     try std.testing.expect(std.mem.indexOf(u8, body, "{\"type\":\"function_call\",\"call_id\":\"call_x\",\"name\":\"get_time\",\"arguments\":\"{\\\"q\\\":\\\"now\\\"}\"}") != null);
@@ -632,10 +601,10 @@ test "Responses(g2): tool_use/tool_result → function_call/function_call_output
 
 test "Responses(g3): response_format/prompt_cache_key/parallel_tool_calls 接线(此前静默 no-op)" {
     const a = std.testing.allocator;
-    const msgs = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
+    const msgs = [_]core.types.ApiMessage{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "hi" }} },
     };
-    const dialect = cc.api_dialect.dialectFor(.openai, "gpt-5.2");
+    const dialect = core.api_dialect.dialectFor(.openai, "gpt-5.2");
 
     // 三个 override 同时设:json_object → text.format;其余两个与 chat 同名顶层字段。
     const body = try openai.serializeOpenAIResponsesRequest(a, "gpt-5.2", &msgs, null, null, .{
@@ -705,8 +674,8 @@ test "Responses(h): >8KB SSE 行走 line_overflow 慢路径,完整吐文本且�
     defer client.deinit();
 
     const p = client.provider();
-    const msgs = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
+    const msgs = [_]core.types.ApiMessage{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "hi" }} },
     };
     var handle = p.sendStream(&msgs, null, null, null, null, null, "") catch |e| {
         std.debug.print("responses big-line sendStream failed: {s}\n", .{@errorName(e)});
@@ -723,7 +692,7 @@ test "Responses(h): >8KB SSE 行走 line_overflow 慢路径,完整吐文本且�
     try std.testing.expect(out.usage != null);
     try std.testing.expectEqual(@as(u64, 10), out.usage.?.input_tokens);
     try std.testing.expect(out.saw_done);
-    try std.testing.expectEqual(cc.api_stream.StopReason.end_turn, handle.stopReason());
+    try std.testing.expectEqual(core.api_stream.StopReason.end_turn, handle.stopReason());
 }
 
 // ── (i) 拆代理对 arguments(review F3)────────────────────────────────────────
@@ -741,8 +710,8 @@ test "Responses(i): \\ud83c/\\udf89 拆进两个 arguments delta → 终值是�
     defer client.deinit();
 
     const p = client.provider();
-    const msgs = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
+    const msgs = [_]core.types.ApiMessage{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "hi" }} },
     };
     var handle = p.sendStream(&msgs, null, null, null, null, null, "") catch |e| {
         std.debug.print("responses split-surrogate sendStream failed: {s}\n", .{@errorName(e)});
@@ -779,8 +748,8 @@ test "Responses(j): item 序列化在 type 前的 output_item.added 仍注册 fu
     defer client.deinit();
 
     const p = client.provider();
-    const msgs = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
+    const msgs = [_]core.types.ApiMessage{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "hi" }} },
     };
     var handle = p.sendStream(&msgs, null, null, null, null, null, "") catch |e| {
         std.debug.print("responses item-first sendStream failed: {s}\n", .{@errorName(e)});
@@ -797,7 +766,7 @@ test "Responses(j): item 序列化在 type 前的 output_item.added 仍注册 fu
     try std.testing.expectEqualStrings("get_time", out.tools.items[0].name);
     try std.testing.expectEqualStrings("{}", out.tools.items[0].args);
     try std.testing.expect(out.saw_done);
-    try std.testing.expectEqual(cc.api_stream.StopReason.tool_use, handle.stopReason());
+    try std.testing.expectEqual(core.api_stream.StopReason.tool_use, handle.stopReason());
 }
 
 // ── (k) 并行/交错 tool calls(review F5)──────────────────────────────────────
@@ -815,8 +784,8 @@ test "Responses(k): 文本与两个 function_call 交错流,分槽 call_id/argum
     defer client.deinit();
 
     const p = client.provider();
-    const msgs = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
+    const msgs = [_]core.types.ApiMessage{
+        .{ .role = .user, .content = &[_]core.types.ApiContent{.{ .text = "hi" }} },
     };
     var handle = p.sendStream(&msgs, null, null, null, null, null, "") catch |e| {
         std.debug.print("responses parallel sendStream failed: {s}\n", .{@errorName(e)});
@@ -839,33 +808,7 @@ test "Responses(k): 文本与两个 function_call 交错流,分槽 call_id/argum
     try std.testing.expectEqualStrings("{\"city\":\"sf\"}", out.tools.items[1].args);
     try std.testing.expect(out.usage != null);
     try std.testing.expect(out.saw_done);
-    try std.testing.expectEqual(cc.api_stream.StopReason.tool_use, handle.stopReason());
-}
-
-// ── flag/env 面:--openai-protocol 解析(声明=接线)────────────────────────────
-
-test "Responses(flag): --openai-protocol responses 解析进 Config;词表外 fail-closed" {
-    const a = std.testing.allocator;
-    {
-        const argv = [_][*:0]const u8{ "metacodes", "--openai-protocol", "responses" };
-        const config = cc.parseArgsForTest(&argv, a);
-        try std.testing.expect(config.parse_error == null);
-        try std.testing.expectEqual(cc.types_mod.OpenAIProtocol.responses, config.openai_protocol);
-    }
-    {
-        // 别名 "chat" 与默认值等价。
-        const argv = [_][*:0]const u8{ "metacodes", "--openai-protocol", "chat" };
-        const config = cc.parseArgsForTest(&argv, a);
-        try std.testing.expect(config.parse_error == null);
-        try std.testing.expectEqual(cc.types_mod.OpenAIProtocol.chat_completions, config.openai_protocol);
-    }
-    {
-        // 拼错 → parse error(main 打印后 exit 2),绝不静默落默认端点。
-        const argv = [_][*:0]const u8{ "metacodes", "--openai-protocol", "response" };
-        const config = cc.parseArgsForTest(&argv, a);
-        try std.testing.expect(config.parse_error != null);
-        a.free(config.parse_error.?);
-    }
+    try std.testing.expectEqual(core.api_stream.StopReason.tool_use, handle.stopReason());
 }
 
 // ── (i) reasoning 续传:store:false 下的推理状态原样回传(issue #23)──────────
@@ -896,15 +839,15 @@ test "Responses(i): 工具续跑的第二请求回放 reasoning item(id/summary/
     var client = initResponsesClient(a, io_rt.io(), "gpt-5.2", url);
     defer client.deinit();
 
-    var dyn = cc.tools_dynamic.DynRegistry.init(a);
+    var dyn = core.tools_dynamic.DynRegistry.init(a);
     defer dyn.deinit();
     try dyn.register("get_time", "Get current time", &.{}, getTimeExec, null, false);
 
-    var conv = cc.conversation.Conversation.init(a);
+    var conv = core.conversation.Conversation.init(a);
     defer conv.deinit();
     try conv.appendText(.user, "what time is it");
-    const perm = cc.permission.createContext(.bypass_permissions, a);
-    const tool_defs = try cc.tools.toToolDefinitionsFull(a, &dyn, null);
+    const perm = core.permission.createContext(.bypass_permissions, a);
+    const tool_defs = try core.tools.toToolDefinitionsFull(a, &dyn, null);
     defer a.free(tool_defs);
     var render = writer_backend.WriterBackend.initNull();
     const be = render.backend();
@@ -964,15 +907,15 @@ test "Responses(i2): reasoning item 只出现在终止事件的 output 里时同
     var client = initResponsesClient(a, io_rt.io(), "gpt-5.2", url);
     defer client.deinit();
 
-    var dyn = cc.tools_dynamic.DynRegistry.init(a);
+    var dyn = core.tools_dynamic.DynRegistry.init(a);
     defer dyn.deinit();
     try dyn.register("get_time", "Get current time", &.{}, getTimeExec, null, false);
 
-    var conv = cc.conversation.Conversation.init(a);
+    var conv = core.conversation.Conversation.init(a);
     defer conv.deinit();
     try conv.appendText(.user, "what time is it");
-    const perm = cc.permission.createContext(.bypass_permissions, a);
-    const tool_defs = try cc.tools.toToolDefinitionsFull(a, &dyn, null);
+    const perm = core.permission.createContext(.bypass_permissions, a);
+    const tool_defs = try core.tools.toToolDefinitionsFull(a, &dyn, null);
     defer a.free(tool_defs);
     var render = writer_backend.WriterBackend.initNull();
     const be = render.backend();
@@ -1003,15 +946,15 @@ test "Responses(i3): 无 reasoning 的对照回合 → 第二请求里没有任�
     var client = initResponsesClient(a, io_rt.io(), "gpt-5.2", url);
     defer client.deinit();
 
-    var dyn = cc.tools_dynamic.DynRegistry.init(a);
+    var dyn = core.tools_dynamic.DynRegistry.init(a);
     defer dyn.deinit();
     try dyn.register("get_time", "Get current time", &.{}, getTimeExec, null, false);
 
-    var conv = cc.conversation.Conversation.init(a);
+    var conv = core.conversation.Conversation.init(a);
     defer conv.deinit();
     try conv.appendText(.user, "what time is it");
-    const perm = cc.permission.createContext(.bypass_permissions, a);
-    const tool_defs = try cc.tools.toToolDefinitionsFull(a, &dyn, null);
+    const perm = core.permission.createContext(.bypass_permissions, a);
+    const tool_defs = try core.tools.toToolDefinitionsFull(a, &dyn, null);
     defer a.free(tool_defs);
     var render = writer_backend.WriterBackend.initNull();
     const be = render.backend();
@@ -1038,11 +981,11 @@ test "Responses(i4): 只有 reasoning 的一轮不落进会话(估算与 wire �
     var client = initResponsesClient(a, io_rt.io(), "gpt-5.2", url);
     defer client.deinit();
 
-    var conv = cc.conversation.Conversation.init(a);
+    var conv = core.conversation.Conversation.init(a);
     defer conv.deinit();
     try conv.appendText(.user, "think but say nothing");
-    const perm = cc.permission.createContext(.bypass_permissions, a);
-    const empty_defs: []const cc.json_mod.ToolDefinition = &.{};
+    const perm = core.permission.createContext(.bypass_permissions, a);
+    const empty_defs: []const core.json.ToolDefinition = &.{};
     var render = writer_backend.WriterBackend.initNull();
     const be = render.backend();
 

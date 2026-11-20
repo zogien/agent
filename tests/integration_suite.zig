@@ -18,18 +18,21 @@ test {
         _ = @import("component/agent_session_runtime_config_test.zig");
         _ = @import("component/agent_session_permission_scope_test.zig");
         _ = @import("component/agent_session_credential_test.zig");
+        _ = @import("integration/mcp_http_test.zig");
+        _ = @import("integration/mcp_sse_oauth_test.zig");
+        _ = @import("integration/mcp_e2e_test.zig");
+        _ = @import("integration/mcp_protocol_test.zig");
+        _ = @import("integration/http_stream_e2e_test.zig");
+        _ = @import("component/gemini_provider_test.zig");
+        _ = @import("component/http_error_test.zig");
+        _ = @import("component/openai_responses_test.zig");
     } else {
         cliTests();
     }
 }
 
 fn cliTests() void {
-    _ = @import("integration/http_stream_e2e_test.zig");
     _ = @import("integration/tool_abort_test.zig");
-    _ = @import("integration/mcp_e2e_test.zig");
-    _ = @import("integration/mcp_protocol_test.zig");
-    _ = @import("integration/mcp_http_test.zig");
-    _ = @import("integration/mcp_sse_oauth_test.zig");
     _ = @import("integration/skills_e2e_test.zig");
     _ = @import("integration/agents_e2e_test.zig");
     _ = @import("component/provider_offer_test.zig");
@@ -54,7 +57,6 @@ fn cliTests() void {
     _ = @import("component/skill_fork_test.zig");
     _ = @import("component/sealed_skill_test.zig");
     _ = @import("component/prompt_tool_coupling_test.zig");
-    _ = @import("component/http_error_test.zig");
     _ = @import("component/answer_queue_test.zig");
     _ = @import("component/base_url_flag_test.zig");
     _ = @import("component/unknown_flag_test.zig");
@@ -91,6 +93,7 @@ fn cliTests() void {
     _ = @import("component/message_origin_test.zig");
     _ = @import("component/startup_catalogs_test.zig");
     _ = @import("component/mcp_background_startup_test.zig");
+    _ = @import("integration/app_mcp_oauth_startup_test.zig");
     _ = @import("component/mcp_permission_test.zig");
     _ = @import("component/prompt_model_identity_test.zig");
     _ = @import("component/stream_terminator_test.zig");
@@ -154,8 +157,7 @@ fn cliTests() void {
     _ = @import("component/provider_vtable_test.zig");
     _ = @import("component/capability_gate_test.zig");
     _ = @import("component/openai_provider_test.zig");
-    _ = @import("component/openai_responses_test.zig");
-    _ = @import("component/gemini_provider_test.zig");
+    _ = @import("component/openai_responses_cli_test.zig");
     _ = @import("component/background_main_test.zig");
     _ = @import("component/suspend_resume_test.zig");
     _ = @import("component/permission_unanswered_test.zig");

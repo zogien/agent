@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const core = @import("metacodes-core");
 
 const MINIMAL_END_TURN_SSE =
     "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"role\":\"assistant\",\"model\":\"x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n" ++
@@ -19,7 +19,7 @@ const MINIMAL_END_TURN_SSE =
     "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" ++
     "data: {\"type\":\"message_stop\"}\n\n";
 
-fn drainStream(resp: *cc.client_mod.StreamResponse) !void {
+fn drainStream(resp: *core.client.StreamResponse) !void {
     while (true) {
         const maybe = try resp.next();
         const ev = maybe orelse break;
@@ -69,9 +69,9 @@ test "L2 Stage6: HTTP 401 → error.Unauthorized 且 body 进日志" {
     //    文件按进程 + 捕获唯一:integration 分片进程共用同一个 temp 目录(#472)。
     var log_file = try harness.LogFile.create("http-error-test");
     defer log_file.deinit();
-    const previous_log_state = cc.util_log.setLogFileFdForTest(log_file.fd);
-    defer cc.util_log.restoreForTest(previous_log_state);
-    cc.util_log.setLevel(.debug);
+    const previous_log_state = core.util_log.setLogFileFdForTest(log_file.fd);
+    defer core.util_log.restoreForTest(previous_log_state);
+    core.util_log.setLevel(.debug);
 
     // 2) 起 401 mock(纯 JSON body)
     var srv = try harness.MockServer.startWithStatus(
@@ -87,11 +87,11 @@ test "L2 Stage6: HTTP 401 → error.Unauthorized 且 body 进日志" {
     defer io_runtime.deinit();
     const io = io_runtime.io();
 
-    var client = cc.client_mod.Client.initWithBaseUrl(a, io, "test-key", "claude-3-5-haiku-20241022", url);
+    var client = core.client.Client.initWithBaseUrl(a, io, "test-key", "claude-3-5-haiku-20241022", url);
     defer client.deinit();
 
     // 3) 发请求 → 期望 error.Unauthorized
-    const empty_messages: []const cc.types_mod.ApiMessage = &.{};
+    const empty_messages: []const core.types.ApiMessage = &.{};
     const result = client.sendMessageStream(empty_messages, null, null);
     try std.testing.expectError(error.Unauthorized, result);
 
@@ -118,7 +118,7 @@ test "L2 Provider unnamed HTTP 529 returns HttpError without killing the process
     defer io_runtime.deinit();
     const io = io_runtime.io();
 
-    var client = cc.client_mod.Client.initWithBaseUrl(
+    var client = core.client.Client.initWithBaseUrl(
         a,
         io,
         "test-key",
@@ -127,7 +127,7 @@ test "L2 Provider unnamed HTTP 529 returns HttpError without killing the process
     );
     defer client.deinit();
 
-    const empty_messages: []const cc.types_mod.ApiMessage = &.{};
+    const empty_messages: []const core.types.ApiMessage = &.{};
     try std.testing.expectError(
         error.HttpError,
         client.sendMessageStream(empty_messages, null, null),
@@ -155,10 +155,10 @@ test "L2 Stage6: SSE error 帧 → error.ApiError(非 RequestFailed)" {
     defer io_runtime.deinit();
     const io = io_runtime.io();
 
-    var client = cc.client_mod.Client.initWithBaseUrl(a, io, "test-key", "claude-3-5-haiku-20241022", url);
+    var client = core.client.Client.initWithBaseUrl(a, io, "test-key", "claude-3-5-haiku-20241022", url);
     defer client.deinit();
 
-    const empty_messages: []const cc.types_mod.ApiMessage = &.{};
+    const empty_messages: []const core.types.ApiMessage = &.{};
     var resp = client.sendMessageStream(empty_messages, null, null) catch |e| {
         std.debug.print("sendMessageStream failed: {s}\n", .{@errorName(e)});
         return error.SkipZigTest;
@@ -185,10 +185,10 @@ test "L2 AutoCompact: HTTP context-window-exceeded body → error.ContextWindowE
     defer io_runtime.deinit();
     const io = io_runtime.io();
 
-    var client = cc.client_mod.Client.initWithBaseUrl(a, io, "test-key", "claude-3-5-haiku-20241022", url);
+    var client = core.client.Client.initWithBaseUrl(a, io, "test-key", "claude-3-5-haiku-20241022", url);
     defer client.deinit();
 
-    const empty_messages: []const cc.types_mod.ApiMessage = &.{};
+    const empty_messages: []const core.types.ApiMessage = &.{};
     try std.testing.expectError(error.ContextWindowExceeded, client.sendMessageStream(empty_messages, null, null));
 }
 
@@ -207,10 +207,10 @@ test "L2 AutoCompact: SSE context-window-exceeded error 帧 → error.ContextWin
     defer io_runtime.deinit();
     const io = io_runtime.io();
 
-    var client = cc.client_mod.Client.initWithBaseUrl(a, io, "test-key", "claude-3-5-haiku-20241022", url);
+    var client = core.client.Client.initWithBaseUrl(a, io, "test-key", "claude-3-5-haiku-20241022", url);
     defer client.deinit();
 
-    const empty_messages: []const cc.types_mod.ApiMessage = &.{};
+    const empty_messages: []const core.types.ApiMessage = &.{};
     var resp = client.sendMessageStream(empty_messages, null, null) catch |e| {
         std.debug.print("sendMessageStream failed: {s}\n", .{@errorName(e)});
         return error.SkipZigTest;
@@ -235,15 +235,15 @@ test "L2 AutoCompact: request_too_large without context wording stays HttpError"
     defer io_runtime.deinit();
     const io = io_runtime.io();
 
-    var client = cc.client_mod.Client.initWithBaseUrl(a, io, "test-key", "claude-3-5-haiku-20241022", url);
+    var client = core.client.Client.initWithBaseUrl(a, io, "test-key", "claude-3-5-haiku-20241022", url);
     defer client.deinit();
 
-    const empty_messages: []const cc.types_mod.ApiMessage = &.{};
+    const empty_messages: []const core.types.ApiMessage = &.{};
     try std.testing.expectError(error.HttpError, client.sendMessageStream(empty_messages, null, null));
 }
 
 // Stage 6.2 sanity:parseEventType 识别 "error" 类型。
 test "L2 Stage6: parseEventType 识别 error 帧" {
-    const t = cc.api_stream.parseEventType("{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}");
+    const t = core.api_stream.parseEventType("{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}");
     try std.testing.expect(t == .error_event);
 }
