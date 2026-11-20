@@ -23,6 +23,7 @@ test {
         _ = @import("integration/http_stream_e2e_test.zig");
         _ = @import("component/gemini_provider_test.zig");
         _ = @import("component/http_error_test.zig");
+        _ = @import("component/openai_responses_test.zig");
     } else {
         cliTests();
     }
@@ -155,7 +156,7 @@ fn cliTests() void {
     _ = @import("component/provider_vtable_test.zig");
     _ = @import("component/capability_gate_test.zig");
     _ = @import("component/openai_provider_test.zig");
-    _ = @import("component/openai_responses_test.zig");
+    _ = @import("component/openai_responses_cli_test.zig");
     _ = @import("component/background_main_test.zig");
     _ = @import("component/suspend_resume_test.zig");
     _ = @import("component/permission_unanswered_test.zig");
