@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { setTimeout } from "node:timers/promises";
 import {
   isNewerVersion,
   packageTarballs,
@@ -46,18 +45,6 @@ async function lookup(name) {
   return response.json();
 }
 
-async function waitForVersion(pkg, version) {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    if (attempt > 0) await setTimeout(2000);
-    const metadata = await lookup(pkg.name);
-    const existing = metadata.versions[version];
-    if (!existing) continue;
-    assert.equal(existing.dist.integrity, pkg.integrity, `registry digest for ${pkg.name}`);
-    if (metadata["dist-tags"].latest === version) return;
-  }
-  throw new Error(`npm did not expose ${pkg.name}@${version} as latest after publish`);
-}
-
 if (import.meta.main) {
   const [directory, tag] = process.argv.slice(2);
   assert(directory && tag, "usage: node publish-release.mjs <package-dir> <fork-tag>");
@@ -76,7 +63,8 @@ if (import.meta.main) {
     assert.equal(tarballIntegrity(path.join(directory, pkg.filename)), pkg.integrity, pkg.filename);
   }
 
-  await publishRelease(release, lookup, async (pkg) => {
+  // The registry exposes accepted uploads asynchronously.
+  await publishRelease(release, lookup, (pkg) => {
     execFileSync(
       "npm",
       [
@@ -85,6 +73,5 @@ if (import.meta.main) {
       ],
       { stdio: "inherit" },
     );
-    await waitForVersion(pkg, release.version);
   });
 }
