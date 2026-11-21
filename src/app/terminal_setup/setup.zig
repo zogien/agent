@@ -865,21 +865,6 @@ fn appleLive(arena: std.mem.Allocator, entry: Record.AppleEntry, terminal_pid: ?
 
 const testing = std.testing;
 
-test "the newline sequence is what KeyParser reads as Shift+Enter" {
-    const input = @import("../../repl/input.zig");
-    var parser: input.KeyParser = .{};
-    var keys: std.ArrayList(input.Key) = .empty;
-    defer keys.deinit(testing.allocator);
-    // A terminal writes the binding's two bytes at once.
-    for (newline_sequence, 0..) |b, i| {
-        if (parser.feedQueued(b, i + 1 < newline_sequence.len)) |k| try keys.append(testing.allocator, k);
-        while (parser.drain()) |k| try keys.append(testing.allocator, k);
-    }
-    try testing.expectEqual(@as(usize, 1), keys.items.len);
-    try testing.expect(keys.items[0] == .shift_enter);
-    try testing.expect(!parser.pendingEsc());
-}
-
 test "detect: the terminals with a setup, the native ones, and the rest" {
     try testing.expect(detect(.{ .term_program = "Apple_Terminal", .term = "xterm-256color" }) == .apple_terminal);
     try testing.expect(detect(.{ .term_program = "vscode", .term = "xterm-256color" }) == .vscode);
@@ -893,17 +878,6 @@ test "detect: the terminals with a setup, the native ones, and the rest" {
     try testing.expect(detect(.{ .term_program = "Apple_Terminal", .tmux = true }) == .tmux);
     try testing.expectEqualStrings("Hyper", detect(.{ .term_program = "Hyper" }).other.?);
     try testing.expect(detect(.{}).other == null);
-}
-
-test "detect: the native terminals are the ones input.zig turns the keyboard protocol on for" {
-    const input = @import("../../repl/input.zig");
-    for (native_term_programs) |entry| try testing.expect(input.classifyKittyKeyboard(entry[0], "xterm-256color", .none) == .enable);
-    try testing.expect(input.classifyKittyKeyboard(null, "xterm-kitty", .none) == .enable);
-    try testing.expect(input.classifyKittyKeyboard(null, "xterm-ghostty", .none) == .enable);
-    // The two this command sets up are the ones it leaves off, without asking
-    // the terminal.
-    try testing.expect(input.classifyKittyKeyboard("Apple_Terminal", "xterm-256color", .none) == .disable);
-    try testing.expect(input.classifyKittyKeyboard("vscode", "xterm-256color", .none) == .disable);
 }
 
 const Harness = struct {

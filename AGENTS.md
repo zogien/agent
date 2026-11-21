@@ -32,18 +32,9 @@ These rules apply to the entire repository.
   `std.Thread.spawn`: std's 16 MiB default stack is a 16 MiB commit per thread
   on Windows. Pick the `Stack` class by what the thread runs; outside test
   blocks `zig build test:thread-stack` enforces it.
-- The REPL's SIGWINCH handler has no SA_RESTART either. In `src/repl/`, read
-  keys through `input.readKey` or check `input.retryInterruptedRead` right
-  after a raw read, and write to the terminal through `pfs.writeAll`; a call
-  that cannot see EINTR says `// no EINTR: <reason>` on its line
-  (`zig build test:terminal-io` enforces it).
-- The TUI's scrollback has no undo: in `src/repl/`, only the Renderer
-  (`RenderRegion`) erases the screen or writes past the inline region. Erase
-  with ED 0, reset the screen only through `RenderRegion.resetScreen`, climb
-  with relative moves instead of saving the cursor, and send scrollback text
-  through the Renderer; any other direct terminal write is listed with its
-  reason ([doc/TUI_VIEWPORT_OWNERSHIP.md](doc/TUI_VIEWPORT_OWNERSHIP.md);
-  `zig build test:scrollback` enforces it).
+- In the headless CLI and permission prompts, preserve interrupted-read
+  handling and write terminal output through `pfs.writeAll`.
+  `zig build test:terminal-io` checks the relevant sources.
 - Session state leaves the machine for a service only where the user named it.
   No built-in destination that is on by default is a non-loopback `http://`
   URL, and the CLI takes no built-in System-One advisor (`jev.BUILTIN_DEFAULT`

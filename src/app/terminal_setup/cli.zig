@@ -1,6 +1,4 @@
-//! `metacodes terminal-setup`: the command line face of `/terminal-setup`
-//! (`setup.zig`), for setting a terminal up from outside the REPL or from
-//! another terminal, and for undoing it.
+//! Restore key bindings installed by a previous version of metacodes.
 
 const std = @import("std");
 const pfs = @import("platform").fs;
@@ -11,18 +9,11 @@ const vscode = @import("vscode.zig");
 const apple = @import("apple_terminal.zig");
 
 pub const usage =
-    \\usage: metacodes terminal-setup [--dry-run | --restore]
+    \\usage: metacodes terminal-setup --restore
     \\           [--terminal apple-terminal|vscode|vscode-insiders|cursor|windsurf|vscodium]
     \\           [--keybindings <keybindings.json>]
     \\
-    \\Makes Shift+Enter insert a newline in a terminal that cannot report it on its own,
-    \\by binding it in the terminal's own settings, after a backup:
-    \\  Apple Terminal    Shift+Return in the default profile's key map
-    \\  VS Code and forks a keybindings.json entry for the integrated terminal
-    \\Without --terminal it sets up the terminal it runs in.
-    \\  --dry-run       say what would change, change nothing
-    \\  --restore       undo what terminal-setup changed (all of it, or the --terminal / --keybindings named)
-    \\  --keybindings   the keybindings.json to edit (a custom --user-data-dir, a profile)
+    \\Restores all recorded key bindings, or only the selected terminal or file.
     \\
 ;
 
@@ -51,15 +42,14 @@ pub const Parsed = union(enum) {
 };
 
 pub fn parse(arena: std.mem.Allocator, args: []const []const u8) error{OutOfMemory}!Parsed {
-    var req: setup.Request = .{};
+    var req: setup.Request = .{ .action = .restore };
+    var restore_requested = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return .help;
-        if (std.mem.eql(u8, arg, "--dry-run") or std.mem.eql(u8, arg, "--restore")) {
-            const action: setup.Action = if (arg[2] == 'd') .preview else .restore;
-            if (req.action != .install and req.action != action) return .{ .usage_error = "--dry-run and --restore exclude each other" };
-            req.action = action;
+        if (std.mem.eql(u8, arg, "--restore")) {
+            restore_requested = true;
         } else if (std.mem.eql(u8, arg, "--terminal")) {
             i += 1;
             if (i == args.len) return .{ .usage_error = "--terminal needs a name" };
@@ -74,12 +64,11 @@ pub fn parse(arena: std.mem.Allocator, args: []const []const u8) error{OutOfMemo
             return .{ .usage_error = try std.fmt.allocPrint(arena, "unknown terminal-setup argument '{s}'", .{arg}) };
         }
     }
+    if (!restore_requested) return .{ .usage_error = "terminal-setup requires --restore" };
     return .{ .run = req };
 }
 
-/// Runs `metacodes terminal-setup …` and returns the exit code: 0 when the
-/// terminal is set up (or needs nothing), 1 when it was left alone or the
-/// change failed, 2 for a usage error.
+/// Return 0 on restoration or when nothing is recorded, 1 on failure, and 2 on usage errors.
 pub fn run(args: *std.process.Args.Iterator, gpa: std.mem.Allocator, io: std.Io, state_root: []const u8) u8 {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -127,16 +116,15 @@ test "parse: actions, targets, and what is refused" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const plain = try parse(arena, &.{});
-    try testing.expectEqual(setup.Action.install, plain.run.action);
-    try testing.expect(plain.run.target == null);
-    const dry = try parse(arena, &.{ "--dry-run", "--terminal", "cursor" });
-    try testing.expectEqual(setup.Action.preview, dry.run.action);
-    try testing.expectEqualStrings("Cursor", dry.run.target.?.vscode.data_folder);
+    try testing.expect(try parse(arena, &.{}) == .usage_error);
+    try testing.expect(try parse(arena, &.{"--dry-run"}) == .usage_error);
+    const all = try parse(arena, &.{"--restore"});
+    try testing.expectEqual(setup.Action.restore, all.run.action);
+    try testing.expect(all.run.target == null);
     const undo = try parse(arena, &.{ "--restore", "--terminal", "apple-terminal" });
     try testing.expectEqual(setup.Action.restore, undo.run.action);
     try testing.expect(undo.run.target.? == .apple_terminal);
-    try testing.expectEqualStrings("k.json", (try parse(arena, &.{ "--keybindings", "k.json" })).run.target.?.keybindings);
+    try testing.expectEqualStrings("k.json", (try parse(arena, &.{ "--restore", "--keybindings", "k.json" })).run.target.?.keybindings);
     try testing.expect(try parse(arena, &.{"-h"}) == .help);
     try testing.expect(try parse(arena, &.{ "--dry-run", "--restore" }) == .usage_error);
     try testing.expect(try parse(arena, &.{ "--terminal", "kitty" }) == .usage_error);

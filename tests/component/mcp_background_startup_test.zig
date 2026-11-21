@@ -1,22 +1,4 @@
-//! L2: MCP servers connect in the background of the interactive REPL without
-//! changing a single byte a provider sees (`Config.mcp_connect`).
-//!
-//!   - REPL (`.first_request`): App.init returns while a server is still
-//!     connecting; the REPL joins it before it assembles its first request,
-//!     and that request is the one a synchronous start sends (system prompt,
-//!     tools and messages byte for byte), with the server's tools in it.
-//!   - Every other frontend (`.app_init`: headless, daemon, web, teammate,
-//!     dumps) still has every server registered when App.init returns.
-//!   - A `/model` switch made before the join is what the prompt names, as it
-//!     is after a synchronous start.
-//!   - Leaving while a server connects interrupts the handshake and reaps the
-//!     server process.
-//!   - A server that answers 401 is reported as needing authentication.
-//!
-//! The mock MCP server starts behind a shell that waits for a gate file and
-//! then `exec`s it (same pid), so "still connecting" is a state the test
-//! controls, not a timing guess. (The mock itself is a pinned evaluation
-//! fixture; the wrapper keeps it unchanged.)
+//! MCP startup covers headless registration, deferred joins, and authentication failures.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -152,108 +134,12 @@ const Session = struct {
         self.io_rt.deinit();
         self.arena.deinit();
     }
-
-    /// Drive the real REPL loop with `text` as its (non-tty) input.
-    fn repl(self: *Session, ws: *Workspace, text: []const u8) !void {
-        const a = self.arena.allocator();
-        const input_path = try ws.path(a, "repl-input");
-        {
-            const fd = pfs.open(input_path.ptr, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
-            if (fd < 0) return error.InputFile;
-            defer _ = pfs.close(fd);
-            if (pfs.write(fd, text) != @as(isize, @intCast(text.len))) return error.InputFile;
-        }
-        const fd = pfs.open(input_path.ptr, .{ .ACCMODE = .RDONLY }, 0);
-        if (fd < 0) return error.InputFile;
-        defer _ = pfs.close(fd);
-        try cc.repl_loop.run(self.app, a, .{ .input_fd = fd });
-    }
 };
 
 fn readPid(ws: *Workspace) !?i32 {
     var buffer: [32]u8 = undefined;
     const bytes = ws.tmp.dir.readFile(std.testing.io, "server.pid", &buffer) catch return null;
     return std.fmt.parseInt(i32, std.mem.trim(u8, bytes, " \n"), 10) catch null;
-}
-
-/// The request's `system`, `tools` and `messages`, each re-serialized.
-fn providerView(a: std.mem.Allocator, body: []const u8) ![3][]u8 {
-    const parsed = try std.json.parseFromSlice(std.json.Value, a, body, .{});
-    defer parsed.deinit();
-    var out: [3][]u8 = undefined;
-    const keys = [_][]const u8{ "system", "tools", "messages" };
-    for (keys, 0..) |key, i| {
-        const value = parsed.value.object.get(key) orelse return error.MissingField;
-        out[i] = try std.json.Stringify.valueAlloc(a, value, .{});
-    }
-    return out;
-}
-
-fn openGateLater(ws: *Workspace) void {
-    psync.sleepMs(150);
-    ws.openGate() catch {};
-}
-
-test "REPL: the prompt does not wait for an MCP server; the first request has its tools, byte for byte as a synchronous start sends" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest; // /bin/sh gate, fd input
-    if (!pfs.exists(MOCK_MCP)) return error.SkipZigTest;
-    const a = std.testing.allocator;
-    var ws: Workspace = undefined;
-    try ws.init();
-    defer ws.deinit();
-    try ws.writeGateServer();
-
-    var background_body: []u8 = undefined;
-    {
-        var srv = try harness.MockServer.startCassette(&.{REPLY_SSE}, 0);
-        defer srv.stop();
-        const url = try srv.urlOwned(a);
-        defer a.free(url);
-        var session: Session = undefined;
-        try session.init(url, .first_request, null);
-        defer session.deinit();
-        const app = session.app;
-        // App.init returned while the server cannot have answered: nothing
-        // provider-visible is built yet.
-        try std.testing.expect(!app.mcpStartupSettled());
-        try std.testing.expect(!app.toolSurfaceReady());
-        try std.testing.expectEqual(@as(usize, 0), app.tool_defs.len);
-        try std.testing.expect(app.system_prompt == null);
-
-        // The server becomes ready only after the prompt has been submitted:
-        // the REPL waits for it, then sends.
-        const opener = try std.Thread.spawn(.{}, openGateLater, .{&ws});
-        try session.repl(&ws, PROMPT);
-        opener.join();
-
-        try std.testing.expect(app.toolSurfaceReady());
-        try std.testing.expectEqual(@as(usize, 1), srv.requestCount());
-        const request = srv.lastRequest().?;
-        try std.testing.expect(std.mem.indexOf(u8, request.body(), GATE_TOOL) != null);
-        try std.testing.expect(std.mem.indexOf(u8, request.body(), "\"ToolSearch\"") != null);
-        try std.testing.expectEqual(.connected, app.mcp_report.servers[0].state);
-        background_body = try a.dupe(u8, request.body());
-    }
-    defer a.free(background_body);
-
-    // The same session started synchronously (every frontend but the REPL).
-    {
-        var srv = try harness.MockServer.startCassette(&.{REPLY_SSE}, 0);
-        defer srv.stop();
-        const url = try srv.urlOwned(a);
-        defer a.free(url);
-        var session: Session = undefined;
-        try session.init(url, .app_init, null);
-        defer session.deinit();
-        try std.testing.expect(session.app.toolSurfaceReady());
-        try session.repl(&ws, PROMPT);
-        try std.testing.expectEqual(@as(usize, 1), srv.requestCount());
-        const synchronous = try providerView(a, srv.lastRequest().?.body());
-        defer for (synchronous) |part| a.free(part);
-        const background = try providerView(a, background_body);
-        defer for (background) |part| a.free(part);
-        for (synchronous, background) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
-    }
 }
 
 test "headless and every other frontend: App.init returns with every MCP server registered" {
@@ -283,26 +169,7 @@ test "headless and every other frontend: App.init returns with every MCP server 
     try std.testing.expect(std.mem.indexOf(u8, srv.lastRequest().?.body(), GATE_TOOL) != null);
 }
 
-test "only the interactive REPL defers the MCP join" {
-    const a = std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const repl = cc.parseArgsForTest(&.{"metacodes"}, arena.allocator());
-    try std.testing.expect(cc.interactiveRepl(repl));
-    // Default: App.init connects (tests, library hosts, every other frontend).
-    try std.testing.expectEqual(cc.types_mod.McpConnect.app_init, repl.mcp_connect);
-    const others = [_][]const [*:0]const u8{
-        &.{ "metacodes", "-p", "hi" },
-        &.{ "metacodes", "--dump-prompt" },
-        &.{ "metacodes", "--teammate", "--agent-name", "x", "--team-name", "t" },
-    };
-    for (others) |argv| {
-        const config = cc.parseArgsForTest(argv, arena.allocator());
-        try std.testing.expect(!cc.interactiveRepl(config));
-    }
-}
-
-test "a /model switch before the join is what the system prompt names, as after a synchronous start" {
+test "a model switch before the join is what the system prompt names, as after a synchronous start" {
     if (builtin.os.tag == .windows) return error.SkipZigTest; // /bin/sh gate
     if (!pfs.exists(MOCK_MCP)) return error.SkipZigTest;
     var ws: Workspace = undefined;

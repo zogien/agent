@@ -951,22 +951,7 @@ test "L2: a session selection is written beside the session, not into config.jso
     try std.testing.expect(session_doc.session_selection.?.target.pinned_offer.offer_id.eql(session_target.offer_id));
 }
 
-// ── the picker as a control-plane client ─────────────────────────────────────
-
-const picker_mod = @import("cc").repl_model_picker;
-
-fn seedPicker(
-    picker: *picker_mod.Picker,
-    kernel: *cc.provider_control_plane.Kernel,
-    a: std.mem.Allocator,
-) !void {
-    var page: std.ArrayList(cc.provider_control_plane.OfferSummary) = .empty;
-    defer page.deinit(a);
-    const listed = try kernel.modelList(.{}, .{}, a, &page);
-    try picker.adopt(listed, kernel.currentOfferId());
-}
-
-test "L2: a picker-driven selection reaches the endpoint, path, and wire model it named" {
+test "L2: a session-selected offer reaches the endpoint, path, and wire model it named" {
     const a = std.testing.allocator;
     var server = try harness.MockServer.start(MINIMAL_OPENAI_SSE, 0);
     defer server.stop();
@@ -991,44 +976,13 @@ test "L2: a picker-driven selection reaches the endpoint, path, and wire model i
     defer kernel.deinit();
     kernel.registry = &registry;
 
-    var picker = picker_mod.Picker.init(a);
-    defer picker.deinit();
-    try seedPicker(&picker, &kernel, a);
-
-    // Drive the picker exactly as a keyboard would: the filter lands on the
-    // model, whose routes are listed under it; down into them.
-    // The filter matches GLM-5.3 and GLM-5.3-Flash; the flagship is listed first.
-    for ("glm-5.3") |byte| _ = picker.onKey(.{ .char = byte });
-    try std.testing.expectEqual(picker_mod.Stage.list, picker.stage);
-
-    // Walk to the OpenAI-wire China channel's route.
-    var scratch = picker_mod.Picker.RowBuffer.init(a);
-    defer scratch.deinit();
-    var guard: usize = 0;
-    const found = while (guard < 8) : (guard += 1) {
-        _ = picker.onKey(.down);
-        const rows = try picker.rows(&scratch);
-        const row = rows[picker.cursor];
-        if (row != .route) continue;
-        if (picker.offers.items[row.route.offer_index].channel_id.eqlText("cn-openai")) break true;
-    } else false;
-    try std.testing.expect(found);
-    // GLM-5.3 declares its reasoning control, on the line under the list;
-    // Enter on the route applies it as shown.
-    const outcome = picker.onKey(.enter);
-    try std.testing.expect(outcome == .commit);
-
-    const commit = outcome.commit;
-    var candidate_selection = cc.provider_selection.RuntimeSelection.pinned(
-        commit.offer_id,
-        commit.offer_revision,
-        commit.scope,
-    );
-    candidate_selection.controls = commit.controls;
-    const committed = kernel.selectionCommit(.{}, candidate_selection, commit.scope);
+    const target = for (catalog.items()) |offer| {
+        if (offer.channel_id.eqlText("cn-openai") and std.mem.eql(u8, offer.request_model_id, "glm-5.3")) break offer;
+    } else return error.OfferMissing;
+    const selection = cc.provider_selection.RuntimeSelection.pinned(target.offer_id, target.offer_revision, .session);
+    const committed = kernel.selectionCommit(.{}, selection, .session);
     try std.testing.expect(committed == .committed);
-    // Session is the default scope, so nothing durable was written by a plain
-    // Enter on the picker.
+    // A session-scoped selection leaves the durable document alone.
     try std.testing.expectEqual(cc.provider_selection.Scope.session, committed.committed.scope);
     try std.testing.expect(!committed.committed.requires_persist);
 
@@ -1072,45 +1026,6 @@ test "L2: a picker-driven selection reaches the endpoint, path, and wire model i
     try std.testing.expectEqualStrings("Bearer picked-secret", headerValue(captured, "authorization").?);
     const model_field = captured.jsonField("model") orelse return error.ModelFieldMissing;
     try std.testing.expect(std.mem.indexOf(u8, model_field, "glm-5.3") != null);
-}
-
-test "L2: the TUI picker and a second client see one catalog and one selection" {
-    const a = std.testing.allocator;
-    const host = try cc.provider_host.Host.create(a);
-    defer host.destroy();
-
-    var picker = picker_mod.Picker.init(a);
-    defer picker.deinit();
-    try seedPicker(&picker, &host.kernel, a);
-
-    // A "web client" reads the same kernel through the same API.
-    var web_page: std.ArrayList(cc.provider_control_plane.OfferSummary) = .empty;
-    defer web_page.deinit(a);
-    const web_view = try host.kernel.modelList(.{}, .{}, a, &web_page);
-    try std.testing.expectEqual(web_view.offers.len, picker.offers.items.len);
-
-    // The TUI commits; the second client observes it without being told.
-    const target = host.kernel.catalogSnapshot().items()[0];
-    const committed = host.kernel.selectionCommit(
-        .{},
-        cc.provider_selection.RuntimeSelection.pinned(target.offer_id, target.offer_revision, .session),
-        .session,
-    );
-    try std.testing.expect(committed == .committed);
-
-    var after: std.ArrayList(cc.provider_control_plane.OfferSummary) = .empty;
-    defer after.deinit(a);
-    const refreshed = try host.kernel.modelList(.{}, .{}, a, &after);
-    var marked: usize = 0;
-    for (refreshed.offers) |summary| {
-        if (summary.is_current) marked += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 1), marked);
-
-    // And the picker's own snapshot goes stale until it re-reads — it does not
-    // silently claim to be current.
-    try seedPicker(&picker, &host.kernel, a);
-    try std.testing.expect(picker.current_offer.?.eql(target.offer_id));
 }
 
 // ── user-defined providers ───────────────────────────────────────────────────
@@ -1218,19 +1133,6 @@ test "L2: a configured provider's declared metadata reaches every client the sam
     try std.testing.expectEqual(@as(?u16, 9_000), summary.quote.priced().?.discount_basis_points);
     try std.testing.expectEqual(@as(usize, 1), summary.controls.len);
     try std.testing.expectEqualStrings("reasoning_effort", summary.controls[0].id);
-
-    // And the picker renders it without knowing it was user-defined.
-    var picker = picker_mod.Picker.init(a);
-    defer picker.deinit();
-    try seedPicker(&picker, &host.kernel, a);
-    // A filter specific enough to name one provider: the stage matches what a
-    // provider serves as well as its id, so a single letter is not unique.
-    for ("house-relay") |byte| _ = picker.onKey(.{ .char = byte });
-    var scratch = picker_mod.Picker.RowBuffer.init(a);
-    defer scratch.deinit();
-    const rows = try picker.rows(&scratch);
-    try std.testing.expectEqual(@as(usize, 1), rows.len);
-    try std.testing.expect(picker.offers.items[rows[0].model.offer_index].provider_id.eqlText("house-relay"));
 
     // Token admission uses the declared limit, so a prompt that cannot fit is
     // rejected before any request exists.
@@ -1582,15 +1484,6 @@ test "L2: a provider metadata extension round-trips through the generic client v
     try std.testing.expectEqual(@as(usize, 2), spec.allowed_values.len);
     // Provider-owned metadata the kernel neither interprets nor drops.
     try std.testing.expectEqualStrings("slower and pricier", spec.cost_latency_warning.?);
-
-    // And the picker renders it without knowing which vendor it came from.
-    var picker = picker_mod.Picker.init(a);
-    defer picker.deinit();
-    try seedPicker(&picker, &kernel, a);
-    try std.testing.expectEqual(picker_mod.Stage.list, picker.stage);
-    const focused = picker.focusedOffer() orelse return error.NoFocusedRoute;
-    try std.testing.expectEqual(@as(usize, 1), focused.controls.len);
-    try std.testing.expectEqualStrings("thinking", picker_mod.firstEnumeration(focused.controls).?.id);
 }
 
 test "L2: a configured provider carries several model families and their variants" {
@@ -1885,45 +1778,4 @@ test "L2: a `--provider` startup route is a resolvable selection before any comm
     const profile = host.registry.findById(resolution.primary().provider_id).?;
     try std.testing.expect(profile.id.eqlText("openai"));
     try std.testing.expect(profile.oauth_token_url != null);
-}
-
-test "L2 (#488): a provider's setup names the variable its key is read from, and /login only for Metask" {
-    // The picker shows this for a provider with no credential, and for a
-    // commit that found none; it starts no sign-in, so it points at the
-    // place the key goes. It is decided from the provider profile.
-    const a = std.testing.allocator;
-    const host = try cc.provider_host.Host.create(a);
-    defer host.destroy();
-    try host.adoptCustomProviders(
-        \\{"custom_providers":{"relay":{
-        \\  "models":[{"request_model_id":"m","display_name":"M"}],
-        \\  "channels":[{"id":"default","base_url":"https://relay.invalid/v1","protocol":"openai_chat"}],
-        \\  "credential_kinds":["openai_oauth"],
-        \\  "oauth":{"token_url":"https://relay.invalid/token","authorize_url":"https://relay.invalid/authorize","client_id":"relay-cli"}
-        \\},"keyonly":{
-        \\  "models":[{"request_model_id":"m","display_name":"M"}],
-        \\  "channels":[{"id":"default","base_url":"https://keyonly.invalid/v1","protocol":"openai_chat"}],
-        \\  "credential_kinds":["api_key"],
-        \\  "env_aliases":[{"name":"KEYONLY_OTHER","kind":"api_key","canonical":false},{"name":"KEYONLY_TOKEN","kind":"api_key","canonical":true}]
-        \\}}}
-    );
-    const App = cc.app_module.App;
-    const cases = [_]struct { id: []const u8, variable: ?[]const u8, sign_in: bool }{
-        .{ .id = "metask", .variable = "METASK_API_KEY", .sign_in = true },
-        // The canonical alias, wherever it is declared.
-        .{ .id = "keyonly", .variable = "KEYONLY_TOKEN", .sign_in = false },
-        // A provider with an OAuth grant gets no /login pointer here either.
-        .{ .id = "relay", .variable = null, .sign_in = false },
-        .{ .id = "kimi", .variable = "MOONSHOT_API_KEY", .sign_in = false },
-        .{ .id = "kimi-code", .variable = "KIMI_CODE_API_KEY", .sign_in = false },
-        .{ .id = "gemini", .variable = "GEMINI_API_KEY", .sign_in = false },
-    };
-    for (cases) |expected| {
-        const setup = App.providerSetup(host, try cc.provider_ids.Slug.parse(expected.id));
-        try std.testing.expectEqualStrings(expected.id, setup.provider.slice());
-        if (expected.variable) |variable| {
-            try std.testing.expectEqualStrings(variable, setup.variable orelse return error.NoVariable);
-        } else try std.testing.expect(setup.variable == null);
-        try std.testing.expectEqual(expected.sign_in, setup.sign_in);
-    }
 }

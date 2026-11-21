@@ -235,7 +235,7 @@
     "src/swarm/teammate.zig",
     "src/swarm/tools.zig",
     "src/lib.zig",
-    "src/repl/tui/widget/tool_card.zig",
+    "src/repl/stream_json_backend.zig",
     "sdk/metask/agentcore.h",
     "sdk/zig/protocol.zig",
     "sdk/zig/build.zig",

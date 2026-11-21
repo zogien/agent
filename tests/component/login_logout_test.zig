@@ -265,7 +265,7 @@ fn currentOffer(app: *App) !?*const cc.provider_registry.ModelOffer {
 /// bound, never sent.)
 fn expectMetaskPickRefused(app: *App) !void {
     const offer = try offerIdText(app, "metask", "claude-sonnet-4-6", "anthropic_messages");
-    const outcome = cc.repl_picker_host.useSelector(app, &offer);
+    const outcome = @import("offer_fixture.zig").useSelector(app, &offer);
     if (outcome != .failed) {
         std.debug.print("a Metask pick after /logout was not refused: {s}\n", .{@tagName(outcome)});
         return error.SignedOutKeyStillOffered;
@@ -433,7 +433,7 @@ test "/login: the stored Metask session becomes the session's route at once, its
     // The session started without a credential; after /login, Metask's other
     // models are usable in /model too, with the session's token.
     const offer = try offerIdText(app, "metask", "glm-5-air", "anthropic_messages");
-    try testing.expect(cc.repl_picker_host.useSelector(app, &offer) == .switched);
+    try testing.expect(@import("offer_fixture.zig").useSelector(app, &offer) == .switched);
     try sendOneTurn(app);
     const picked = gateway.lastRequest() orelse return error.NoRequestCaptured;
     try testing.expectEqualStrings("Bearer " ++ SESSION_TOKEN, headerValue(picked, "authorization").?);
@@ -468,7 +468,7 @@ test "a session built without a key offers no empty Metask key: a Metask pick re
     try host.ingestMetask(try originOf(a, gateway), GATEWAY_MODELS, .messages);
 
     const offer = try offerIdText(app, "metask", "glm-5-air", "anthropic_messages");
-    const outcome = cc.repl_picker_host.useSelector(app, &offer);
+    const outcome = @import("offer_fixture.zig").useSelector(app, &offer);
     if (outcome != .switched) {
         std.debug.print("the pick was not applied: {s}\n", .{if (outcome == .failed) outcome.failed else @tagName(outcome)});
         return error.EmptyKeyBlockedResolution;
@@ -517,7 +517,7 @@ test "/login from a key route, then again: each new session replaces the key and
     try sendOneTurn(app);
     try testing.expectEqualStrings("Bearer " ++ NEW_SESSION_TOKEN, headerValue(gateway.lastRequest().?, "authorization").?);
     const offer = try offerIdText(app, "metask", "glm-5-air", "anthropic_messages");
-    try testing.expect(cc.repl_picker_host.useSelector(app, &offer) == .switched);
+    try testing.expect(@import("offer_fixture.zig").useSelector(app, &offer) == .switched);
     try sendOneTurn(app);
     const captured = gateway.lastRequest() orelse return error.NoRequestCaptured;
     try testing.expectEqualStrings("Bearer " ++ NEW_SESSION_TOKEN, headerValue(captured, "authorization").?);
@@ -557,7 +557,7 @@ test "a second /login's first request carries its own token to its own gateway, 
     );
     try testing.expect(applied.switch_error == null and applied.storage_error == null);
     const air = try offerIdText(app, "metask", "glm-5-air", "anthropic_messages");
-    try testing.expect(cc.repl_picker_host.useSelector(app, &air) == .switched);
+    try testing.expect(@import("offer_fixture.zig").useSelector(app, &air) == .switched);
     try testing.expect(app.oauth_session != null);
     try sendOneTurn(app);
     try testing.expectEqualStrings("Bearer " ++ SESSION_TOKEN, headerValue(first.lastRequest().?, "authorization").?);
@@ -852,7 +852,7 @@ test "/login that cannot move the session leaves the previous route and models w
     try testing.expectEqualStrings("Bearer " ++ SESSION_TOKEN, headerValue(gateway.lastRequest().?, "authorization").?);
     try testing.expectEqual(@as(usize, 0), second_gateway.requestCount());
     const offer = try offerIdText(app, "metask", "glm-5-air", "anthropic_messages");
-    try testing.expect(cc.repl_picker_host.useSelector(app, &offer) == .switched);
+    try testing.expect(@import("offer_fixture.zig").useSelector(app, &offer) == .switched);
     try sendOneTurn(app);
     const picked = gateway.lastRequest() orelse return error.NoRequestCaptured;
     try testing.expectEqualStrings("Bearer " ++ SESSION_TOKEN, headerValue(picked, "authorization").?);
@@ -959,7 +959,7 @@ test "/logout with .env configuring Metask: the session goes on with .env's key 
     try testing.expectEqualStrings("Bearer " ++ file_key, headerValue(gateway.lastRequest().?, "authorization").?);
     // Another of the account's models: still `.env`'s key.
     const offer = try offerIdText(app, "metask", "glm-5-air", "anthropic_messages");
-    try testing.expect(cc.repl_picker_host.useSelector(app, &offer) == .switched);
+    try testing.expect(@import("offer_fixture.zig").useSelector(app, &offer) == .switched);
     try sendOneTurn(app);
     try testing.expectEqualStrings("Bearer " ++ file_key, headerValue(gateway.lastRequest().?, "authorization").?);
     for (signed_out_at..gateway.requestCount()) |index| {
@@ -1033,7 +1033,7 @@ test "/logout forgets a Metask default in the kernel too, at the store's revisio
     try testing.expectEqual(document.config_revision.value(), host.kernel.config_revision.value());
 }
 
-test "a named provider without its key starts unbound: no offer is marked current, in the picker or /providers (#485)" {
+test "a named provider without its key starts unbound: the kernel marks no current offer (#485)" {
     var case: Case = undefined;
     try case.init();
     defer case.deinit();
@@ -1071,9 +1071,6 @@ test "a named provider without its key starts unbound: no offer is marked curren
     for (listed.offers) |summary| try testing.expect(!summary.is_current);
     const described = host.kernel.modelDescribe(try cc.provider_ids.OfferId.parse(&named)) orelse return error.OfferMissing;
     try testing.expect(!described.is_current);
-    // The picker marks the kernel's current offer.
-    try app.refreshModelPicker();
-    try testing.expect(app.model_picker.current_offer == null);
     try testing.expectEqual(@as(usize, 0), relay.requestCount());
 }
 
@@ -1094,7 +1091,7 @@ test "/logout <provider>: the stored key goes, and a session that ran on it hold
     config.state_root = case.state;
     const app = try App.initWithOptions(testing.allocator, io_runtime.io(), config, "", .{ .route_state = .{ .unbound = .nothing_configured } });
     defer app.deinit();
-    try testing.expect(cc.repl_picker_host.useSelector(app, "relay-model") == .switched);
+    try testing.expect(@import("offer_fixture.zig").useSelector(app, "relay-model") == .switched);
     var line_buf: [256]u8 = undefined;
     try testing.expectEqualStrings("relay-model · saved key", app.bannerModelLine(&line_buf));
 

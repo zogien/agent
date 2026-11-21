@@ -163,7 +163,7 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(scope, "full")
         self.assertIn("src/main.zig", reason)
         self.assertNotIn("scripts/eval/cli.py", reason)
-        for path in ("build.zig", "scripts/release_cut.py", ".github/workflows/ci.yml", "tests/tty/tty_driver.py", "scripts/evaluate.py"):
+        for path in ("build.zig", "scripts/release_cut.py", ".github/workflows/ci.yml", "tests/e2e/headless_stop_notice_e2e.py", "scripts/evaluate.py"):
             with self.subTest(path=path):
                 self.assertEqual(ci_scope.classify([path])[0], "full")
 

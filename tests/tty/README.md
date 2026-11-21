@@ -1,5 +1,8 @@
 # metacodes 系统化 TTY 测试框架
 
+> These fixtures describe the retired interactive CLI. The headless hangup
+> regression now runs in [the headless product suite](../e2e/headless_stop_notice_e2e.py).
+
 把 RenderRegion(底部锚定输入框)emit 的 ANSI 字节流**回放成虚拟屏幕网格**,
 从而像人眼一样断言 TUI 布局/光标/钉底,自动发现渲染 bug(跳动/错位/残留/resize 不生效)。
 

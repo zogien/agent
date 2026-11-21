@@ -112,7 +112,6 @@ const provider_selection_mod = @import("provider/selection.zig");
 const provider_ids_mod = @import("provider/ids.zig");
 const provider_credential_mod = @import("provider/credential.zig");
 const provider_config_doc = @import("provider/config_doc.zig");
-const model_picker_mod = @import("repl/model_picker.zig");
 const route_strings_mod = @import("app/route_strings.zig");
 pub const route_state_mod = @import("app/route_state.zig");
 const sign_out_mod = @import("app/sign_out.zig");
@@ -272,61 +271,6 @@ fn installCliProcessError(
 /// session 内的 binding 指针指向同一个 client；client 必须比 session 活得久。
 pub const McpSessionEntry = @import("core/mcp_session.zig").McpSessionEntry;
 
-pub const PendingOverlay = enum {
-    none,
-    /// `/model` asked for the picker: open it fresh.
-    model_picker,
-    /// A reply ended while the picker was on screen (#220). Each phase draws
-    /// its own region, so the next one shows the picker again as it was left:
-    /// same stage, filter and cursor, sign-in still running.
-    model_picker_kept,
-    transcript,
-};
-
-/// The TUI theme for this terminal: monochrome under `--no-theme`; otherwise
-/// the `theme` persisted in `<state root>/config.json`, else auto. Auto on a
-/// colour terminal asks the terminal for its background (OSC 11, a short
-/// raw-mode read of stdin) and settles on dark or light (as mecode does). A
-/// persisted variant wins over the probe; `METACODES_NO_PROBE` and a terminal
-/// without colour skip it.
-pub fn resolveThemeVariant(allocator: std.mem.Allocator, no_theme: bool, state_root: []const u8) @import("repl/tui/theme.zig").Variant {
-    return settleTerminal(allocator, no_theme, state_root, .theme);
-}
-
-/// resolveThemeVariant for the interactive REPL, which must also know before
-/// it first takes the terminal whether to turn on the Kitty keyboard protocol
-/// (Shift+Enter as a newline). A terminal `input.keyboardPolicy` cannot place
-/// from its environment is asked in the same round trip as its background
-/// (#327); `METACODES_NO_PROBE` skips both questions, leaving the protocol off.
-pub fn resolveInteractiveTerminal(allocator: std.mem.Allocator, no_theme: bool, state_root: []const u8) @import("repl/tui/theme.zig").Variant {
-    return settleTerminal(allocator, no_theme, state_root, .theme_and_keyboard);
-}
-
-fn settleTerminal(
-    allocator: std.mem.Allocator,
-    no_theme: bool,
-    state_root: []const u8,
-    questions: enum { theme, theme_and_keyboard },
-) @import("repl/tui/theme.zig").Variant {
-    const bg_probe = @import("repl/tui/bg_probe.zig");
-    const input = @import("repl/input.zig");
-    const persisted = if (no_theme or state_root.len == 0) null else @import("repl/tui/config.zig").loadTheme(allocator, state_root);
-    const variant: @import("repl/tui/theme.zig").Variant = if (no_theme) .monochrome else persisted orelse .auto;
-    if (std.c.getenv("METACODES_NO_PROBE") != null) return variant;
-    const want: bg_probe.Want = .{
-        .background = variant == .auto and @import("repl/tui/term.zig").detectFromEnv(1) != .none,
-        .keyboard = questions == .theme_and_keyboard and input.keyboardPolicy() == .probe,
-    };
-    if (!want.any()) return variant;
-    // The interactive REPL takes the terminal next: a round its deadline cut
-    // short keeps reading its answers until then (`bg_probe.handOver`).
-    const answer = bg_probe.probe(want, questions == .theme_and_keyboard);
-    if (want.keyboard) input.recordKeyboardProbe(answer.keyboard == .supported);
-    if (variant != .auto) return variant;
-    const bg = answer.background orelse return variant;
-    return if (bg_probe.isLight(bg)) .light else .dark;
-}
-
 /// `App.api_key_catalog_load`.
 pub const ApiKeyCatalogLoad = enum {
     /// This route has no account key list (not Anthropic, a Metask device
@@ -428,14 +372,6 @@ pub const App = struct {
     /// The provider `<state root>/.env` configures, which `/logout` falls
     /// back to (#485). Borrowed from the host; null when it configures none.
     local_provider: ?LocalProvider = null,
-    /// Said once under the banner, one notice per line: a stored default
-    /// passed over for want of a credential (#485), `.env`'s provider ranked
-    /// below Metask, `.env` keys of several providers and none chosen (#486).
-    /// Borrowed from the host.
-    startup_notice: ?[]const u8 = null,
-    /// Cross-UI picker state. Present whether or not it is on screen, so a
-    /// reopened picker does not have to refetch the catalog.
-    model_picker: model_picker_mod.Picker = undefined,
     /// `/login` sign-ins cancelled with Esc while their thread was still in a
     /// request it cannot abandon (the first device-code POST). The dialog
     /// closes at once; the thread is joined once it settles (`reapLoginWorkers`)
@@ -447,10 +383,6 @@ pub const App = struct {
     /// Strings a committed route lends to the live clients. Keeps one previous
     /// generation readable; see `app/route_strings.zig` for why.
     route_strings: route_strings_mod.RouteStrings = undefined,
-    /// A slash command asked for a full-region overlay. Commands are handled
-    /// after the input reader returns, so the request is parked here and the
-    /// next read consumes it.
-    pending_overlay: PendingOverlay = .none,
     /// One OAuth session per provider, kept for the process.
     ///
     /// Single flight is a property of a `Session` object, so a fresh one per
@@ -498,7 +430,7 @@ pub const App = struct {
 
     // ── ProcessContainer 区(进程级,逻辑上只读)──────────────────────────────
     // config / api_key / api_client / tool_defs / enabled_tool_names / skills / agents /
-    // dyn_registry / settings / sandbox_settings / hooks / rule_set / theme*。
+    // dyn_registry / settings / sandbox_settings / hooks / rule_set。
     // 逻辑上只读配置/能力。**当前每 App 各持一份**(各自 Client/SkillSet…)。真多 session 时,
     // tool_defs/skills/agents 可提取到共享 ProcessContainer(只读,省内存);**api_client 建议保持
     // per-session**(避免共享 http 连接的线程竞争,同 agent_job_registry 每 job 一个 Client)。
@@ -628,10 +560,6 @@ pub const App = struct {
     /// refresh 骑 emitConfig；/state(HTTP 线程)经 snapshotSlices 安全读。setConfigEventSink 装配时
     /// seed + 每 emit refresh。null 化在 deinit。见 SnapshotCache。
     snapshot_cache: ?SnapshotCache = null,
-    /// 当前 TUI 主题(启动时根据 --no-theme + ColorCapability 选;/theme 可改)。
-    theme: @import("repl/tui/theme.zig").Theme = @import("repl/tui/theme.zig").dark,
-    /// 当前主题 variant(/theme 命令读它显示当前)。
-    theme_variant: @import("repl/tui/theme.zig").Variant = .auto,
     /// 后台 Bash 作业注册表（失败初始化则 null）
     jobs: ?JobRegistry = null,
     /// 后台 subagent 作业注册表（Task run_in_background）。失败初始化则 null。
@@ -708,11 +636,6 @@ pub const App = struct {
 
     /// What a host settles before `App.init` instead of leaving it to init.
     pub const InitOptions = struct {
-        /// The TUI theme, already resolved (`resolveThemeVariant`). The CLI
-        /// resolves it first so the startup splash can play while init runs;
-        /// init must not query the terminal (OSC 11) while the splash owns it.
-        /// Null resolves it here.
-        theme_variant: ?@import("repl/tui/theme.zig").Variant = null,
         /// Answer `/v1/models` from the state root's copy of an earlier
         /// start's answer when it is fresh, refreshing it in the background
         /// (`api/models_cache.zig`). Only the REPL sets it: it is the host
@@ -727,8 +650,6 @@ pub const App = struct {
         unchosen_local_providers: []const []const u8 = &.{},
         /// `App.local_provider`; borrowed for the App's life.
         local_provider: ?LocalProvider = null,
-        /// `App.startup_notice`; borrowed for the App's life.
-        startup_notice: ?[]const u8 = null,
     };
 
     /// The provider `<state root>/.env` configures (#486): its
@@ -767,12 +688,10 @@ pub const App = struct {
             .config = config,
             .api_key = api_key,
             .api_key_catalog = api_keys_mod.Catalog.init(allocator),
-            .model_picker = model_picker_mod.Picker.init(allocator),
             .route_strings = route_strings_mod.RouteStrings.init(allocator),
             .route_state = options.route_state,
             .unchosen_local_providers = options.unchosen_local_providers,
             .local_provider = options.local_provider,
-            .startup_notice = options.startup_notice,
             // 本会话身份(路由 + transcript 目录)。`--session <id>` 显式指定(subprocess resume 复用
             // 挂起 session 的目录,task#20);否则 gen 新的。非法/非 24-char id 回退 gen。
             .session_id = if (config.session_id) |s|
@@ -930,11 +849,6 @@ pub const App = struct {
             app.project_dir = @import("skills/skill.zig").findRepoRoot(allocator, cwd) catch null;
             app.cwd_abs = allocator.dupe(u8, cwd) catch null;
         }
-
-        // 选 TUI 主题(见 resolveThemeVariant);宿主已解析过就沿用,不再探终端。
-        const theme_mod = @import("repl/tui/theme.zig");
-        app.theme_variant = options.theme_variant orelse resolveThemeVariant(allocator, config.no_theme, app.stateRoot());
-        app.theme = theme_mod.select(app.theme_variant, @import("repl/tui/term.zig").detectFromEnv(1));
 
         // 模型档位表(model_tiers):同一份 <state root>/config.json。解析失败降级为
         // 未配置(档位名全 inherit)并告警——配置拼写错误不该炸启动,但绝不静默。
@@ -1423,31 +1337,6 @@ pub const App = struct {
         };
     }
 
-    /// Where the credential of a route `judgeReadiness` bound comes from, in
-    /// the terms of the picker's provider heading: the provider's own sign-in
-    /// (the Metask session included), a saved key, `.env`, the shell,
-    /// `--api-key`; a Metask key otherwise. `oauth` and `stored` are the
-    /// sign-in and the saved key the binding was offered.
-    fn noteOrigin(
-        host: *provider_host_mod.Host,
-        binding: provider_binding_mod.RuntimeBinding,
-        oauth: ?provider_credential_mod.StoredEntry,
-        stored: ?provider_credential_mod.StoredEntry,
-    ) model_picker_mod.ProviderNote.Origin {
-        if (oauth) |entry| if (binding.secret.ptr == entry.secret.ptr) return .signed_in;
-        if (stored) |entry| if (binding.secret.ptr == entry.secret.ptr) return .saved_key;
-        return switch (bindingOrigin(host, binding, null, null)) {
-            .unknown => .unknown,
-            // `METASK_API_KEY`, a key in `auth.json`, `--api-key` on Metask.
-            .metask => .key,
-            .local_config => .local_config,
-            .environment => .environment,
-            .saved_key => .saved_key,
-            .sign_in => .signed_in,
-            .flag => .flag,
-        };
-    }
-
     // ── /login and /logout (#485) ───────────────────────────────────────────
 
     /// What `/login` hands over once its dialog is done: the key, model and
@@ -1533,7 +1422,7 @@ pub const App = struct {
             app.selected_api_key_owned = previous_key;
             if (app.metask_key_route) |*attempted| attempted.deinit(app.allocator);
             app.metask_key_route = previous_route;
-            app.restoreMetaskOffers(host, previous_profile, previous_selection);
+            restoreMetaskOffers(host, previous_profile, previous_selection);
         }
 
         try host.ingestMetask(attempt.route.gateway_origin, document, .messages);
@@ -1566,7 +1455,6 @@ pub const App = struct {
             @import("util/log.zig").warn("catalog", "child catalog snapshot refresh failed: {s}", .{@errorName(err)});
         };
         // A picker kept open lists the new inventory.
-        app.refreshModelPicker() catch app.model_picker.markFailed();
         if (sign_in.effort) |effort| app.setReasoningEffort(effort) catch |err| {
             @import("util/log.zig").warn("provider", "reasoning effort {s} not applied: {s}", .{ effort.name(), @errorName(err) });
         };
@@ -1661,7 +1549,7 @@ pub const App = struct {
             app.config.metask_oauth_selected = previous_oauth_selected;
             app.selected_api_key_owned = previous_key;
             app.metask_key_route = previous_route;
-            app.restoreMetaskOffers(host, previous_profile, previous_selection);
+            restoreMetaskOffers(host, previous_profile, previous_selection);
         }
 
         // The process keeps one OAuth session object (single flight), and the
@@ -1718,7 +1606,6 @@ pub const App = struct {
             @import("util/log.zig").warn("catalog", "child catalog snapshot refresh failed: {s}", .{@errorName(err)});
         };
         // A picker kept open lists the new inventory.
-        app.refreshModelPicker() catch app.model_picker.markFailed();
         if (sign_in.effort) |effort| app.setReasoningEffort(effort) catch |err| {
             @import("util/log.zig").warn("provider", "reasoning effort {s} not applied: {s}", .{ effort.name(), @errorName(err) });
         };
@@ -1833,7 +1720,6 @@ pub const App = struct {
     /// previous profile, and the session selection the kernel held. Under
     /// memory pressure the catalog may not rebuild; that is logged.
     fn restoreMetaskOffers(
-        app: *App,
         host: *provider_host_mod.Host,
         profile: ?@import("provider/profile.zig").ProviderProfile,
         selection: ?provider_selection_mod.RuntimeSelection,
@@ -1842,7 +1728,6 @@ pub const App = struct {
             @import("util/log.zig").warn("catalog", "the previous Metask models were not restored: {s}", .{@errorName(err)});
         };
         if (selection) |value| host.kernel.replaceSessionSelection(value) else host.kernel.forgetSessionSelection();
-        app.refreshModelPicker() catch app.model_picker.markFailed();
     }
 
     /// Retire `key`, a `selected_api_key_owned` the session no longer uses
@@ -2168,7 +2053,6 @@ pub const App = struct {
             app.allocator.destroy(worker);
             slot.* = null;
         };
-        app.model_picker.deinit();
         if (app.oauth_session) |*session| session.deinit();
         if (app.provider_host) |host| host.destroy();
         app.route_strings.deinit();
@@ -2420,7 +2304,6 @@ pub const App = struct {
         if (app.provider_host) |host| {
             app.applyMetaskKeyCatalog(host);
             app.seedStartupSelection(host);
-            app.refreshModelPicker() catch app.model_picker.markFailed();
         }
     }
 
@@ -2698,134 +2581,6 @@ pub const App = struct {
         return token;
     }
 
-    /// Refresh the picker's snapshot from the kernel. Called when the picker
-    /// opens and whenever the catalog moves underneath it.
-    pub fn refreshModelPicker(app: *App) !void {
-        var listing = try app.listModelOffers();
-        defer listing.deinit(app.allocator);
-        try app.adoptModelListing(&listing);
-    }
-
-    /// The kernel's model list, taken without touching the picker. A caller
-    /// whose picker other threads draw (a reply's, #328) lists outside its
-    /// lock and adopts under it (`picker_host`).
-    pub const ModelListing = struct {
-        page: std.ArrayList(provider_control_plane.OfferSummary) = .empty,
-        /// Borrows `page`. Null when the kernel could not list the catalog.
-        listed: ?provider_control_plane.ListPage = null,
-        current: ?provider_control_plane.OfferId = null,
-        /// Per offer of `page`: a commit could bind it now (#488).
-        ready: std.ArrayList(bool) = .empty,
-        /// Where each provider with no ready offer gets its credential.
-        setups: std.ArrayList(model_picker_mod.Setup) = .empty,
-        /// What each provider with a ready offer says in its heading: its
-        /// name, and where the credential a commit would use comes from.
-        notes: std.ArrayList(model_picker_mod.ProviderNote) = .empty,
-
-        pub fn deinit(listing: *ModelListing, allocator: std.mem.Allocator) void {
-            listing.page.deinit(allocator);
-            listing.ready.deinit(allocator);
-            listing.setups.deinit(allocator);
-            listing.notes.deinit(allocator);
-        }
-    };
-
-    /// Fails only when the provider host cannot be built.
-    pub fn listModelOffers(app: *App) !ModelListing {
-        const host = try app.providerHost();
-        var listing: ModelListing = .{};
-        errdefer listing.deinit(app.allocator);
-        listing.listed = host.kernel.modelList(.{}, .{}, app.allocator, &listing.page) catch null;
-        listing.current = host.kernel.currentOfferId();
-        if (listing.listed != null) try app.judgeReadiness(host, &listing);
-        return listing;
-    }
-
-    /// Make `listing` the picker's snapshot; a catalog that could not be
-    /// listed marks the picker failed.
-    pub fn adoptModelListing(app: *App, listing: *const ModelListing) !void {
-        const listed = listing.listed orelse return app.model_picker.markFailed();
-        try app.model_picker.adopt(listed, listing.current);
-        try app.model_picker.setReadiness(listing.ready.items, listing.setups.items, listing.notes.items);
-    }
-
-    /// Which offers of `listing` a commit could bind now (#488): for each, the
-    /// binding `bindCommittedSelection` runs, from the same credential
-    /// material (`credentialSources`), without a request. The one difference
-    /// is the OAuth token a commit refreshes first: here a stored login
-    /// stands for it (`oauthLoginStored`). Every provider none of whose
-    /// offers is ready gets its setup. Reads files (the pool's config.json,
-    /// stored keys and logins), once per provider.
-    fn judgeReadiness(app: *App, host: *provider_host_mod.Host, listing: *ModelListing) !void {
-        const offers = listing.page.items;
-        try listing.ready.resize(app.allocator, offers.len);
-        @memset(listing.ready.items, false);
-        const snapshot = host.kernel.catalogSnapshot();
-        const now = @import("util/time.zig").nowUnix();
-        var pool: CredentialPool = .{};
-        pool.load(app);
-        defer pool.deinit();
-        for (offers, 0..) |summary, first| {
-            const provider_id = summary.provider_id;
-            // Each provider once, from its first offer.
-            const seen = for (offers[0..first]) |earlier| {
-                if (earlier.provider_id.eql(provider_id)) break true;
-            } else false;
-            if (seen) continue;
-            const profile = host.registry.findById(provider_id);
-            var stored = StoredKey.load(app, provider_id, .quiet);
-            defer stored.deinit();
-            const oauth: ?provider_credential_mod.StoredEntry = if (profile) |built|
-                (if (app.oauthLoginStored(built)) .{ .kind = oauthKindOf(built), .secret = "stored login" } else null)
-            else
-                null;
-            const sources = app.credentialSources(provider_id, &pool, &stored, oauth, now);
-            var any_ready = false;
-            var origin: model_picker_mod.ProviderNote.Origin = .unknown;
-            for (offers[first..], first..) |candidate, index| {
-                if (!candidate.provider_id.eql(provider_id)) continue;
-                const offer = snapshot.find(candidate.offer_id) orelse continue;
-                var reference_buffer: [provider_ids_mod.MAX_SLUG_LEN]u8 = undefined;
-                // Only a missing credential makes a route not configured. Any
-                // other refusal (two names of its key that disagree, a kind
-                // the provider does not take, a wire it cannot drive) is not
-                // cured by setting the variable the setup would name, so the
-                // route stays listed and a commit reports why, as before.
-                if (provider_binding_mod.bindOffer(&host.registry, offer, sources, &reference_buffer, false)) |binding| {
-                    // The first route that binds says where the provider's
-                    // credential comes from, for its heading in the picker.
-                    if (!any_ready) origin = noteOrigin(host, binding, oauth, stored.entry());
-                } else |err| switch (err) {
-                    error.MissingCredentials => continue,
-                    else => {},
-                }
-                listing.ready.items[index] = true;
-                any_ready = true;
-            }
-            if (!any_ready) {
-                try listing.setups.append(app.allocator, providerSetup(host, provider_id));
-            } else {
-                const name = if (profile) |built| built.display_name else provider_id.slice();
-                try listing.notes.append(app.allocator, model_picker_mod.ProviderNote.init(provider_id, name, origin));
-            }
-        }
-    }
-
-    /// Where `provider` gets its credential, for the picker's setup (#488):
-    /// the variable its key is read from (the canonical alias, else the
-    /// first), and, for Metask, `/login`.
-    pub fn providerSetup(host: *provider_host_mod.Host, provider_id: provider_ids_mod.Slug) model_picker_mod.Setup {
-        const profile = host.registry.findById(provider_id) orelse return .{ .provider = provider_id };
-        const variable: ?[]const u8 = for (profile.env_aliases) |alias| {
-            if (alias.canonical) break alias.name;
-        } else if (profile.env_aliases.len > 0) profile.env_aliases[0].name else null;
-        return .{
-            .provider = profile.id,
-            .variable = variable,
-            .sign_in = profile.id.eqlText("metask"),
-        };
-    }
-
     /// The kind an OAuth token for `built` is presented as: the profile's
     /// own, not a constant. A profile that accepts only `openai_codex_oauth`
     /// would reject a token labelled `openai_oauth`, and the failure would
@@ -2835,22 +2590,6 @@ pub const App = struct {
             if (provider_oauth_mod.servesKind(kind)) return kind;
         }
         return .openai_oauth;
-    }
-
-    /// Whether a commit onto `built` would get an OAuth token from a stored
-    /// login, judged without a request: `oauthAccessToken`'s conditions,
-    /// with the login on disk standing for the token a refresh would give.
-    fn oauthLoginStored(app: *App, built: *const @import("provider/profile.zig").ProviderProfile) bool {
-        if (built.id.eqlText("metask") and !app.config.metask_oauth_selected) return false;
-        if (built.oauth_token_url == null) return false;
-        var serves = false;
-        for (built.accepted_credential_kinds) |kind| {
-            if (provider_oauth_mod.servesKind(kind)) serves = true;
-        }
-        if (!serves) return false;
-        var session = provider_oauth_mod.Session.initHome(app.allocator, app.stateRoot(), built.id) catch return false;
-        defer session.deinit();
-        return session.load() catch false;
     }
 
     /// The configured credential pool as a binding reads it. The document
@@ -2962,9 +2701,16 @@ pub const App = struct {
     /// offer to real transport parameters, and only then move the session onto
     /// it. A rejection at any step leaves the previous runtime untouched, which
     /// is why nothing is mutated until the binding exists.
+    pub const ModelCommit = struct {
+        offer_id: provider_ids_mod.OfferId,
+        offer_revision: provider_ids_mod.OfferRevision,
+        controls: @import("provider/controls.zig").ControlValues,
+        scope: provider_selection_mod.Scope,
+    };
+
     pub fn commitModelSelection(
         app: *App,
-        commit: model_picker_mod.Commit,
+        commit: ModelCommit,
     ) !provider_control_plane.CommitOutcome {
         const host = try app.providerHost();
         app.last_persist_error = null;
@@ -4389,31 +4135,6 @@ pub const App = struct {
         app.setPermMode(nextPermMode(app.permMode()));
     }
 
-    /// 设置 TUI 主题(变体 → 派生 theme → 持久化 <state root>/config.json)。U2 S1:抽出
-    /// 原 loop.zig handleTheme 的**状态操作**(变体/theme/持久化),渲染留调用方。
-    /// 返回 true=已持久化，false=无 HOME 跳过持久化(theme 仍已切);持久化 IO 失败返 error。
-    /// cap 探测走 term(UI 环境)——init 也这么做。
-    pub fn setTheme(app: *App, variant: @import("repl/tui/theme.zig").Variant) !bool {
-        const theme_mod = @import("repl/tui/theme.zig");
-        const tui_term = @import("repl/tui/term.zig");
-        app.theme_variant = variant;
-        const cap = tui_term.detectFromEnv(1);
-        app.theme = theme_mod.select(variant, cap);
-        const tui_config = @import("repl/tui/config.zig");
-        const state_dir = app.stateRoot();
-        if (state_dir.len == 0) return false;
-        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer arena.deinit();
-        try tui_config.saveTheme(arena.allocator(), state_dir, variant);
-        return true;
-    }
-
-    /// 翻转 editor vim 模式,返回新值。U2 S1:抽出原 loop.zig /vim 内联翻转。
-    pub fn toggleVim(app: *App) bool {
-        app.config.vim_mode = !app.config.vim_mode;
-        return app.config.vim_mode;
-    }
-
     pub const CompactResult = struct { dropped: usize, before: usize, after: usize };
 
     /// 压缩上下文窗口(投影语义:原始消息不删,推进 boundary)。返回结构化结果供各 UI 渲染。
@@ -5735,16 +5456,6 @@ test "U5 B3(判别性): 确定性证明读序**必须** seq→cache——正序�
         // 逆序下 m_idx(3)+1=4 < seq(6) → 缺口成立。断言"逆序确实撕出缺口"(证读序 load-bearing)。
         try std.testing.expect(m_idx + 1 < seq);
     }
-}
-
-test "U2 S1: toggleVim 翻转 config.vim_mode 返回新值" {
-    var app: App = undefined;
-    app.config = types.Config{}; // 默认 vim_mode=false
-    try std.testing.expect(!app.config.vim_mode);
-    try std.testing.expect(app.toggleVim()); // → true
-    try std.testing.expect(app.config.vim_mode);
-    try std.testing.expect(!app.toggleVim()); // → false
-    try std.testing.expect(!app.config.vim_mode);
 }
 
 test "KG domain override binds isolated worktrees and rejects unsafe identifiers" {

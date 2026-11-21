@@ -119,9 +119,8 @@ class TerminalIoDisciplineTest(unittest.TestCase):
             "other pfs.read",
         )
 
-    def test_the_rule_still_sees_the_repl(self):
-        # An empty scan would pass trivially; the seam itself must be in it.
-        self.assertIn(Path("src/repl/input.zig"), governed_sources(ROOT))
+    def test_the_rule_still_sees_headless_and_permission_input(self):
+        self.assertIn(Path("src/repl/headless.zig"), governed_sources(ROOT))
         self.assertIn(Path("src/permission/prompt.zig"), governed_sources(ROOT))
 
     def test_scanner_reports_unchecked_reads_and_raw_writes(self):

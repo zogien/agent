@@ -298,7 +298,7 @@ test "the line names the provider a /model pick moved the session to" {
     const on_metask = (try cc.repl_next_step.forFailure(a, app, &rejected, .interactive)) orelse return error.NoNextStep;
     try testing.expectEqualStrings("Your Metask sign-in is no longer valid. Sign in again: /login", on_metask);
 
-    try testing.expect(cc.repl_picker_host.useSelector(app, "relay-model") == .switched);
+    try testing.expect(@import("offer_fixture.zig").useSelector(app, "relay-model") == .switched);
     const on_relay = (try cc.repl_next_step.forFailure(a, app, &rejected, .interactive)) orelse return error.NoNextStep;
     try testing.expectEqualStrings(try std.fmt.allocPrint(
         a,

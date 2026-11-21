@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plain headless says why a failed Run stopped (issue #417).
+"""Headless streaming, recovery, and exit status against loopback providers.
 
 The installed `metacodes -p` against a loopback mock provider in this process
 (no network, no paid call), asserting on the real exit code, stdout and stderr:
@@ -16,7 +16,9 @@ The installed `metacodes -p` against a loopback mock provider in this process
      `--json` stays quiet;
   5. controls: an answer that recovers on the last continuation and a plain
      `end_turn` exit 0 with no notice; an HTTP 402 keeps its own diagnostic and
-     does not gain this one.
+     does not gain this one;
+  6. NDJSON streaming and a successful cross-process resume;
+  7. an ignored hangup does not end the Run (POSIX).
 
 Run by `zig build test:product` (METACODES_NATIVE_E2E_BIN set by build.zig);
 by hand: `zig build && python3 tests/e2e/headless_stop_notice_e2e.py`.
@@ -143,6 +145,7 @@ class Mock(http.server.ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), Handler)
         self.script: list = []
         self.requests = 0
+        self.bodies: list[bytes] = []
         self.lock = threading.Lock()
         self.responding = threading.Event()
         self.release = threading.Event()
@@ -155,17 +158,19 @@ class Mock(http.server.ThreadingHTTPServer):
         """Answer the next requests from `script`; the last entry repeats."""
         self.script = script
         self.requests = 0
+        self.bodies.clear()
         self.responding.clear()
         self.release.clear()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self) -> None:
-        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        request_body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         server: Mock = self.server  # type: ignore[assignment]
         with server.lock:
             index = min(server.requests, len(server.script) - 1)
             server.requests += 1
+            server.bodies.append(request_body)
             entry = server.script[index]
         if isinstance(entry, dict):  # an HTTP error body
             body = json.dumps(entry).encode()
@@ -182,7 +187,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(entry[0])
             self.wfile.flush()
             server.responding.set()
-            server.release.wait(TIMEOUT)
+            if server.release.wait(TIMEOUT) and len(entry) == 2:
+                self.wfile.write(entry[1])
             return
         self.wfile.write(entry)
 
@@ -259,14 +265,14 @@ def exhaustion_plain_and_json(runner: Runner) -> None:
             print(f"ok: {label}")
 
 
-def resume_session(runner: Runner) -> str:
+def resume_session(runner: Runner) -> Path:
     """Suspend a Run on AskUserQuestion; the id of the session to resume."""
     code, _out, err = runner.run([ASK_USER], "-p", "please ask", "--suspendable")
     check(code == 2, f"resume setup: exit {code}, expected the suspended 2: {err!r}")
     found = re.search(r"session dir: (.+)", err)
     check(found is not None, f"resume setup: no session dir: {err!r}")
     assert found is not None
-    return Path(found.group(1).strip()).name
+    return Path(found.group(1).strip())
 
 
 def exhaustion_on_resume(runner: Runner) -> None:
@@ -274,16 +280,72 @@ def exhaustion_on_resume(runner: Runner) -> None:
     for visible in (False, True):
         label = f"resume {'visible text' if visible else 'no visible text'}"
         script = exhausting(anthropic, visible)
-        session = resume_session(runner)
+        session = resume_session(runner).name
         code, out, err = runner.run(script, "--session", session, "--resume-response", answer)
         check_exhausted_plain(label, code, out, err, runner.mock.requests, visible)
 
-        session = resume_session(runner)
+        session = resume_session(runner).name
         code, out, err = runner.run(script, "--session", session, "--resume-response", answer, "--json")
         check(code == 1, f"{label} --json: exit {code}, expected 1")
         check(err == "", f"{label} --json: stderr changed: {err!r}")
         check(json.loads(out)["stop_reason"] == "max_tokens_exhausted", f"{label} --json: {out!r}")
         print(f"ok: {label}")
+
+
+def streaming_and_resume(runner: Runner) -> None:
+    text = "streamed answer"
+    code, out, err = runner.run([anthropic(text, False)], "-p", "answer", "--json", "--stream-json")
+    check(code == 0 and err == "", f"streaming: exit {code}, stderr {err!r}")
+    lines = [json.loads(line) for line in out.splitlines()]
+    check(bool(lines) and lines[-1]["type"] == "result", f"streaming: missing final result: {out!r}")
+    check(sum(line["type"] == "result" for line in lines) == 1, f"streaming: duplicate results: {out!r}")
+    streamed = "".join(line["text"] for line in lines[:-1] if line["type"] == "text")
+    check(streamed == text and lines[-1]["text"] == text, f"streaming: mismatched text: {out!r}")
+    check(lines[-1]["stop_reason"] == "end_turn", f"streaming: {out!r}")
+
+    session = resume_session(runner)
+    pending = session / "suspend.json"
+    check(pending.is_file(), f"resume: no persisted suspension in {session}")
+    answer = json.dumps({"choice": "Aaa", "note": "RESUMED_ANSWER"})
+    code, out, err = runner.run(
+        [anthropic("continued", False)], "--session", session.name,
+        "--resume-response", answer, "--json",
+    )
+    check(code == 0 and err == "", f"resume: exit {code}, stderr {err!r}")
+    result = json.loads(out)
+    check(result["stop_reason"] == "end_turn" and result["text"] == "continued", f"resume: {out!r}")
+    check(runner.mock.requests == 1 and b"RESUMED_ANSWER" in runner.mock.bodies[0],
+          "resume: the answer did not reach the resumed request")
+    check(not pending.exists(), f"resume: suspension was not cleared in {session}")
+    print("ok: streamed NDJSON and cross-process resume")
+
+
+def ignored_hangup(runner: Runner) -> None:
+    if os.name != "posix":
+        print("skip: ignored hangup (POSIX signals)")
+        return
+    reply = anthropic("survived hangup", False)
+    at = reply.index(b'data: {"type": "message_delta"')
+    runner.mock.play([(reply[:at], reply[at:])])
+    with subprocess.Popen(
+        ["sh", "-c", 'trap "" HUP; exec "$@"', "sh", *runner.argv("-p", "answer", "--json")],
+        cwd=runner.tmp / "work", env=runner.env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    ) as proc:
+        try:
+            check(runner.mock.responding.wait(TIMEOUT), "ignored hangup: no request reached the mock")
+            proc.send_signal(signal.SIGHUP)
+            runner.mock.release.set()
+            code, out, err = runner.wait(proc)
+        finally:
+            runner.mock.release.set()
+            if proc.poll() is None:
+                proc.kill()
+    check(code == 0 and err == "", f"ignored hangup: exit {code}, stderr {err!r}")
+    result = json.loads(out)
+    check(result["stop_reason"] == "end_turn" and result["text"] == "survived hangup",
+          f"ignored hangup: {out!r}")
+    print("ok: ignored hangup survives a headless Run")
 
 
 def interrupted(runner: Runner) -> None:
@@ -354,6 +416,8 @@ def main() -> int:
         runner = Runner(tmp, mock)
         exhaustion_plain_and_json(runner)
         exhaustion_on_resume(runner)
+        streaming_and_resume(runner)
+        ignored_hangup(runner)
         interrupted(runner)
         controls(runner)
         print("headless stop notice e2e: OK")

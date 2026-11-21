@@ -1,6 +1,6 @@
 //! Enforce the subsystem import boundaries #16, #405 and #448 rely on.
 //!
-//! `zig build test:provider` and `test:picker` compile each subsystem from a
+//! `zig build test:provider` compiles the provider from a
 //! narrow root and their doc comments claim that a dependency on the transport,
 //! the TUI, or `App` would stop them compiling. It would not: the test module's
 //! root is `src/`, so *any* file under it is importable, and the only named
@@ -82,25 +82,6 @@ const SUBSYSTEMS = [_]Subsystem{
             "src/util/time.zig",
             "src/core/read_state.zig",
             "src/tools/test_tmp.zig",
-        },
-    },
-    .{
-        // The picker is a *client* of the control plane: the provider kernel
-        // and the terminal theme, and nothing else. Not `App`, not a client.
-        .name = "model picker",
-        .dir = "src/repl",
-        .recursive = false,
-        .only = &.{ "model_picker.zig", "model_picker_view.zig" },
-        .modules = &.{ "std", "platform" },
-        .reaches = &.{
-            "src/repl/tui/ansi.zig",
-            "src/repl/tui/theme.zig",
-            "src/repl/tui/term.zig",
-            "src/provider/ids.zig",
-            "src/provider/offer.zig",
-            "src/provider/controls.zig",
-            "src/provider/selection.zig",
-            "src/provider/control_plane.zig",
         },
     },
     .{

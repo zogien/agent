@@ -21,7 +21,6 @@ const App = cc.app_module.App;
 const Slug = cc.provider_ids.Slug;
 const provider_login = cc.api_provider_login;
 const key_store = cc.provider_api_key_store;
-const picker_host = cc.repl_picker_host;
 
 const GOOD_KEY = "plan-key-good";
 const MODELS_OK = "{\"object\":\"list\",\"data\":[{\"id\":\"glm-5.3\"}]}";
@@ -295,71 +294,6 @@ test "L2 key login: a stored key starts a Z.AI session and reaches its requests,
     const captured = server.lastRequest() orelse return error.NoRequestCaptured;
     try std.testing.expectEqualStrings("POST /v1/messages HTTP/1.1", requestLine(captured));
     try std.testing.expectEqualStrings("Bearer " ++ GOOD_KEY, headerValue(captured, "authorization").?);
-}
-
-test "L2 key login (#488): /model takes no key; a provider without one is not configured, and the key /login stored makes its routes applicable" {
-    var case: Case = undefined;
-    try case.init();
-    defer case.deinit();
-    const allocator = case.arena.allocator();
-    // Any request the picker made would land here.
-    var check = try harness.MockServer.start(MODELS_OK, 0);
-    defer check.stop();
-    try case.checkAt(check);
-
-    var io_runtime = @import("platform").signal.threadedIo(allocator, .{});
-    defer io_runtime.deinit();
-    const argv = [_][*:0]const u8{"metacodes"};
-    const app = try App.init(std.testing.allocator, io_runtime.io(), try case.config(&argv), "metask-key");
-    defer app.deinit();
-    const picker = &app.model_picker;
-    var rows = cc.repl_model_picker.Picker.RowBuffer.init(std.testing.allocator);
-    defer rows.deinit();
-
-    // No key: typing finds the plan's models, dim (not configured), and
-    // Enter on one shows where the key goes. No key stage, no worker, no
-    // request.
-    var ui: cc.tui_ui_state.UiState = .{};
-    picker_host.open(app, &ui, .unguarded);
-    for ("zai-coding-plan") |byte| _ = picker_host.onKey(app, &ui, .{ .char = byte }, .unguarded);
-    const unconfigured = try picker.rows(&rows);
-    try std.testing.expect(unconfigured.len > 0);
-    for (unconfigured) |row| {
-        try std.testing.expect(row == .model and !row.model.ready);
-        try std.testing.expect(picker.offers.items[row.model.offer_index].provider_id.eqlText("zai-coding-plan"));
-    }
-    try std.testing.expectEqual(picker_host.Result.redraw, picker_host.onKey(app, &ui, .enter, .unguarded));
-    try std.testing.expectEqual(cc.repl_model_picker.Stage.setup, picker.stage);
-    try std.testing.expectEqualStrings("ZAI_API_KEY", picker.setup.?.variable.?);
-    const env_path = try std.fs.path.join(allocator, &.{ case.root, ".env" });
-    try std.testing.expectEqualStrings(env_path, picker.localConfigPath());
-    for ([_]cc.repl_model_picker.Key{ .enter, .{ .char = 'k' }, .cycle_scope }) |key| {
-        try std.testing.expectEqual(picker_host.Result.ignored, picker_host.onKey(app, &ui, key, .unguarded));
-    }
-    try std.testing.expectEqual(@as(usize, 0), check.requestCount());
-    try std.testing.expect(try key_store.load(std.testing.allocator, case.root, Slug.lit("zai-coding-plan")) == null);
-    // The session stays on the route it started on.
-    try std.testing.expectEqualStrings("metask-key", app.api_key);
-    picker_host.close(app, &ui, .unguarded);
-
-    // The key `/login zai-coding-plan` would store: the next /model lists
-    // the plan as ready, and a pick applies its route with that key.
-    try key_store.save(std.testing.allocator, case.root, Slug.lit("zai-coding-plan"), .zai_coding_plan_api_key, GOOD_KEY, null, 1);
-    picker_host.open(app, &ui, .unguarded);
-    for ("zai-coding-plan") |byte| _ = picker_host.onKey(app, &ui, .{ .char = byte }, .unguarded);
-    const configured = try picker.rows(&rows);
-    try std.testing.expect(configured.len > 0);
-    try std.testing.expect(configured[0] == .model and configured[0].model.ready);
-    // The cursor is on GLM-5.3, listed first; Enter applies its preferred
-    // route, the first (cn-anthropic).
-    const focused = picker.focusedOffer() orelse return error.NoFocusedOffer;
-    try std.testing.expectEqualStrings("glm-5.3", focused.request_model_id);
-    try std.testing.expectEqual(picker_host.Result.committed, picker_host.onKey(app, &ui, .enter, .unguarded));
-    try std.testing.expectEqualStrings("glm-5.3", app.activeModel());
-    try std.testing.expectEqualStrings(GOOD_KEY, app.api_key);
-    // Another provider bills the session from here, and the notice says so.
-    try std.testing.expect(std.mem.indexOf(u8, picker.notice(), "from now on billed to your Z.AI GLM Coding Plan account") != null);
-    try std.testing.expectEqual(@as(usize, 0), check.requestCount());
 }
 
 // ── phase 2: every built-in vendor takes a pasted key ───────────────────────

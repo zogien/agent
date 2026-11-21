@@ -176,7 +176,7 @@ test "L2 dialect: a /model switch writes the request in the route's declared dia
     defer app.deinit();
 
     // The declared relay: DeepSeek's thinking switch and effort words.
-    try std.testing.expect(cc.repl_picker_host.useSelector(app, "house-model-a") == .switched);
+    try std.testing.expect(@import("offer_fixture.zig").useSelector(app, "house-model-a") == .switched);
     try app.provider().setReasoningEffort(.high);
     try drain(app.allocator, app.provider(), &HI);
     const declared = relay.lastRequest() orelse return error.NoRequestCaptured;
@@ -197,7 +197,7 @@ test "L2 dialect: a /model switch writes the request in the route's declared dia
     }
 
     // The plain relay: no declaration, an unrecognisable name — OpenAI native.
-    try std.testing.expect(cc.repl_picker_host.useSelector(app, "house-model-b") == .switched);
+    try std.testing.expect(@import("offer_fixture.zig").useSelector(app, "house-model-b") == .switched);
     try app.provider().setReasoningEffort(.high);
     try drain(app.allocator, app.provider(), &HI);
     const plain = relay.lastRequest() orelse return error.NoRequestCaptured;
@@ -238,7 +238,7 @@ test "L2 dialect: a model entry's declaration writes that model's requests; its 
 
     // house-model-c declares Kimi on its entry: Kimi's always-on thinking
     // object, never the OpenAI-native top-level effort.
-    try std.testing.expect(cc.repl_picker_host.useSelector(app, "house-model-c") == .switched);
+    try std.testing.expect(@import("offer_fixture.zig").useSelector(app, "house-model-c") == .switched);
     try app.provider().setReasoningEffort(.high);
     try drain(app.allocator, app.provider(), &HI);
     const declared = relay.lastRequest() orelse return error.NoRequestCaptured;

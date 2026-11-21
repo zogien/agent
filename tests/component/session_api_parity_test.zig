@@ -1,13 +1,9 @@
-//! L2 coverage for the TUI session command service. Exercise parsing,
-//! command outcomes and Run preparation against a real App.
+//! L2 coverage for goal accounting through the headless host.
 
 const std = @import("std");
 const cc = @import("cc");
 const harness = @import("harness");
 const ppaths = @import("platform").paths;
-
-const session_service = cc.session_service;
-const session_intent = cc.session_intent;
 
 const EnvGuard = struct {
     allocator: std.mem.Allocator,
@@ -78,219 +74,6 @@ const AppFixture = struct {
     }
 };
 
-test "U11 parity: 意图表与 dispatch 分类一致(service 动词必被 service 消化)" {
-    // 纯解析层:BUILTIN_VERBS 每个动词 `/verb` 都解析回同名 command + 同 class——
-    // 三前端共用此表,新增动词漏登记会在此暴露。
-    for (session_intent.BUILTIN_VERBS) |spec| {
-        var buf: [64]u8 = undefined;
-        const line = try std.fmt.bufPrint(&buf, "/{s}", .{spec.name});
-        const intent = session_intent.parse(line);
-        try std.testing.expect(intent == .command);
-        try std.testing.expectEqualStrings(spec.name, intent.command.verb);
-        try std.testing.expectEqual(spec.class, intent.command.class);
-    }
-    // 非表内 head 落 skill 车道(内建优先契约的另一半)。
-    try std.testing.expect(session_intent.parse("/definitely-not-a-verb x") == .skill);
-}
-
-test "U11 parity: execLine 在真 App 上的 config mutation 语义(mode/vim/compact)" {
-    var fx: AppFixture = undefined;
-    try fx.setup();
-    defer fx.deinit();
-    const app = fx.app;
-    var svc = session_service.SessionService.init(app);
-    const alloc = fx.arena.allocator();
-
-    // /mode <name>(web/daemon 的字面路径;TUI /mode 同一调用)。
-    const d_mode = session_service.execLine(&svc, alloc, "/mode auto");
-    try std.testing.expect(d_mode.run == null);
-    try std.testing.expectEqual(session_service.CommandOutcome.Kind.mode_changed, d_mode.outcome.kind);
-    try std.testing.expectEqual(cc.types_mod.PermissionMode.auto, app.permMode());
-    // 连字符归一(web 客户端习惯)与非法名 fail-closed。
-    try std.testing.expectEqual(session_service.CommandOutcome.Kind.mode_changed, session_service.execLine(&svc, alloc, "/mode accept-edits").outcome.kind);
-    try std.testing.expectEqual(cc.types_mod.PermissionMode.accept_edits, app.permMode());
-    const bad = session_service.execLine(&svc, alloc, "/mode not-a-mode");
-    try std.testing.expectEqual(session_service.CommandOutcome.Kind.err, bad.outcome.kind);
-    try std.testing.expectEqual(cc.types_mod.PermissionMode.accept_edits, app.permMode()); // 未变
-
-    // /vim 翻转(TUI 渲染留终端,状态变更单源)。
-    const vim_before = app.config.vim_mode;
-    try std.testing.expectEqual(session_service.CommandOutcome.Kind.vim_changed, session_service.execLine(&svc, alloc, "/vim").outcome.kind);
-    try std.testing.expect(app.config.vim_mode != vim_before);
-
-    // /compact 结构化载荷(TUI/web 各自渲染同一份数据)。
-    const d_compact = session_service.execLine(&svc, alloc, "/compact");
-    try std.testing.expectEqual(session_service.CommandOutcome.Kind.compacted, d_compact.outcome.kind);
-
-    // 终端表达类(.local)动词在 service 层 unhandled——web/daemon 报 unsupported,
-    // TUI 自渲染;它们**不产生**任何会话 mutation。
-    const before_len = app.conversation.messages.items.len;
-    const d_local = session_service.execLine(&svc, alloc, "/help");
-    try std.testing.expectEqual(session_service.CommandOutcome.Kind.unhandled, d_local.outcome.kind);
-    try std.testing.expect(d_local.run == null);
-    try std.testing.expectEqual(before_len, app.conversation.messages.items.len);
-}
-
-test "U11 parity: prompt/宏/retry/shell 的对话 mutation 全在 service 层" {
-    var fx: AppFixture = undefined;
-    try fx.setup();
-    defer fx.deinit();
-    const app = fx.app;
-    var svc = session_service.SessionService.init(app);
-    const alloc = fx.arena.allocator();
-
-    // 空提交:无操作无计划(三前端一致的"空 enter 不做事")。
-    try std.testing.expect(session_service.execLine(&svc, alloc, "   ").run == null);
-
-    // prompt:append user + user_prompt 计划。
-    const d1 = session_service.execLine(&svc, alloc, "hello parity");
-    try std.testing.expect(d1.run != null);
-    try std.testing.expectEqual(session_service.RunPlan.Kind.user_prompt, d1.run.?.kind);
-    try std.testing.expectEqual(@as(usize, 1), app.conversation.messages.items.len);
-
-    // /commit 宏:append COMMIT_PROMPT + injected_macro 计划(prompt 常量单源)。
-    const d2 = session_service.execLine(&svc, alloc, "/commit");
-    try std.testing.expectEqual(session_service.RunPlan.Kind.injected_macro, d2.run.?.kind);
-    try std.testing.expectEqual(@as(usize, 2), app.conversation.messages.items.len);
-    const last = app.conversation.messages.items[1];
-    try std.testing.expect(std.mem.indexOf(u8, last.blocks[0].text, "git commit") != null);
-
-    // 模拟一轮 assistant 响应后 /retry:回卷到最后一条 user(丢弃其后回合)。
-    try app.conversation.appendText(.assistant, "draft answer");
-    try std.testing.expectEqual(@as(usize, 3), app.conversation.messages.items.len);
-    const d3 = session_service.execLine(&svc, alloc, "/retry");
-    try std.testing.expectEqual(session_service.RunPlan.Kind.retry, d3.run.?.kind);
-    try std.testing.expectEqual(@as(usize, 2), app.conversation.messages.items.len);
-
-    // `!cmd` shell 车道:执行 + 输出进对话上下文(shell_ran,无 run 计划)。
-    const d4 = session_service.execLine(&svc, alloc, "!echo parity-shell-ok");
-    try std.testing.expectEqual(session_service.CommandOutcome.Kind.shell_ran, d4.outcome.kind);
-    try std.testing.expect(d4.run == null);
-    try std.testing.expectEqual(@as(usize, 3), app.conversation.messages.items.len);
-    const shell_msg = app.conversation.messages.items[2];
-    try std.testing.expect(std.mem.indexOf(u8, shell_msg.blocks[0].text, "[shell] $ echo parity-shell-ok") != null);
-    try std.testing.expect(std.mem.indexOf(u8, shell_msg.blocks[0].text, "parity-shell-ok") != null);
-
-    // skill 车道:service 不消化(unhandled,宿主的 skill runtime 负责),零 mutation。
-    const d5 = session_service.execLine(&svc, alloc, "/nopkg:noskill args");
-    try std.testing.expectEqual(session_service.CommandOutcome.Kind.unhandled, d5.outcome.kind);
-    try std.testing.expectEqual(@as(usize, 3), app.conversation.messages.items.len);
-}
-
-test "U11 parity: 过程义务门是宿主契约字段,canonical 不带(delivery_cadence 显式排除)" {
-    // Codex round 6 (2026-09-21):注入宏 run / web 会话走 canonical 装配,若 canonical 带
-    // cadence,一次 `/commit` 就多落一条终局记录,trace 契约(每份 journal 一条)作废。
-    // 排除是设计决定,本测试让"顺手接上"变成显式改动。正向面见
-    // tests/component/delivery_cadence_test.zig(REPL 主 run 与 headless 都接)。
-    var fx: AppFixture = undefined;
-    try fx.setup();
-    defer fx.deinit();
-    const app = fx.app;
-    app.config.delivery_cadence = true;
-    app.config.delivery_cadence_observe = true;
-    app.config.delivery_cadence_first = 1;
-    app.config.delivery_cadence_second = 2;
-    const canonical = session_service.buildRunOptions(app, null);
-    const defaults = cc.agent_loop.Options{ .session = canonical.session, .abort = canonical.abort };
-    try std.testing.expect(!canonical.delivery_cadence);
-    try std.testing.expect(!canonical.delivery_cadence_observe);
-    try std.testing.expect(std.meta.eql(defaults.delivery_cadence_thresholds, canonical.delivery_cadence_thresholds));
-    try std.testing.expect(!canonical.verification_final_gate);
-    try std.testing.expect(!canonical.requirement_ledger);
-    // 宿主检查门同属宿主契约字段:canonical 不带,宏 run / skill run 不会跑检查命令。
-    app.config.host_check_command = "make check";
-    app.config.check_gate = true;
-    app.config.check_gate_observe = true;
-    try std.testing.expect(session_service.buildRunOptions(app, null).check_gate == null);
-    // The learning turn rides the check gate's contract: canonical never
-    // carries it; the headless primary run does once the gate is armed.
-    app.config.learning_turn = true;
-    try std.testing.expect(session_service.buildRunOptions(app, null).learning_turn == null);
-    const headless_learning = cc.repl_headless.buildOptions(app, null, null, null, false, null, null, null).learning_turn.?;
-    try std.testing.expectEqual(cc.learning_turn.Mode.enforce, headless_learning.mode);
-    app.config.check_gate = false;
-    app.config.check_gate_observe = false;
-    try std.testing.expect(cc.repl_headless.buildOptions(app, null, null, null, false, null, null, null).learning_turn == null);
-    app.config.learning_turn = false;
-    // 测试完整性义务同属宿主契约字段:canonical 不带,宏 run 不比对测试、不发记录。
-    app.config.test_integrity = true;
-    app.config.test_integrity_observe = true;
-    try std.testing.expect(session_service.buildRunOptions(app, null).test_integrity == null);
-    // #114:进度更新门同样不进 canonical——即便 config 默认开着,宏 run / skill run 也不被提醒。
-    app.config.progress_updates = true;
-    app.config.progress_updates_observe = true;
-    const again = session_service.buildRunOptions(app, null);
-    try std.testing.expect(!again.progress_updates);
-    try std.testing.expect(!again.progress_updates_observe);
-    // 停滞闸门同样不进 canonical:宏 run / skill run 不会因"无新结果"被停。
-    app.config.stall_gate = .enforce;
-    try std.testing.expect(session_service.buildRunOptions(app, null).stall_gate == null);
-}
-
-test "R3-1回归: Ctrl+B 身份轮换 —— 新 session_id + 新 transcript 目录,权限路由同步" {
-    // 缺陷形态:转后台后前台开新空会话(shrink_epoch=0)却复用旧 writer(seen>=1,
-    // flushed=N)→ 下一次 flush 把旧 transcript 整个重写成新会话数条(历史被毁)。
-    // 修复:App.rotateSessionIdentity 换 id + 新目录 writer,旧 transcript 封存。
-    var fx: AppFixture = undefined;
-    try fx.setup();
-    defer fx.deinit();
-    const app = fx.app;
-
-    const old_id = app.session_id;
-    var old_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const old_dir: ?[]const u8 = if (app.transcript_writer) |*w| blk: {
-        @memcpy(old_dir_buf[0..w.dir.len], w.dir);
-        break :blk old_dir_buf[0..w.dir.len];
-    } else null;
-
-    app.rotateSessionIdentity();
-
-    try std.testing.expect(!std.meta.eql(old_id, app.session_id));
-    try std.testing.expect(std.meta.eql(app.permission_ctx.session, app.session_id));
-    if (old_dir) |d| {
-        try std.testing.expect(app.transcript_writer != null);
-        try std.testing.expect(!std.mem.eql(u8, d, app.transcript_writer.?.dir));
-    }
-}
-
-test "#219: a main session handed off with Ctrl+B stays in the new foreground's agent view" {
-    var fx: AppFixture = undefined;
-    try fx.setup();
-    defer fx.deinit();
-    const app = fx.app;
-    const a = std.testing.allocator;
-    const reg = app.agentJobsPtr() orelse return error.TestExpectedAgentRegistry;
-    const Registry = @TypeOf(reg.*);
-
-    const old_id = app.session_id;
-    // Stands in for the job Ctrl+B spawns: it runs in the session it left.
-    try reg.pushTestEntryFull(old_id, "main", "long refactor", 2, 300, "Bash", "{}", .running);
-    try app.prepareHandOff();
-    app.completeHandOff();
-    try std.testing.expect(!std.meta.eql(old_id, app.session_id));
-
-    // What the agent tree, footer and switcher read.
-    const shown = try reg.snapshotJobsInScope(a, app.agentJobScope());
-    defer Registry.freeSnapshots(a, shown);
-    try std.testing.expectEqual(@as(usize, 1), shown.len);
-    try std.testing.expectEqualStrings("long refactor", shown[0].desc);
-    try std.testing.expectEqual(@as(usize, 1), reg.runningCountInScope(app.agentJobScope()));
-    try std.testing.expectEqual(@as(usize, 1), reg.totalCountInScope(app.agentJobScope()));
-    const out = (try reg.copyOutputBufInScope(shown[0].id, a, app.agentJobScope())) orelse return error.TestExpectedOutput;
-    a.free(out);
-
-    // Routing does not follow the foreground: the job is not the new
-    // session's, and the new session's own projections do not see it.
-    const routed = try reg.snapshotJobsForSession(a, app.session_id);
-    defer Registry.freeSnapshots(a, routed);
-    try std.testing.expectEqual(@as(usize, 0), routed.len);
-    try std.testing.expectError(error.JobNotFound, reg.abortForSession(shown[0].id, app.session_id));
-
-    // The switcher's stop reaches it through the same scope.
-    try reg.abortInScope(shown[0].id, app.agentJobScope());
-    try std.testing.expect(reg.entries.items[0].abort.isAborted());
-}
-
 const GOAL_FINAL_SSE =
     "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"role\":\"assistant\",\"model\":\"x\",\"usage\":{\"input_tokens\":7,\"output_tokens\":1}}}\n\n" ++
     "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" ++
@@ -307,13 +90,9 @@ test "L2 goal (issue #277): every CLI Run charges the App's goal and goal.json f
     const app = fx.app;
     const meter = if (app.goal_meter) |*m| m else return error.MissingGoalMeter;
 
-    // REPL, web, daemon and forked Skills build their Options canonically;
-    // headless builds its own. Both carry the App's Meter and date announcer.
-    const canonical = session_service.buildRunOptions(app, null);
     const headless = cc.repl_headless.buildOptions(app, null, null, null, false, null, null, null);
-    try std.testing.expect(canonical.goal_meter == meter);
     try std.testing.expect(headless.goal_meter == meter);
-    try std.testing.expect(canonical.time_announcer != null and canonical.time_announcer == headless.time_announcer);
+    try std.testing.expect(headless.time_announcer != null);
 
     try app.goal_state.setNew("ship it", null);
     app.persistGoal();
@@ -321,14 +100,13 @@ test "L2 goal (issue #277): every CLI Run charges the App's goal and goal.json f
     defer srv.stop();
     const url = try srv.urlOwned(a);
     defer a.free(url);
-    // The App's allocator throughout, as the REPL uses it: the Run's records
-    // join the App's Conversation.
+    // The Run's records join the App's Conversation.
     var client = cc.client_mod.Client.initWithBaseUrl(app.allocator, fx.io_rt.io(), "key", "model", url);
     defer client.deinit();
     try app.conversation.appendText(.user, "work on the goal");
     var render = cc.writer_backend.WriterBackend.initNull();
     const be = render.backend();
-    var options = canonical;
+    var options = headless;
     options.max_turns = 1;
     const result = try cc.agent_loop.run(&app.conversation, client.provider(), &.{}, &app.permission_ctx, options, &be, app.allocator);
     try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
@@ -340,90 +118,4 @@ test "L2 goal (issue #277): every CLI Run charges the App's goal and goal.json f
     defer loaded.deinit();
     try loaded.loadFromDir(app.sessionDir() orelse return error.NoSessionDir);
     try std.testing.expectEqual(charged, loaded.current.?.tokens_used);
-}
-
-/// The text of the message at 0-based `index` of `conversation`.
-fn messageText(conversation: *const cc.conversation.Conversation, index: usize) []const u8 {
-    return conversation.messages.items[index].blocks[0].text;
-}
-
-test "L2 /edit (issue #432): editing a user message plans a run and persists the edited history" {
-    const a = std.testing.allocator;
-    var fx: AppFixture = undefined;
-    try fx.setup();
-    defer fx.deinit();
-    const app = fx.app;
-    try app.conversation.appendText(.user, "q1");
-    try app.conversation.appendText(.assistant, "a1");
-    try app.conversation.appendText(.user, "q2");
-    try app.conversation.appendText(.assistant, "a2");
-    try app.conversation.appendText(.user, "q3");
-    try app.conversation.appendText(.assistant, "a3");
-    try app.conversation.appendHostText("[runtime notice]");
-    app.persistTranscript();
-    try app.read_state.record("/tmp/read-in-a-dropped-turn", 1, 1);
-
-    // Refusals: each names its reason, plans no run and changes nothing.
-    const refused = [_]struct { line: []const u8, reason: []const u8 }{
-        .{ .line = "/edit", .reason = "usage: /edit" },
-        .{ .line = "/edit 3", .reason = "usage: /edit" },
-        .{ .line = "/edit three new", .reason = "(InvalidPosition)" },
-        .{ .line = "/edit 0 new", .reason = "(PositionOutOfRange)" },
-        .{ .line = "/edit 99 new", .reason = "(PositionOutOfRange)" },
-        .{ .line = "/edit 2 new", .reason = "(NotUserMessage)" },
-        .{ .line = "/edit 7 new", .reason = "(NotUserMessage)" },
-    };
-    for (refused) |case| {
-        var buf: [256]u8 = undefined;
-        var svc = session_service.SessionService.init(app);
-        const d = session_service.execLine(&svc, app.allocator, case.line);
-        try std.testing.expect(d.run == null);
-        try std.testing.expect(std.mem.indexOf(u8, d.outcome.render(&buf), case.reason) != null);
-        try std.testing.expectEqual(@as(usize, 7), app.conversation.len());
-    }
-
-    // The TUI's `/edit` alone lists what can be edited, by the number it takes.
-    var listing: std.Io.Writer.Allocating = .init(a);
-    defer listing.deinit();
-    try session_service.writeEditableMessages(&listing.writer, &app.conversation);
-    try std.testing.expect(std.mem.indexOf(u8, listing.written(), "     3  q2\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, listing.written(), "runtime notice") == null);
-    try std.testing.expect(std.mem.indexOf(u8, listing.written(), "a1") == null);
-
-    var edit_service = session_service.SessionService.init(app);
-    const edited = session_service.execLine(&edit_service, app.allocator, "/edit 3   q2, edited  ");
-    const plan = edited.run orelse return error.NoRunPlanned;
-    try std.testing.expectEqual(session_service.RunPlan.Kind.edited_prompt, plan.kind);
-    try std.testing.expectEqual(@as(usize, 3), app.conversation.len());
-    try std.testing.expectEqualStrings("q1", messageText(&app.conversation, 0));
-    try std.testing.expectEqualStrings("a1", messageText(&app.conversation, 1));
-    try std.testing.expectEqualStrings("q2, edited", messageText(&app.conversation, 2));
-    try std.testing.expect(app.read_state.get("/tmp/read-in-a-dropped-turn") == null);
-    // The transcript on disk follows the edit (a full rewrite), so a restart
-    // restores messages 1-2 + the edited message, never the dropped turns.
-    app.persistTranscript();
-    var restored = cc.conversation.Conversation.init(a);
-    defer restored.deinit();
-    try cc.transcript.loadTranscript(&restored, app.sessionDir() orelse return error.NoSessionDir, a);
-    try std.testing.expectEqual(@as(usize, 3), restored.len());
-    try std.testing.expectEqualStrings("q1", messageText(&restored, 0));
-    try std.testing.expectEqualStrings("q2, edited", messageText(&restored, 2));
-
-    // A position the compact summary stands for cannot be rerun.
-    try app.conversation.appendText(.assistant, "a2'");
-    try app.conversation.restoreCompactState(2, "summary of q1/a1");
-    var svc = session_service.SessionService.init(app);
-    var buf: [256]u8 = undefined;
-    const compacted = session_service.execLine(&svc, app.allocator, "/edit 1 q1 again");
-    try std.testing.expect(compacted.run == null);
-    try std.testing.expect(std.mem.indexOf(u8, compacted.outcome.render(&buf), "(PositionCompacted)") != null);
-    try std.testing.expectEqual(@as(usize, 4), app.conversation.len());
-    listing.clearRetainingCapacity();
-    try session_service.writeEditableMessages(&listing.writer, &app.conversation);
-    try std.testing.expect(std.mem.indexOf(u8, listing.written(), "     1  q1  (compacted; cannot be edited)\n") != null);
-    // The first message after the boundary still can: the summary is the
-    // context before it, as in every request since the compaction.
-    try std.testing.expect(session_service.execLine(&svc, app.allocator, "/edit 3 q2 once more").run != null);
-    try std.testing.expectEqual(@as(usize, 3), app.conversation.len());
-    try std.testing.expectEqualStrings("q2 once more", messageText(&app.conversation, 2));
 }

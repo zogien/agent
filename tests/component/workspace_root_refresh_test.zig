@@ -136,10 +136,10 @@ test "workspace root: 记录的目录不存在而进程 cwd 解析成新名字 �
     const prompt = app.system_prompt orelse return error.TestExpectedSystemPrompt;
     try std.testing.expect(std.mem.indexOf(u8, prompt, process_cwd) != null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, gone) == null);
-    const opts = cc.session_service.buildRunOptions(app, null);
+    const opts = cc.repl_headless.buildOptions(app, null, null, null, false, null, null, null);
     try std.testing.expectEqualStrings(process_cwd, opts.cwd_abs);
 
-    // 切换过后目录存在,再校验就是 no-op(REPL 与 buildRunOptions 各调一次不会重复告知)。
+    // 切换过后目录存在,重复校验不产生变化。
     try std.testing.expect(app.refreshWorkspaceRoot() == .unchanged);
 }
 

@@ -250,33 +250,17 @@ session supplies its authenticated gateway by default; use `--base-url` or
 ## Run it
 
 ```sh
-metacodes                                   # interactive TUI
-metacodes --resume <id>                     # the TUI, back in a session of this directory
 metacodes -p "explain src/main.zig" --json  # headless: one prompt, one NDJSON result
-metacodes -p - --stream-json < task.txt     # headless, streaming every event as NDJSON
+metacodes - --json --stream-json < task.txt     # headless, streaming every event as NDJSON
 metacodes doctor                            # where every runtime asset resolves from
 ```
 
-The interactive TUI opens with a short animation of the "Metask Lab" wordmark,
-played while metacodes starts up (MCP servers, catalogs); any key skips it.
-Set `METACODES_NO_STARTUP_ANIMATION` (to any value, even
-`0`), or put
-`"startupAnimation": false` in `<state root>/config.json` (`metacodes doctor`
-shows where the state root is), to start straight at the prompt. The TUI keeps
-the model route's `/v1/models` answer in `<state root>/cache/models/` for a
-day, so a start does not wait for it; it is refreshed in the background, and
-the directory can be deleted at any time.
+A headless run launched with `--suspendable` can pause for input. Resume it in
+a new process with the same state directory and
+`metacodes --session <id> --resume-response <json>`.
 
-Leaving a session that has run a turn prints the command that reopens it,
-`metacodes --resume <id>`; inside the TUI, `/resume` lists this directory's
-sessions.
-
-In the prompt, Enter submits and Shift+Enter starts a new line where the
-terminal can tell the two apart. When the footer says `\ + ⏎ for newline`, end
-the line with `\` and press Enter instead, or run `/terminal-setup` once: in
-Apple Terminal and in VS Code (and its forks) it binds Shift+Enter in the
-terminal's own settings, after a backup, and `/terminal-setup restore` undoes
-it ([Terminal setup](TERMINAL_SETUP.md)).
+If a previous version installed terminal shortcuts, undo them with
+`metacodes terminal-setup --restore`. See [Terminal setup](TERMINAL_SETUP.md).
 
 `metacodes --help` lists every flag. Embedding the runtime in your own process
 (Zig module or the AgentCore C ABI) starts at [API.md](API.md).
