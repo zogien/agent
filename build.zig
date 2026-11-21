@@ -2963,13 +2963,15 @@ pub fn build(b: *std.Build) void {
         // What plain `-p` says when a Run fails (#417): real exit code, stdout
         // and stderr against a loopback mock on all four wires.
         {
-            const stop_notice_e2e = b.addSystemCommand(&.{
+            const headless_e2e = b.addSystemCommand(&.{
                 if (@import("builtin").os.tag == .windows) "python" else "python3",
                 "tests/e2e/headless_stop_notice_e2e.py",
             });
-            stop_notice_e2e.step.dependOn(b.getInstallStep());
-            stop_notice_e2e.setEnvironmentVariable("METACODES_NATIVE_E2E_BIN", b.getInstallPath(.bin, exe.out_filename));
-            product_test_step.dependOn(&stop_notice_e2e.step);
+            headless_e2e.step.dependOn(b.getInstallStep());
+            headless_e2e.setEnvironmentVariable("METACODES_NATIVE_E2E_BIN", b.getInstallPath(.bin, exe.out_filename));
+            const headless_step = b.step("test:headless-cli", "Run the installed headless CLI against loopback providers");
+            headless_step.dependOn(&headless_e2e.step);
+            product_test_step.dependOn(headless_step);
         }
         // The native project-Harness suites (E3 runtime and templates, the
         // E2 evolution lifecycle, the calibration matrix) run the installed
