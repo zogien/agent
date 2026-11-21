@@ -26,7 +26,8 @@ jobs:
             target: x86_64-macos
           - runner: windows-latest
             target: x86_64-windows-msvc
-          - runner: windows-11-arm
+          # Cross-compile the ARM64 SDK with the Windows x64 Zig host.
+          - runner: windows-latest
             target: aarch64-windows-msvc
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
