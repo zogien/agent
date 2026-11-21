@@ -638,7 +638,7 @@ class AgentCoreWorkflowTest(unittest.TestCase):
         )
 
     def test_windows_uses_the_shared_archive_step(self) -> None:
-        job = self.workflow["jobs"]["agentcore"]
+        job = self.workflow["jobs"]["sdk"]
         self.assertIn(
             {"runner": "windows-latest", "target": "x86_64-windows-msvc"},
             job["strategy"]["matrix"]["include"],
