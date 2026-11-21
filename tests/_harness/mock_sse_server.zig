@@ -59,6 +59,14 @@ pub const MockServer = struct {
     status_line: []const u8 = "HTTP/1.1 200 OK",
     /// Raw header lines, each ending in CRLF. Tests use this for Retry-After wiring.
     extra_response_headers: []const u8 = "",
+    /// A non-200 body goes out with `transfer-encoding: chunked`, this many
+    /// bytes to a chunk (the last one shorter), each chunk in its own write.
+    /// 0 = the whole body at once, with `content-length`.
+    status_body_chunk_bytes: usize = 0,
+    /// A non-200 body with `content-length` goes out in two writes this many ms
+    /// apart, split after `status_body_split_at` bytes. 0 = one write.
+    status_body_pause_ms: u32 = 0,
+    status_body_split_at: usize = 0,
     /// 有序、不可变的请求账本。每条仅保留实际读取长度；borrowed accessor slice
     /// 在 stop() 前稳定。写入和读取均由 capture_mutex 建立可见性。
     captured_requests: [MAX_CAPTURED_REQUESTS]?[]u8 =
@@ -166,6 +174,26 @@ pub const MockServer = struct {
             .extra_response_headers = extra_headers,
         };
         self.thread = try std.Thread.spawn(.{}, serveLoop, .{self});
+        return self;
+    }
+
+    /// `startRepeatingStatus` whose body goes out chunked, `chunk_bytes` to a
+    /// chunk: a provider or proxy that streams its error answer (#565).
+    pub fn startRepeatingStatusChunked(body: []const u8, status_line: []const u8, chunk_bytes: usize) !*MockServer {
+        if (chunk_bytes == 0) return error.InvalidChunkSize;
+        const self = try startRepeatingStatus(body, status_line, "");
+        self.status_body_chunk_bytes = chunk_bytes;
+        return self;
+    }
+
+    /// `startRepeatingStatus` whose body, still with `content-length`, goes
+    /// out in two writes `pause_ms` apart, split after `split_at` bytes: a body
+    /// that reaches the client in more than one read (#565).
+    pub fn startRepeatingStatusPaused(body: []const u8, status_line: []const u8, split_at: usize, pause_ms: u32) !*MockServer {
+        if (split_at == 0 or split_at >= body.len or pause_ms == 0) return error.InvalidSplit;
+        const self = try startRepeatingStatus(body, status_line, "");
+        self.status_body_split_at = split_at;
+        self.status_body_pause_ms = pause_ms;
         return self;
     }
 
@@ -625,11 +653,21 @@ pub const MockServer = struct {
         // 非 200:发纯 body(application/json,Content-Length),不走 chunked SSE。
         // 让客户端的 HTTP 错误分支(logErrorBody)能读到 body。
         if (std.mem.indexOf(u8, self.status_line, "200") == null) {
+            if (self.status_body_chunk_bytes > 0) {
+                sendStatusChunked(conn, self);
+                return;
+            }
             var hdr_buf: [256]u8 = undefined;
             const hdr = std.fmt.bufPrint(&hdr_buf, "{s}\r\ncontent-type: application/json\r\ncontent-length: {d}\r\nconnection: close\r\n", .{ self.status_line, self.body.len }) catch return;
             sendAll(conn, hdr);
             sendAll(conn, self.extra_response_headers);
             sendAll(conn, "\r\n");
+            if (self.status_body_pause_ms > 0) {
+                sendAll(conn, self.body[0..self.status_body_split_at]);
+                psync.sleepMs(self.status_body_pause_ms);
+                sendAll(conn, self.body[self.status_body_split_at..]);
+                return;
+            }
             sendAll(conn, self.body);
             return;
         }
@@ -726,6 +764,23 @@ pub const MockServer = struct {
         sendAll(conn, "0\r\n\r\n");
     }
 
+    /// A non-200 answer whose body goes out chunked, `status_body_chunk_bytes`
+    /// to a chunk, then the terminating chunk.
+    fn sendStatusChunked(conn: net.Socket, self: *MockServer) void {
+        var hdr_buf: [256]u8 = undefined;
+        const hdr = std.fmt.bufPrint(&hdr_buf, "{s}\r\ncontent-type: application/json\r\ntransfer-encoding: chunked\r\nconnection: close\r\n", .{self.status_line}) catch return;
+        sendAll(conn, hdr);
+        sendAll(conn, self.extra_response_headers);
+        sendAll(conn, "\r\n");
+        var cursor: usize = 0;
+        while (cursor < self.body.len) {
+            const end = @min(cursor + self.status_body_chunk_bytes, self.body.len);
+            if (!tryWriteChunk(conn, self.body[cursor..end])) return;
+            cursor = end;
+        }
+        sendAll(conn, "0\r\n\r\n");
+    }
+
     fn writeChunk(conn: net.Socket, bytes: []const u8) void {
         _ = tryWriteChunk(conn, bytes);
     }
@@ -752,6 +807,375 @@ pub const MockServer = struct {
     }
 };
 
+/// A server behind a proxy that loses the end of an answer when the server
+/// closes the connection right after it (#573).
+///
+/// A request whose head asks for `connection: close` is answered the way such
+/// a server and proxy answered it: `body` goes out up to `cut_at` bytes,
+/// inside a chunk (or under a `content-length`) that announced all of it, and
+/// the connection is closed. Any other request gets all of `body`, and the
+/// connection then stays open, as a server that keeps connections alive leaves
+/// it, until the client closes it or `HOLD_MS` passes. A request that arrives
+/// on a connection that already answered one is answered too and counted as
+/// reuse. One connection is served at a time.
+pub const LossyProxy = struct {
+    pub const Framing = enum {
+        /// `transfer-encoding: chunked`, the whole body in one chunk.
+        chunked,
+        content_length,
+        /// No length and no body (a 204).
+        none,
+    };
+
+    pub const Options = struct {
+        status_line: []const u8 = "HTTP/1.1 200 OK",
+        content_type: []const u8 = "text/event-stream",
+        framing: Framing = .chunked,
+        /// Bytes of `body` a cut answer carries; null = no answer is cut.
+        cut_at: ?usize = null,
+        /// Cut every answer, whatever its request asked for: a stream cut
+        /// short is incomplete however the connection was meant to end.
+        cut_always: bool = false,
+    };
+
+    pub const MAX_REQUESTS: usize = 16;
+    /// How long a connection is held open after an answer sent whole.
+    pub const HOLD_MS: i64 = 5_000;
+
+    const CloseResult = error{ IncompleteResponse, FramingWriteFailed, ReadFailed, HoldExpired, ProxyStopped }!i64;
+
+    listen_sock: net.Socket,
+    port: u16,
+    thread: std.Thread,
+    body: []const u8,
+    options: Options,
+    closing: std.atomic.Value(bool) = .init(false),
+    mutex: psync.Mutex = .{},
+    requests: [MAX_REQUESTS][]u8 = undefined,
+    request_count: usize = 0,
+    accepted: usize = 0,
+    reused: usize = 0,
+    cut: usize = 0,
+    close_results: [MAX_REQUESTS]CloseResult = undefined,
+    close_count: usize = 0,
+
+    pub fn start(body: []const u8, options: Options) !*LossyProxy {
+        if (options.cut_at) |at| std.debug.assert(at < body.len);
+        const listener = try net.listenLoopback(0, 16);
+        errdefer net.closeSocket(listener.sock);
+        const self = try std.heap.page_allocator.create(LossyProxy);
+        errdefer std.heap.page_allocator.destroy(self);
+        self.* = .{
+            .listen_sock = listener.sock,
+            .port = listener.port,
+            .thread = undefined,
+            .body = body,
+            .options = options,
+        };
+        self.thread = try std.Thread.spawn(.{}, serve, .{self});
+        return self;
+    }
+
+    /// Stops the server (as `MockServer.stop`: the flag, a self-connect to
+    /// wake `accept`, then join) and frees it.
+    pub fn stop(self: *LossyProxy) void {
+        self.closing.store(true, .release);
+        var wake_try: u8 = 0;
+        while (wake_try < 3) : (wake_try += 1) {
+            if (net.connectLoopback(self.port)) |wake| {
+                net.closeSocket(wake);
+                break;
+            } else |_| {}
+        }
+        net.closeSocket(self.listen_sock);
+        self.thread.join();
+        for (self.requests[0..self.request_count]) |raw| std.heap.page_allocator.free(raw);
+        std.heap.page_allocator.destroy(self);
+    }
+
+    /// "http://127.0.0.1:<port>/v1/messages" (allocator-owned), as `MockServer.urlOwned`.
+    pub fn urlOwned(self: *const LossyProxy, allocator: std.mem.Allocator) ![]u8 {
+        return std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/v1/messages", .{self.port});
+    }
+
+    pub fn requestCount(self: *LossyProxy) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.request_count;
+    }
+
+    /// A request as received (head and body), borrowed until `stop`.
+    pub fn requestAt(self: *LossyProxy, index: usize) ?[]const u8 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (index >= self.request_count) return null;
+        return self.requests[index];
+    }
+
+    /// TCP connections accepted.
+    pub fn acceptedCount(self: *LossyProxy) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.accepted;
+    }
+
+    /// Requests that arrived on a connection that had answered one already.
+    pub fn reusedCount(self: *LossyProxy) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.reused;
+    }
+
+    /// Answers sent cut.
+    pub fn cutCount(self: *LossyProxy) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.cut;
+    }
+
+    pub fn closeLatencyMs(self: *LossyProxy, index: usize) !i64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (index >= self.close_count) return error.NoCloseRecorded;
+        return self.close_results[index];
+    }
+
+    pub fn waitForCloses(self: *LossyProxy, n: usize, timeout_ms: i64) bool {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const begun = std.Io.Timestamp.now(io, .awake);
+        while (true) {
+            self.mutex.lock();
+            const have = self.close_count;
+            self.mutex.unlock();
+            if (have >= n) return true;
+            if (begun.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds() >= timeout_ms) return false;
+            psync.sleepMs(5);
+        }
+    }
+
+    /// The `connection` header lines of a request head; with `option`, only
+    /// those that name it (`close`, `keep-alive`), whatever its case.
+    pub fn connectionHeaders(raw: []const u8, option: ?[]const u8) usize {
+        const head_end = std.mem.indexOf(u8, raw, "\r\n\r\n") orelse raw.len;
+        var lines = std.mem.splitSequence(u8, raw[0..head_end], "\r\n");
+        _ = lines.next(); // request line
+        var count: usize = 0;
+        while (lines.next()) |line| {
+            const colon = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+            if (!std.ascii.eqlIgnoreCase(std.mem.trim(u8, line[0..colon], " \t"), "connection")) continue;
+            const wanted = option orelse {
+                count += 1;
+                continue;
+            };
+            var named = std.mem.splitScalar(u8, line[colon + 1 ..], ',');
+            while (named.next()) |name| {
+                if (std.ascii.eqlIgnoreCase(std.mem.trim(u8, name, " \t"), wanted)) {
+                    count += 1;
+                    break;
+                }
+            }
+        }
+        return count;
+    }
+
+    fn serve(self: *LossyProxy) void {
+        const buf = std.heap.page_allocator.alloc(u8, MockServer.MAX_REQUEST_BYTES) catch return;
+        defer std.heap.page_allocator.free(buf);
+        while (true) {
+            const conn = net.acceptConn(self.listen_sock) orelse return;
+            if (self.closing.load(.acquire)) {
+                net.closeSocket(conn);
+                return;
+            }
+            self.mutex.lock();
+            self.accepted += 1;
+            self.mutex.unlock();
+            self.serveConnection(conn, buf);
+            net.closeSocket(conn);
+        }
+    }
+
+    fn serveConnection(self: *LossyProxy, conn: net.Socket, buf: []u8) void {
+        var have: usize = 0;
+        var answered: usize = 0;
+        while (true) {
+            const total = readRequestFrom(conn, buf, have);
+            if (total == 0) return;
+            const raw = buf[0..total];
+            self.capture(raw, answered > 0);
+            const asks_close = connectionHeaders(raw, "close") > 0;
+            if (self.options.cut_at) |cut_at| if (asks_close or self.options.cut_always) {
+                self.mutex.lock();
+                self.cut += 1;
+                self.mutex.unlock();
+                // The proxy passed the server's close on before the last bytes.
+                _ = self.sendPayload(conn, cut_at, true);
+                return;
+            };
+            if (!self.sendPayload(conn, self.body.len, asks_close)) {
+                if (!asks_close) self.noteClose(error.IncompleteResponse);
+                return;
+            }
+            answered += 1;
+            switch (self.finishAnswer(conn, buf, asks_close)) {
+                .closed => return,
+                .next_request => |n| have = n,
+            }
+        }
+    }
+
+    const Hold = union(enum) { closed, next_request: usize };
+
+    fn finishAnswer(self: *LossyProxy, conn: net.Socket, buf: []u8, asks_close: bool) Hold {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const sent = std.Io.Timestamp.now(io, .awake);
+        if (self.options.framing == .chunked) {
+            const end = if (self.body.len > 0) "\r\n0\r\n\r\n" else "0\r\n\r\n";
+            writeAll(conn, end) catch |err| {
+                if (!asks_close) self.noteClose(switch (err) {
+                    error.PeerClosed => sent.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds(),
+                    error.WriteFailed => error.FramingWriteFailed,
+                });
+                return .closed;
+            };
+        }
+        if (asks_close) return .closed;
+        while (!self.closing.load(.acquire)) {
+            const waited = sent.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds();
+            if (waited >= HOLD_MS) {
+                self.noteClose(error.HoldExpired);
+                return .closed;
+            }
+            if (!net.pollReadable(conn, 20)) continue;
+            const n = net.recv(conn, buf);
+            if (n > 0) return .{ .next_request = @intCast(n) };
+            if (n < 0) switch (net.lastSocketFailure()) {
+                .interrupted => continue,
+                .peer_closed => {},
+                .other => {
+                    self.noteClose(error.ReadFailed);
+                    return .closed;
+                },
+            };
+            self.noteClose(sent.durationTo(std.Io.Timestamp.now(io, .awake)).toMilliseconds());
+            return .closed;
+        }
+        self.noteClose(error.ProxyStopped);
+        return .closed;
+    }
+
+    fn noteClose(self: *LossyProxy, result: CloseResult) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (self.close_count == MAX_REQUESTS) return;
+        self.close_results[self.close_count] = result;
+        self.close_count += 1;
+    }
+
+    fn capture(self: *LossyProxy, raw: []const u8, on_used_connection: bool) void {
+        const owned = std.heap.page_allocator.dupe(u8, raw) catch return;
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        if (on_used_connection) self.reused += 1;
+        if (self.request_count == MAX_REQUESTS) {
+            std.heap.page_allocator.free(owned);
+            return;
+        }
+        self.requests[self.request_count] = owned;
+        self.request_count += 1;
+    }
+
+    fn sendPayload(self: *LossyProxy, conn: net.Socket, sent: usize, closes: bool) bool {
+        const connection = if (closes) "connection: close\r\n" else "";
+        var head_buf: [512]u8 = undefined;
+        const head = switch (self.options.framing) {
+            .chunked => std.fmt.bufPrint(&head_buf, "{s}\r\ncontent-type: {s}\r\ntransfer-encoding: chunked\r\n{s}\r\n", .{ self.options.status_line, self.options.content_type, connection }),
+            .content_length => std.fmt.bufPrint(&head_buf, "{s}\r\ncontent-type: {s}\r\ncontent-length: {d}\r\n{s}\r\n", .{ self.options.status_line, self.options.content_type, self.body.len, connection }),
+            .none => std.fmt.bufPrint(&head_buf, "{s}\r\n{s}\r\n", .{ self.options.status_line, connection }),
+        } catch return false;
+        if (!trySendAll(conn, head)) return false;
+        if (self.options.framing == .none) return true;
+        if (self.options.framing == .chunked and self.body.len > 0) {
+            var size_buf: [32]u8 = undefined;
+            const size = std.fmt.bufPrint(&size_buf, "{x}\r\n", .{self.body.len}) catch return false;
+            if (!trySendAll(conn, size)) return false;
+        }
+        return trySendAll(conn, self.body[0..sent]);
+    }
+
+    /// Reads one request (head, then a `content-length` body) into `buf`,
+    /// whose first `have` bytes were read already. 0 = the client closed
+    /// before a whole head.
+    fn readRequestFrom(conn: net.Socket, buf: []u8, have: usize) usize {
+        var total = have;
+        const head_end = while (true) {
+            if (std.mem.indexOf(u8, buf[0..total], "\r\n\r\n")) |i| break i + 4;
+            if (total == buf.len) return 0;
+            const n = net.recv(conn, buf[total..]);
+            if (n <= 0) return 0;
+            total += @intCast(n);
+        };
+        const length = MockServer.parseContentLength(buf[0 .. head_end - 4]);
+        const end = @min(buf.len, head_end + length);
+        while (total < end) {
+            const n = net.recv(conn, buf[total..end]);
+            if (n <= 0) break;
+            total += @intCast(n);
+        }
+        return total;
+    }
+};
+
+test "LossyProxy #625 records a disconnect during the terminating chunk" {
+    const listener = try net.listenLoopback(0, 1);
+    defer net.closeSocket(listener.sock);
+    var proxy: LossyProxy = .{
+        .listen_sock = listener.sock,
+        .port = listener.port,
+        .thread = undefined,
+        .body = "data: [DONE]\n\n",
+        .options = .{},
+    };
+    const client = try net.connectLoopback(listener.port);
+    const conn = net.acceptConn(listener.sock) orelse {
+        net.closeSocket(client);
+        return error.AcceptFailed;
+    };
+    defer net.closeSocket(conn);
+    {
+        defer net.closeSocket(client);
+        try std.testing.expect(proxy.sendPayload(conn, proxy.body.len, false));
+        try readTestResponseThrough(client, "data: [DONE]\n");
+        try std.testing.expect(net.pollReadable(client, 1000));
+    }
+    try std.testing.expect(net.pollReadable(conn, 1000));
+    var buf: [128]u8 = undefined;
+    try std.testing.expect(proxy.finishAnswer(conn, &buf, false) == .closed);
+    try std.testing.expect(try proxy.closeLatencyMs(0) < 2000);
+    try std.testing.expectError(error.NoCloseRecorded, proxy.closeLatencyMs(1));
+}
+
+test "LossyProxy #625 reports an expired hold when the client keeps its connection open" {
+    var proxy = try LossyProxy.start("answer", .{});
+    defer proxy.stop();
+    const client = try net.connectLoopback(proxy.port);
+    defer net.closeSocket(client);
+    try writeAll(client, "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    try readTestResponseThrough(client, "6\r\nanswer\r\n0\r\n\r\n");
+    try std.testing.expect(proxy.waitForCloses(1, 2 * LossyProxy.HOLD_MS));
+    try std.testing.expectError(error.HoldExpired, proxy.closeLatencyMs(0));
+}
+
+fn readTestResponseThrough(client: net.Socket, suffix: []const u8) !void {
+    net.setRecvTimeoutMs(client, 4000);
+    var response: [256]u8 = undefined;
+    for (0..response.len) |i| {
+        if (net.recv(client, response[i..][0..1]) != 1) return error.IncompleteResponse;
+        if (std.mem.endsWith(u8, response[0 .. i + 1], suffix)) return;
+    }
+    return error.ResponseTooLong;
+}
+
 /// 发完整 buffer(send 可能部分写,循环补齐)。失败(对端断开)静默返回——mock 语境
 /// 下客户端提前断开是合法场景;只有逐事件滴流的循环要知道(trySendAll),好不再睡完余下的事件。
 fn sendAll(conn: net.Socket, bytes: []const u8) void {
@@ -760,13 +1184,22 @@ fn sendAll(conn: net.Socket, bytes: []const u8) void {
 
 /// sendAll that says whether all of `bytes` was sent.
 fn trySendAll(conn: net.Socket, bytes: []const u8) bool {
+    writeAll(conn, bytes) catch return false;
+    return true;
+}
+
+fn writeAll(conn: net.Socket, bytes: []const u8) error{ PeerClosed, WriteFailed }!void {
     var off: usize = 0;
     while (off < bytes.len) {
         const n = net.send(conn, bytes[off..]);
-        if (n <= 0) return false;
+        if (n < 0) switch (net.lastSocketFailure()) {
+            .interrupted => continue,
+            .peer_closed => return error.PeerClosed,
+            .other => return error.WriteFailed,
+        };
+        if (n == 0) return error.WriteFailed;
         off += @intCast(n);
     }
-    return true;
 }
 
 /// 测试客户端:连 127.0.0.1:port,发 raw bytes,读响应直到 until 出现(null = 读到对端关闭)。

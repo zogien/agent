@@ -68,7 +68,7 @@ pub const DEFAULT_BUILTIN_TOOLS = first_party_plugins.CODING_TOOLS ++ first_part
 /// internal web service/provider. It is an ordinary function tool, not a
 /// provider-specific server-tool descriptor; AgentSession owns its
 /// implementation and the Host does not register an executor callback.
-pub const SESSION_BUILTIN_TOOLS = DEFAULT_BUILTIN_TOOLS ++ [_][]const u8{"AskUserQuestion"};
+pub const SESSION_BUILTIN_TOOLS = DEFAULT_BUILTIN_TOOLS ++ first_party_plugins.PREVIEW_TOOLS ++ [_][]const u8{"AskUserQuestion"};
 
 /// Issue #277: the team tools, admissible only when the Runtime enables teams
 /// (`RuntimeConfig.enable_teams`). Unlike Task they are Session-owned — their
@@ -263,6 +263,8 @@ test "minimal and none core profiles retain the mandatory artifact recovery kern
 }
 
 pub const RuntimeConfig = struct {
+    /// Explicit Host opt-in per preview feature. Profiles remain stable when none is selected.
+    preview: @import("../preview.zig").Features = .none,
     /// Null selects the first-party `core_profile`. A non-null slice is the
     /// source-compatible explicit/legacy override used by older embedding
     /// adapters and tests; first-party packs are then omitted, while any
@@ -351,6 +353,7 @@ const SessionCreateHooks = struct {
 
 pub const AgentRuntime = struct {
     allocator: std.mem.Allocator,
+    preview: @import("../preview.zig").Features,
     plugin_snapshot: *plugin_runtime.Snapshot,
     catalog: tool_catalog.Catalog,
     mutex: sync.Mutex = .{},
@@ -407,6 +410,10 @@ pub const AgentRuntime = struct {
             }
         }
         try builtin_tools.appendSlice(allocator, plugin_snapshot.builtin_tools);
+        for (first_party_plugins.PREVIEW_TOOLS) |name| {
+            const builtin = @import("../tools.zig").getTool(name) orelse return error.UnsupportedBuiltinTool;
+            if (builtin.previewAllowed(config.preview) and !containsToolName(builtin_tools.items, name)) try builtin_tools.append(allocator, name);
+        }
         if (config.enable_teams) {
             for (TEAM_BUILTIN_TOOLS) |name| {
                 if (!containsToolName(builtin_tools.items, name)) try builtin_tools.append(allocator, name);
@@ -418,6 +425,9 @@ pub const AgentRuntime = struct {
             }
         }
         for (builtin_tools.items) |name| {
+            if (@import("../tools.zig").getTool(name)) |builtin| {
+                if (!builtin.previewAllowed(config.preview)) return error.PreviewFeatureDisabled;
+            }
             if (config.enable_cron and isCronBuiltin(name)) continue;
             if (!isSessionBuiltin(name)) return error.UnsupportedBuiltinTool;
         }
@@ -428,7 +438,7 @@ pub const AgentRuntime = struct {
             plugin_snapshot.host_stream_tools,
             plugin_snapshot.process_tools,
         );
-        self.* = .{ .allocator = allocator, .plugin_snapshot = plugin_snapshot, .catalog = catalog };
+        self.* = .{ .allocator = allocator, .preview = config.preview, .plugin_snapshot = plugin_snapshot, .catalog = catalog };
         return self;
     }
 
@@ -1916,6 +1926,7 @@ pub const AgentSession = struct {
         else
             null;
         errdefer if (swarm_ctx) |*s| s.deinit();
+        if (swarm_ctx) |*s| s.preview = runtime.preview;
 
         self.* = .{
             .allocator = allocator,
@@ -2691,7 +2702,7 @@ pub const AgentSession = struct {
     /// Render this Session's subagent system prompt: `metacodes:subagent` and
     /// the environment, with the Session's prompt profile inherited.
     pub fn renderSubagentPrompt(self: *const AgentSession, allocator: std.mem.Allocator) !prompt_sections.Rendered {
-        return system_prompt_mod.renderSubagentPrompt(allocator, self.model, self.workspace.root, self.promptProfile());
+        return system_prompt_mod.renderSubagentPromptWithPreview(allocator, self.model, self.workspace.root, self.promptProfile(), self.runtime.preview);
     }
 
     /// Record the manifest of the prompt this Run sends and, when it differs
@@ -3253,6 +3264,7 @@ pub const AgentSession = struct {
         defer self.allocator.free(sp_names);
         for (tool_definitions, 0..) |d, i| sp_names[i] = d.name;
         var rendered_prompt = system_prompt_mod.renderSessionPrompt(self.allocator, .{
+            .preview = self.runtime.preview,
             .model = self.model,
             .cwd = self.workspace.root,
             .enabled_tool_names = sp_names,
@@ -3302,6 +3314,7 @@ pub const AgentSession = struct {
         };
 
         const run_options: agent_loop.Options = .{
+            .preview = self.runtime.preview,
             .max_turns = max_turns,
             .retractable_stream_retries = stream_retry_budget,
             .model_error_out = &self.last_model_error,

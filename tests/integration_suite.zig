@@ -22,6 +22,7 @@ test {
     _ = @import("component/bash_output_wait_test.zig");
     _ = @import("component/bedrock_converse_test.zig");
     _ = @import("component/cache_break_test.zig");
+    _ = @import("component/chatgpt_codex_test.zig");
     _ = @import("component/capability_gate_test.zig");
     _ = @import("component/check_gate_test.zig");
     _ = @import("component/compact_summary_test.zig");
@@ -63,6 +64,7 @@ test {
     _ = @import("component/ontology_rule_projection_test.zig");
     _ = @import("component/ontology_rule_snapshot_adapter_test.zig");
     _ = @import("component/openai_provider_test.zig");
+    _ = @import("component/openrouter_login_test.zig");
     _ = @import("component/openai_responses_cli_test.zig");
     _ = @import("component/openai_responses_test.zig");
     _ = @import("component/output_semantics_test.zig");
@@ -150,4 +152,8 @@ test {
     _ = @import("integration/mcp_sse_oauth_test.zig");
     _ = @import("integration/skills_e2e_test.zig");
     _ = @import("integration/tool_abort_test.zig");
+    _ = @import("component/connection_keepalive_test.zig");
+    _ = @import("component/execute_code_test.zig");
+    _ = @import("component/harnessmm_test.zig");
+    _ = @import("component/stream_read_failure_log_test.zig");
 }

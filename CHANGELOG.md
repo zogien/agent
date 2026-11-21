@@ -16,7 +16,38 @@ status, compatibility boundaries, and entry points are defined by
   (`metacodes serve`) in this fork. Use `SessionHost` with your own transport
   or embed the AgentCore SDK to host sessions in another application.
 
+## 0.13.0 — 2026-11-20
+
 ### Changed
+
+- **Each preview feature has its own switch.** `execute_code`, `teamwork` and
+  `comment_guard` can be enabled one by one with `--preview=<list>` /
+  `--no-preview=<list>` or a root `"preview"` object in `config.json`, such as
+  `{"execute_code": true}`. `--preview`, `--no-preview` and `"preview": true`
+  still switch them all. HarnessMM and RSI no longer need `--preview`:
+  `--harnessmm` and `--rsi` alone select them. Zig embedders now set
+  `RuntimeConfig.preview` to a `preview.Features` value (`.all`, `.none` or
+  individual fields); the AgentCore ABI keeps `RuntimeConfigV1.preview` as
+  all-or-nothing.
+
+- **A Bench SSH executor is a `metacodes` node.** The workbench no longer
+  copies a Python runtime to an SSH executor: `metacodes bench setup
+  --executor NAME` installs the bundle's `metacodes` there
+  (`<state_dir>/bin/metacodes`, and `~/.local/bin/metacodes` when free), and
+  every run, copy-back and readiness probe goes through
+  `metacodes bench node …` on that machine. The node reports its own version
+  and the WorkBuddy suites prepared on it, so WorkBuddy Code and Security now
+  run on an SSH executor with that executor's own checkout. `node peers`
+  lists the nodes a machine drives and the workbenches that drove it.
+  Re-run setup for each SSH executor once after upgrading; until then its
+  readiness says the node is missing.
+
+- **Preview features require opt-in.** `--preview` enables them; `--no-preview`
+  overrides a saved root `"preview": true` in the installation's `config.json`.
+  ExecuteCode JavaScript orchestration is a preview feature and is hidden and
+  refused by default. Child agents inherit the setting. Python and Node.js
+  expose a Runtime `preview` option; AgentCore ABI revision 29 consumes a
+  reserved RuntimeConfig word for the boolean, with unchanged struct sizes.
 
 - **The CLI no longer consults a built-in System-One advisor** (#474). Until
   now every host built on the CLI (the TUI, `-p`, `--web`, `serve`) fell back
@@ -82,18 +113,50 @@ status, compatibility boundaries, and entry points are defined by
 - **`/model` is one screen, models first** (follow-up to #527). The models of
   every configured provider are listed under a heading per provider that says
   where its key comes from and who bills it, the provider in use first and the
-  cursor on the model in use; typing filters across them all and lists the
-  matches flat. A model served on several routes lists them under it, in
+  cursor on the model in use; typing filters across them all, under the same
+  headings. A model served on several routes lists them under it, in
   words, while the cursor is on it; Enter on the model takes its preferred
   route, Enter on a route takes that one. The reasoning level is a line under
   the list, changed with ←/→ from any row, and kept as the level wanted: each
   model shows and commits the nearest one it takes. The three scopes are named
-  in the header. Providers without a key are one "Not configured" line at the
-  bottom; Enter lists them. Closing the picker without a choice prints
-  `kept <model>`. On the Metask session, `/model` lists only the models the
-  gateway serves on `/v1/messages`, with the reasoning levels it names
-  (`capabilities.reasoning.efforts`); before, it listed the gateway's image
-  and video models too, and offered no level.
+  in the header. Providers without a key are not listed, and a filter does
+  not find their models; when none is listed, the picker says so and points
+  to `/login` and to this install's `.env`, by its path. Closing the picker
+  without a choice prints `kept <model>`. On the Metask session, `/model`
+  lists only the models the gateway serves on `/v1/messages`, with the
+  reasoning levels it names (`capabilities.reasoning.efforts`); before, it
+  listed the gateway's image and video models too, and offered no level.
+- **`/model` starts a DeepSeek model at `high`, and keeps a level the
+  session already runs with** (follow-up to #539). DeepSeek's
+  `reasoning_effort` control declares `high`, the level its API uses when a
+  request names none ("Thinking mode is enabled by default, with the default
+  effort being `high`", api-docs.deepseek.com/guides/thinking_mode). With no
+  level set, a DeepSeek model in `/model` shows `[high]` where it showed
+  `[default]`, and a pick sends it by name: the request that carried
+  `"thinking":{"type":"enabled"}` alone now also carries
+  `"reasoning_effort":"high"` (on the Anthropic wire,
+  `"output_config":{"effort":"high"}` and the same `thinking`). A route bound
+  without the picker (`--provider`, `.env`, `/model use`) still names no
+  level. When `/model` opens, the level the session runs with starts
+  selected even when it is `none` or `minimal` (before, only a level that
+  thinks did), so DeepSeek's default does not replace thinking turned off.
+- **`/model` keeps the provider headings while you filter, so a match says
+  which route it goes through and who bills it** (#600). Typing used to list
+  the matches flat with the provider's name trailing each row, and OpenRouter
+  lists about 300 models under their makers' names (`DeepSeek: DeepSeek V4
+  Pro 0423`), so its rows and DeepSeek's own read alike. The matches now sit
+  under the same headings as the unfiltered list (`OpenRouter · key from
+  shell · billed to your OpenRouter account`), the providers with a model
+  that holds the typed text whole first; the first row is the one it was.
+  A list scrolled into a group opens with that group's heading in place of
+  its first row, filtered or not, the cursor kept below it; when that row
+  is the model whose routes are listed, the line names the model too.
+  PgDn and PgUp move a row less than the window, so no model is left
+  between two pages. A model's name takes the room the rest of its row
+  leaves instead of a third of the width, measured in terminal columns
+  (a full-width character takes two): at 80 columns the third cut 116 of
+  OpenRouter's 324 names, 46 of them to the same text as another, a free
+  model and its paid one among them.
 
 - **An explicit Skill run takes the Host's context blocks** (#534). An
   AgentCore `RUN_INPUT_SKILL` Run with `RunOptionsV1.context_blocks` used to
@@ -241,10 +304,10 @@ status, compatibility boundaries, and entry points are defined by
   list: one refused for another reason (two names of its key that
   disagree, say) stays listed, and a pick says why. A provider with no such
   credential is no longer a row that leads to a sign-in or a key field: it
-  is listed dimmed under
-  "Not configured", below the others, and choosing it shows the variable to
-  set, this install's `.env` and `doc/LOCAL_CONFIG.md` (for Metask, `/login`
-  first), and starts nothing. The in-picker sign-in and key-paste stage of
+  is not listed. A pick whose credential went away after the picker listed
+  it shows the variable to set, this install's `.env` and
+  `doc/LOCAL_CONFIG.md` (for Metask, `/login` first), and starts nothing.
+  The in-picker sign-in and key-paste stage of
   #67 are gone; `/login <provider>` pastes a key or signs in, as before. A
   pick that moves the session to another provider says on a second line who
   bills it from then on (`from now on billed to your DeepSeek account`).
@@ -298,6 +361,57 @@ status, compatibility boundaries, and entry points are defined by
 
 ### Added
 
+- **OpenRouter is built in, and `/login openrouter` signs in on OpenRouter's
+  own site.** OpenRouter's PKCE sign-in creates an API key on the user's own
+  account: `/login openrouter` and `metacodes login --provider openrouter` ask
+  which way — the browser on this machine (a loopback callback on any free
+  port, taken only with its own state), or another device (`--device-code`;
+  the page shows a code to paste back, the way over SSH, offered first there)
+  — trade the code and the verifier as JSON, and store the key in
+  `<state root>/keys/openrouter.json` like a pasted one, with what
+  `GET /api/v1/key` said about it then (label, spending limit, expiry, free
+  tier). The third way is a key the user already has (`/login openrouter`'s
+  last choice, or `--api-key-stdin`): checked against `GET /api/v1/key`,
+  which answers 401 without a valid key and is not billed, and described the
+  same way. Nothing here can delete the key on OpenRouter (that takes a
+  management key): `/logout openrouter` removes it from this machine and
+  names the page where its owner deletes it
+  (`https://openrouter.ai/keys/<sha256 of the key>`), and a new sign-in names
+  the key the previous one left. `login status` shows where the key came from
+  when OpenRouter is the provider a start uses. `OPENROUTER_API_KEY` is read
+  without a configured catalog. A 401 from OpenRouter says to sign in again; a
+  403 (a spent key limit, a guardrail) keeps OpenRouter's own words.
+  `METACODES_OPENROUTER_URL` (https, or plain http to a loopback host) moves
+  every OpenRouter address, requests included, for development and tests.
+
+- **`/model` lists the OpenRouter models the account can use.** After a
+  sign-in or a pasted key, and on `/providers refresh`, the account's own
+  listing (`GET /api/v1/models/user`, which applies its provider
+  preferences, privacy settings and guardrails) gives one route per model
+  that takes tools over chat completions, all on OpenRouter's router channel:
+  OpenRouter picks the upstream (its default routing — price, speed, uptime,
+  fallbacks), and the price shown is the model's listed one. The listing is
+  kept trimmed in `<state root>/cache/models/` (no key in it); a start reads
+  it whatever its age, so a stored `/model` default on an OpenRouter model
+  resolves without a request, and the REPL fetches it again in the
+  background when none is kept or it is a day old and a key is set (as with
+  a key in `.env`). An OpenRouter that is not set up says `/login openrouter`
+  in `/model`'s setup, as Metask's says `/login`.
+
+- **OpenRouter requests say who is calling.** Every request on a route in
+  OpenRouter's dialect carries OpenRouter's app attribution
+  (https://openrouter.ai/docs/app-attribution): `HTTP-Referer:
+  https://github.com/metask-ai/metacodes`, `X-OpenRouter-Title: metacodes`,
+  `X-OpenRouter-Categories: cli-agent`, and no visibility header, so the app
+  is listed in OpenRouter's rankings. Nothing in them is about the user, and
+  no other provider's requests carry them.
+
+- **A configuration entry that names a built-in provider is passed over
+  alone.** `custom_providers.<built-in id>` used to fail the whole
+  `custom_providers` section; it is now skipped by itself, said once, and the
+  user's other providers load. `provider_catalogs.openrouter` is passed over
+  the same way now that OpenRouter is built in.
+
 - **`/login <provider>` and `metacodes login --provider <provider>` reach every
   built-in vendor.** OpenAI, Google Gemini, Alibaba Qwen, MiniMax and the
   Moonshot Kimi open platform declare their key pages now, as DeepSeek, the
@@ -311,6 +425,76 @@ status, compatibility boundaries, and entry points are defined by
   check. `metacodes login --provider openai` takes a pasted key too while no
   OAuth client is configured for OpenAI; it used to start the browser sign-in
   and stop on the missing client id.
+- **`chatgpt-codex`: a ChatGPT plan's Codex quota, the way the Codex CLI
+  reaches it. Unofficial.** `/login chatgpt-codex` and `metacodes login
+  --provider chatgpt-codex` sign in at `auth.openai.com` in the browser with
+  the Codex CLI's public client (`app_EMoamEEZ73f0CkXaXp7hrann`), and say
+  first that the sign-in is unofficial and may stop working at any time
+  (`ProviderProfile.oauth_support`). The redirect can only land on the two
+  ports that client registered, 1455 then 1457, which Metask's own sign-in
+  also uses: with both taken the sign-in stops and names them, and nothing is
+  sent to whatever holds them. A refusal from the authorization server now
+  ends the wait and says what it said (`missing_codex_entitlement` is a
+  workspace without Codex), where it used to wait on. The sign-in is stored
+  as `oauth/chatgpt-codex.json` with the ChatGPT workspace the ID token names
+  (`account_id`; the ID token itself, which names the user, is not kept).
+  Turns go to `chatgpt.com/backend-api/codex/responses` with the route's
+  request profile (`provider/request_profile.zig`): `originator: metacodes`,
+  `chatgpt-account-id` read from the token the request carries, `accept:
+  text/event-stream`, `include: ["reasoning.encrypted_content"]` and
+  `instructions` always; the `openai` provider's requests are unchanged. A
+  used-up plan (`usage_limit_reached`) and a plan without Codex
+  (`usage_not_included`) are no longer retried: the failure says when the
+  plan resets, in local time and as a wait, or that it never will. Signing
+  out (`/logout chatgpt-codex`, `metacodes logout --provider chatgpt-codex`)
+  revokes the refresh token at `auth.openai.com/oauth/revoke` first, bounded,
+  then deletes the sign-in. It is a subscription plan: a `-p` or `serve`
+  start on it says so once. The ten models are a static list, GPT-6.2
+  Sol first (a start that names no model uses it); the
+  device-code sign-in, the `x-codex-*` usage headers and zstd request bodies
+  are not done.
+
+- **`metacodes providers add|probe|list|remove`: a model API of your own
+  without writing JSON** (`doc/PROVIDERS.md`). `providers add <id> --base-url
+  <url> --protocol <wire> --model <id>` writes `custom_providers.<id>` in
+  `<state root>/config.json` — a relay, a company gateway, Ollama or vLLM on
+  this machine, a vendor's coding-plan address — after checking the whole file
+  the way `--check-providers` does, inside the lock that writes it; a
+  definition that would not load, an address the endpoint policy refuses
+  (plain http to another machine, a user name or password in the URL), a
+  built-in id and a key variable another provider reads are refused before
+  anything is written, and every other key of the file keeps its content and
+  order. A relay that serves several protocols is one provider with one
+  channel per `--protocol`. `--probe` asks the endpoint's model list (OpenAI
+  `/models`, Anthropic `/v1/models` with `anthropic-version`, Gemini
+  `/v1beta/models`; the standard `data` array or an enriched `models` map), at
+  a terminal lets you pick, and writes the limits it reports; `providers
+  probe` lists without storing. With no arguments at a terminal, `add` asks
+  for each part. A server on this machine that needs no key (Ollama, vLLM)
+  gets the placeholder `none` stored as its key when you answer "none" (or
+  press Enter at `--probe`'s key prompt): a provider with no key does not
+  start, and such a server ignores it. `--replace` changes an existing one
+  and keeps what was written by hand. `providers remove` takes the
+  definition, its settings, its stored key and login, and a default on one of
+  its models. Each change applies from the next start, and the commands say
+  so.
+
+- **A provider of your own takes a pasted key.** `/login <id>` and `metacodes
+  login --provider <id>` now work for a provider defined in
+  `custom_providers`: there is no page to open, so they go straight to the
+  paste, check the key against the provider's model list the way its requests
+  send it, and store it in `<state root>/keys/<id>.json`, which only that
+  provider reads. The check may be plain http to a server on this machine,
+  as the provider's own requests may.
+
+- **A coding plan of your own can say it is one.** `providers add
+  --subscription-plan` (or `"subscription_plan": true` in `custom_providers`)
+  marks a provider you define as a subscription plan, as `kimi-code` and
+  `zai-coding-plan` are: a `-p`, `serve`, resumed-suspension or piped start on
+  it prints the one-line warning that its terms may not cover them. The coding
+  plans of Alibaba Cloud Model Studio and Volcano Engine Ark, which
+  `doc/PROVIDERS.md` shows defined this way, limit their keys to interactive
+  use in coding tools.
 
 - **A Linux sandbox backend: bubblewrap.** With `sandbox.enabled`, Bash,
   Monitor, skill `!` lines, the teamwork reviewer's check command and the
@@ -500,10 +684,129 @@ status, compatibility boundaries, and entry points are defined by
 
 ### Fixed
 
+- **A stored default on an OpenRouter model starts when OpenRouter's model
+  list is not on this machine** (#622). A model picked in `/model` for
+  `from now on` is stored as a pin to its offer, and a start resolves that
+  pin against the listing kept in `<state root>/cache/models/`. With no
+  listing kept (the cache deleted, `config.json` copied without it), every
+  start exited 2 with `the stored selection pins offer …`, and only the REPL
+  that could not start would download the listing. Now a start whose pin
+  does not resolve, with an OpenRouter key set and no listing kept, says
+  `Downloading OpenRouter's model list for the stored default model…`,
+  downloads it (30 s at most), keeps it and resolves the pin again. A pin
+  is still never remapped: when the download fails, the start exits 2 and
+  says why, with `--provider openrouter` to start without that model, or
+  `login --provider openrouter` when OpenRouter refused the key. With
+  `METACODES_NO_PROBE` set nothing is downloaded, as before.
+
+- **`/login openrouter` no longer stops the TUI while the account's model
+  list downloads, and `/model` says how the download goes** (#572). The list
+  (`GET /api/v1/models/user`, about 0.8 MB) was fetched on the REPL's thread
+  inside `/login`, with no word before it and no time limit: the screen sat
+  unchanged until it came. A download that failed still opened `/model`, and
+  on an account without credits, preset to `:free`, the picker was empty.
+  Now the list downloads in the background and `/model` opens at once; a line
+  under its title says `Downloading the models your OpenRouter account can
+  use…` with how much has come, a filter that finds nothing yet says the
+  models are still downloading, and the list fills in when it comes, the
+  filter, the scope and the row under the cursor kept. A download whose
+  connection fails, or whose answer stops partway, is tried once more by
+  itself; one that still fails, or brings no new byte for 60 seconds, says
+  why on that line (`no connection`, `answer cut off`, …) and that Ctrl+R in
+  `/model` downloads it again. A refused key says `/login openrouter`
+  instead. `/providers refresh` says it is downloading before it waits, and
+  `/login` without the TUI downloads before it returns, as before, saying so
+  first.
+
+- **A start downloads OpenRouter's model list whatever route the session
+  runs on** (#572). With a key set and no list kept, or a day-old one, only a
+  session on an Anthropic Messages route with the `/v1/models` probe on
+  fetched it; a start with OpenRouter alone, on OpenRouter itself, on an
+  OpenAI-wire provider or on a Metask sign-in never did, so `/model` offered
+  only `Auto Router`, and a kept list never updated. Every interactive start
+  without `METACODES_NO_PROBE` now fetches it in the background; a first
+  download is said in `/model` as above, an update of a kept list is quiet.
+  A catalog answer cut off partway is now reported as `Interrupted` rather
+  than as `TooLarge` or a parse error.
+
+- **Token and cost totals no longer count part of a streamed response
+  twice.** A provider reports a response's usage as a running total:
+  Anthropic's `message_delta.usage` is cumulative and follows a
+  `message_start` that already counted the prompt and the first output
+  tokens, some OpenAI-compatible servers attach the usage so far to every
+  chunk, and Gemini repeats `usageMetadata`. Each report was added to the
+  totals as if it were an increment. On the streaming documentation's own
+  examples that is 16 output tokens for a response of 15, and 13361 input /
+  513 output for one of 10682 / 510, about 20% more cost. `/cost`, the token
+  and cost fields of `--json`, the cost budget, the goal meter and AgentCore
+  `usage` events all read those totals. Each provider stream (Messages,
+  Chat Completions, Responses, Gemini, Bedrock Converse) now hands on only
+  what a report adds to the highest count the response has reported so far,
+  so a response's `usage` events add up to the provider's totals however
+  many reports carried them. The per-request view behind the context anchor
+  and the prompt-cache diagnostics already took the highest report and does
+  not change.
+
+- **Behind a proxy, the end of a model's answer is no longer lost, and the
+  turn is no longer sent again for it** (#573). Every request to a model
+  provider said `connection: close`, so the server closed the connection
+  right after the last byte, and behind a transparent proxy that close could
+  overtake bytes the proxy had not forwarded yet. On the Responses wire the
+  last event is the largest (it echoes the instructions and tools, over
+  100 KB), so it was the one cut: the stream counted as incomplete, and the
+  turn was sent again and charged again, twice in the TUI and up to four
+  times with `-p`. On one proxied route on 2026-11-18 this hit 3% to 23% of
+  real streams, and 74% of a large page fetched with `connection: close`
+  against none with keep-alive. The Messages, OpenAI-compatible (Chat
+  Completions and Responses), Gemini and Bedrock requests, and the Messages
+  `/v1/models` list, now say `connection: keep-alive`: the server leaves the
+  connection open, and the client closes it once it has read what it needs,
+  still without reusing it. A `/v1/models` list cut short no longer reads as
+  a complete, shorter one. A stream that ends without its stop report still
+  counts as incomplete. A `204` or `304` error answer is reported at once
+  instead of being read to the end of the connection. Other requests (MCP,
+  TinyKG, sealed skills, the System-One advisor, OTLP export) are unchanged.
+
+- **`/providers remove <id>` no longer leaves a defined provider behind.** For
+  a provider defined in `custom_providers` it removed only its settings
+  (`providers.<id>`), so the definition stayed in `config.json` and the
+  provider came back at the next start. It now removes it whole, as
+  `metacodes providers remove` does: the definition, its settings, its stored
+  key and login, and a default on one of its models. A built-in vendor still
+  loses only its settings.
+
+- **An OpenRouter catalog reads what OpenRouter's API answers today**
+  (`src/provider/openrouter.zig`). Fed the live documents of 2026-11-18,
+  three things failed: the whole `/models` listing was refused
+  (`MalformedPrice`), because OpenRouter prices its router models (such as
+  `openrouter/auto`) at `"-1"`, "whatever the model it picks costs" — now an
+  unknown price, while any other negative is still refused; an endpoint's
+  request named its display string ("Wafer | deepseek/…-20260910") as the
+  model, which no request can carry — now the model's own id; and two models
+  served by one upstream gave two channels one id (`DuplicateChannelId`), so
+  a catalog of more than one model never ingested — an endpoint's channel is
+  now named by its routing tag (`deepinfra/fp8` → `deepinfra-fp8`) and holds
+  every model it serves. The model bound grew from 512 (478 were listed) to
+  4096.
+
 - **`/login` names the providers it cannot list.** Its list holds twelve, and
   the ones past them were dropped without a word; `/login <id>` for one of
   them then showed the list without it. The list now ends with `N more not
   shown: /login <provider> (<ids>)`, and `/login <id>` starts any of them.
+- **A provider's own OAuth sign-in is used by a start, and signed out of by
+  `logout`.** A sign-in `login --provider <id>` stored in
+  `oauth/<provider>.json` reached a session only through a `/model` pick:
+  `--provider <id>`, `-p`, and a stored `/model` default on that provider
+  found no credential and asked for a key. A start now uses it below every
+  key, refreshing it first when it expires within two minutes, and says
+  `signed in`; judging a stored default (`login status`, the startup order)
+  only checks that the sign-in is stored, so it sends nothing and an expired
+  one still counts. `/logout <provider>` and `metacodes logout --provider
+  <id>` removed only a stored key; they now remove the sign-in too, revoked
+  first where the provider declares an endpoint for it (`oauth_revocation`).
+  The help a start prints for a provider that only signs in names `login
+  --provider <id>` and no longer offers `--api-key`, and a refused sign-in
+  is told to sign in again rather than to check a key.
 
 - **An MCP HTTP request on a kept-alive connection the server closed is sent
   again on macOS too** (#555). A request other than `tools/call` that found
@@ -513,18 +816,42 @@ status, compatibility boundaries, and entry points are defined by
   the request failed as `McpOutcomeIndeterminate`. A reset before any
   response byte now counts as that close. A `tools/call` whose body went out
   is still never sent twice.
+- **A provider's error answer is shown as it was sent, whatever pieces it
+  arrived in** (#565). A non-2xx body that reached metacodes in more than one
+  read (the chunks of a `Transfer-Encoding: chunked` body, or a
+  `Content-Length` body whose bytes came in apart) came out scrambled in the
+  TUI's `HTTP <status>: …` line, the `body=` log line and the failure detail:
+  each later piece landed on the start of what had been read, so the first
+  piece was lost and the end repeated. OpenRouter's 402 for an account without
+  credits was one, and with it went the provider's explanation; an upstream
+  error code or the numbers of a context-limit message could go the same way,
+  since the failure detail and the overflow check read that text. All four
+  provider clients (Anthropic Messages, OpenAI-compatible, Gemini, Bedrock)
+  now read the body through one function, `client.readErrorBody`, which gives
+  the HTTP reader a buffer of its own; how much of a body is kept (2 KiB on
+  Messages, 4 KiB on the others) is unchanged.
 - **Shift+Enter inserts a newline while a reply streams** (#456). In the
   terminal UI, Shift+Enter during a reply did what Enter does: the draft
   went into the pending queue, the input box was cleared, and when the reply
   ended the line typed so far was sent as the next message. It now inserts
   a newline in the draft, as it does at the prompt; Enter still queues the
   whole draft, newline included, as one message.
+- **A `/model` search can start with `q`** (#599). On an empty filter `q`
+  closed the picker, so typing `qwen` closed the list on its first letter
+  and left `wen` in the input box: no model whose name starts with `q`
+  could be searched for. `q` is now a filter letter like any other, as the
+  list's `type to filter` says, and Esc is the way out (it clears the filter
+  first). The list no longer shows `q close`, and when no provider is
+  configured it names only the ways out with a filter typed too (it said
+  `enter apply · tab scope`, though there was nothing to apply). The screen
+  that says where a provider's key goes has nothing to type into and still
+  closes on `q`.
 - **`/model` names the variable and the file for a provider without a key**
   (#483). A route of Kimi (Moonshot's open platform), Gemini, Qwen or MiniMax
   chosen without its key ended in `switch failed (MissingCredentials)`: these
   providers have neither a sign-in nor a key page the picker could open.
-  Such a provider is now listed under "Not configured" (#488), and a pick
-  whose key went away after the picker opened shows the same setup: the
+  Such a provider is no longer listed (#488), and a pick whose key went
+  away after the picker opened shows where it goes: the
   variable to set (the canonical one, e.g. `MOONSHOT_API_KEY`), this
   install's `<state root>/.env` and the guide (`doc/LOCAL_CONFIG.md`); the
   previous route stays active. A picker notice longer than the terminal is
@@ -647,9 +974,110 @@ status, compatibility boundaries, and entry points are defined by
   sign-in that fails, cannot bind or is cancelled revokes nothing; the same
   session imported again is not revoked, and a replaced session whose
   gateway is not the site's origin is not sent there.
+- **`/login <provider>` takes effect in a session already on that provider**
+  (#566). A route takes its credential when it is chosen, so a key `/login`
+  stored afterwards (say, to replace one the provider stopped accepting) was
+  never sent: every request still carried the previous key, and failed the
+  same way, until `/model` chose the route again. Once `/login <provider>`
+  stores a key or a sign-in, a session running on that provider is bound
+  again, on the same model, channel and scope, and its next request carries
+  what was stored. After a sign-in (OAuth) the process also drops the tokens
+  it held from the login replaced: it kept presenting them, even after a
+  `/model` pick, and a refresh of them was written over the new login. A
+  session on another provider, or on no route, is left as it is.
+
+- **A credential pool member authenticates only its own provider's
+  routes.** `config.json`'s `providers.<id>.credentials[]` were read as one
+  list for every provider, and a member was chosen by kind alone: a provider
+  with no key of its own (DeepSeek, say) was given another provider's member
+  whenever its profile accepted that kind, and its requests carried it to
+  that provider's endpoint. A route that names an account fell back to
+  another credential when that account's variable was unset: another
+  account's, the provider's own variable, or a stored key. Each provider now
+  reads only its own pool, and a route that names an account uses that
+  account or fails with `MissingCredentials`.
+
+- **A `/model` switch that cannot be applied leaves the session's route
+  where it was.** The kernel recorded the new route before the session bound
+  it and kept it when binding failed (no credential, for instance), and the
+  process's OAuth session had already moved to the new provider. The next
+  turn's token refresh read both: once that provider's token endpoint
+  answered, its token went into the clients still pointed at the previous
+  route's endpoint. A failed bind now puts back the kernel's selection
+  (journalled as a failed switch, `binding_failed`) and the previous OAuth
+  session; a resumed session's stored route is restored the same way.
+
+- **The turn's token refresh renews only the credential the session's route
+  was bound with.** It refreshed the provider of the kernel's effective
+  selection and put that token in the clients, whatever route they were on.
+  After a `/model` pick in the global or once scope (Tab), a narrower scope
+  still named the previous route, so a Metask device session that picked a
+  relay that way sent the Metask token to the relay every turn; a route
+  bound to a pool account or to a key had it replaced by the provider's
+  OAuth token. The refresh now follows the route the clients were last bound
+  to (before any pick, the one the session started on) and replaces only an
+  OAuth token that route was bound with.
+
+- **The Metask token refresh runs only on a route the Metask device sign-in
+  authenticates.** The refresh a device-code session installs at startup
+  stayed on the clients after a `/model` switch to another provider, so an
+  endpoint that answered 401 with `"code":"token_expired"` received the
+  request again with the Metask access token. A route switch now installs or
+  removes it with the route, and it answers only while the process's OAuth
+  session is Metask's.
+
+- **A token refreshed while the route moved is not sent on the new route.**
+  When a 401 `token_expired` refresh finished after a `/model` commit (made
+  from the reply's key thread) had moved the client, the refreshed token was
+  installed and the request replayed at the new route. The client now drops
+  it, and the request fails as unauthorized.
+
+- **The `/models` key list is requested only on the Metask API-key route.**
+  It was requested with the Metask sign-in token from `auth.json`, at
+  `/api/v1/keys` under whatever endpoint the session was on: typing `/model`
+  after a switch to another Messages-wire provider, or in a session started
+  on one, sent that token there. Elsewhere the menu now shows the list as
+  unavailable; leaving the Metask route drops a loaded list, and coming back
+  loads it again. A Metask model picked at another Metask gateway (the
+  compiled default, say) is still the Metask route.
+
+- **A key picked in `/models` stays on the Metask route.** The pick was
+  installed in every client and in the background job registry, and its
+  `/v1/models` probe sent, whatever route the session was on. Off the Metask
+  API-key route it is now refused (`NotOnMetaskKeyRoute`), and on it only the
+  route's own client takes it. The key it replaces stays readable for one
+  more pick instead of being freed while a client may still read it.
 
 ### Security
 
+- **If you used a relay or switched a session between providers, replace
+  your keys and sign in to Metask again.** Before this release a credential
+  could reach a provider it was not issued for: after a `/model` switch (a
+  relay counts as a provider), the Metask sign-in token, a key picked in
+  `/models` or another provider's sign-in token could be sent to the
+  endpoint the session was on, and with credentials for several providers
+  in `config.json` (`providers.<id>.credentials`) one provider's pooled key
+  could be sent to another. Each case is fixed; they are listed under Fixed.
+  Create new keys at the providers whose keys this machine held, delete the
+  old ones there, and sign in to Metask again with `/login` or
+  `metacodes login`, which now revokes the sign-in it replaces (#560).
+- **On `serve` and `--web`, an answer from before a restart no longer
+  answers a newer request** (#563). Both numbered UI requests from 1 in every
+  process, and again for every session they restored, and `POST /respond`
+  and the UDS `respond` op matched an answer by that number alone. So an
+  answer delivered a second time after a restart was applied to whichever
+  request held the same number then. That happened with a webhook that
+  retries, a client that reconnects, or an old card clicked again. One
+  Write's approval approved another Write, and the journal recorded the
+  original approver for it. Request ids now come from one counter per
+  process that stays above the wall clock in milliseconds, so they are never
+  reused, across restarts or for a session destroyed and restored. Such an
+  answer is refused as stale: 409, or the UDS `no pending request with this
+  id`. Ids are larger integers now, about 1.8×10¹² and below 2⁵³; a frontend
+  copies them back as before. `tests/component/serve_sessions_test.zig`
+  restarts the daemon between one granted Write and the next, then delivers
+  the first approval again; `src/web/backend.zig` checks the same across two
+  `WebBackend`s.
 - **An MCP tool asks before it runs on the CLI hosts, as on AgentCore**
   (#473). The TUI, `-p`, `--web` and `serve` permissioned a tool an MCP
   server contributes as a read, so `default`, `acceptEdits` and `auto` ran it

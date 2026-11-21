@@ -21,7 +21,7 @@ fn readGoal(
 }
 
 comptime {
-    if (wire.ABI_REVISION != 28 or
+    if (wire.ABI_REVISION != 29 or
         wire.MAX_STREAM_RETRY_BUDGET_V1 != 8 or
         wire.MAX_CREDENTIAL_BYTES_V1 != 16 * 1024 or
         wire.MAX_SUBMITTED_INPUTS_V1 != 64 or
@@ -1249,7 +1249,7 @@ pub fn main(init: std.process.Init) !void {
     try expectStatus(.ok, api.runtime().destroy()(runtime, &diagnostic), diagnostic);
     runtime = null;
 
-    std.debug.print("AgentCore source-free consumer: Revision 28 Agent Runtime, stream retry budget, rewind to a user message, credential rotation, goals, host-scheduled team, time context, Host model capabilities, active-Run input, prompt profile, permission mode update, OpenAI Responses, multimodal input, active-Run journal, Host/MCP streaming, process-plugin configuration, Workspace Skill Catalog, tools, checkpoint, Runtime rebuild, restore and continued Run OK\n", .{});
+    std.debug.print("AgentCore source-free consumer: ABI revision {d}, stream retry budget, rewind to a user message, credential rotation, goals, host-scheduled team, time context, Host model capabilities, active-Run input, prompt profile, permission mode update, OpenAI Responses, multimodal input, active-Run journal, Host/MCP streaming, process-plugin configuration, Workspace Skill Catalog, tools, checkpoint, Runtime rebuild, restore and continued Run OK\n", .{wire.ABI_REVISION});
 }
 
 /// Revision 25 (#336): one Session's provider credential, rotated twice

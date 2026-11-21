@@ -4,13 +4,17 @@ You can use metacodes with your own provider key instead of a Metask sign-in.
 Put the key in one file of your install, `.env` in its state root, and start
 metacodes again. Nothing goes into your shell profile and nothing into a
 project directory. This page covers where the file is, what it may contain,
-and how metacodes decides which provider to use.
+and how metacodes decides which provider to use. [PROVIDERS.md](PROVIDERS.md)
+covers every way to give metacodes a model: a Metask account, a vendor's key
+pasted with `metacodes login --provider <id>`, and a model API of your own
+(`metacodes providers add`).
 
 - [Where the file is](#where-the-file-is)
 - [Writing the file](#writing-the-file)
 - [Names it accepts](#names-it-accepts)
 - [Which provider and model are used](#which-provider-and-model-are-used)
 - [Presets](#presets)
+- [Preview features](#preview-features)
 - [What the file cannot set](#what-the-file-cannot-set)
 - [Checking it](#checking-it)
 
@@ -47,6 +51,20 @@ metacodes reads `.env` when it starts, so start it again after an edit.
 directory or a repository, or anywhere else: any repository you clone can ship
 a `.env`, and reading it would let that repository choose which provider your
 session uses and with which key.
+
+## Preview features
+
+Preview features are set by the root `preview` field in the state root's
+`config.json`, rather than a variable in `.env`. `{"preview": true}` enables
+every preview feature, `false` (the default) disables them all, and an object
+enables only the features set to `true`, for example
+`{"preview": {"execute_code": true, "teamwork": true}}`. The features are
+`execute_code`, `teamwork` and `comment_guard` (the instruction to avoid adding
+code comments and the matching check in the built-in file editors).
+
+Hosts set the effective features through [the runtime API](API.md#preview-features).
+HarnessMM and RSI have independent runtime settings. See
+[HarnessMM](HARNESSMM_PROTOCOL.md) and [RSI](SKILL_RSI_PROTOCOL.md).
 
 ## Writing the file
 
@@ -90,11 +108,14 @@ first one is the one to use; the others are accepted too):
 | Alibaba Qwen (`qwen`) | `DASHSCOPE_API_KEY` |
 | MiniMax (`minimax`) | `MINIMAX_API_KEY` |
 | Amazon Bedrock (`bedrock`) | `AWS_BEARER_TOKEN_BEDROCK` (a Bedrock API key) |
+| OpenRouter (`openrouter`) | `OPENROUTER_API_KEY` (`/login openrouter` signs in on OpenRouter instead and stores the key it creates) |
 | Metask (`metask`) | `METASK_API_KEY` (see [the order below](#which-provider-and-model-are-used): it counts as a Metask sign-in unless the file names another provider) |
 
-A provider you define in `config.json` (`custom_providers`, see
-[User-defined providers](PROVIDER_OFFER_ARCHITECTURE.md#user-defined-providers))
-adds the names in its `env_aliases`, and the variables `config.json` names
+A provider you define in `config.json` (`custom_providers`: written by
+`metacodes providers add`, see [PROVIDERS.md](PROVIDERS.md#a-model-api-of-your-own),
+or by hand, see [User-defined providers](PROVIDER_OFFER_ARCHITECTURE.md#user-defined-providers))
+adds the names in its `env_aliases` — `providers add --key-env <NAME>` writes
+one — and the variables `config.json` names
 elsewhere are accepted too: `providers.<id>.credentials[].env` (a
 [credential pool](PROVIDER_OFFER_ARCHITECTURE.md#credential-pools)) and
 `provider_catalogs.<id>.credential_env`. These two are read where that pool or
@@ -107,7 +128,9 @@ as `--model` does; without it the provider's default model is used.
 `METACODES_PRESET` names one of your [presets](#presets) instead, and comes
 before `METACODES_PROVIDER` in the same file. In a session, `/model` changes
 the model and the reasoning effort; the context length follows the model
-chosen.
+chosen. The level the session runs with, `none` included, starts selected;
+with none set, a DeepSeek model starts at `high`, the level DeepSeek uses
+when a request names none, and a pick sends it by name.
 
 One file holds the keys of as many providers as you use: each key is read
 when its provider is chosen, by `--provider`, by `/model`, or by a default
@@ -186,12 +209,12 @@ So `METACODES_PRESET`, `METACODES_PROVIDER` and `METACODES_MODEL` in the file
 apply only when nothing above them decides: once you sign in to Metask (`/login`, or
 `metacodes login`), the file's provider no longer takes over. Its keys still
 work: a provider you choose with `--provider` or in `/model` reads its key
-from the file. `/model` lists a provider as usable only once its key is here
-(or in the environment, or stored by `/login <provider>`); until then it sits
-under "Not configured" and, when you choose it, names the variable and this
-file. While the terminal UI starts on Metask instead of this file's provider,
-it says so once under its banner (`.env configures DeepSeek; the default is
-Metask. To use DeepSeek: /model, or /logout`). `/logout` signs you out of
+from the file. `/model` lists a provider only once its key is here (or in
+the environment, or stored by `/login <provider>`); until then it is not
+listed. When no provider is, `/model` says so and points to `/login` and to
+this file, by its path. While the terminal UI starts on Metask instead of this
+file's provider, it says so once under its banner (`.env configures DeepSeek;
+the default is Metask. To use DeepSeek: /model, or /logout`). `/logout` signs you out of
 Metask and switches the session to the provider this file configures
 (`Switched to DeepSeek (from .env)`); later starts use it too.
 
@@ -316,9 +339,12 @@ Request addresses are never read from it: `METACODES_BASE_URL`,
 `METACODES_KG_URL`, and any other name ending in `_URL`, even one that a
 provider definition names. A file that could redirect requests could send
 your key somewhere else. To use your own relay or endpoint, define it in
-`config.json` as a [user-defined provider](PROVIDER_OFFER_ARCHITECTURE.md#user-defined-providers),
-where the endpoint rules and `metacodes --check-providers` apply; its key can
-then live in this file.
+`config.json` as a [user-defined provider](PROVIDER_OFFER_ARCHITECTURE.md#user-defined-providers)
+— `metacodes providers add <id> --base-url <url> --protocol <wire> --model <id>`
+writes one ([PROVIDERS.md](PROVIDERS.md#a-model-api-of-your-own)) — where the
+endpoint rules and `metacodes --check-providers` apply; its key can then live
+in this file (`--key-env <NAME>`), or in its own key file
+(`metacodes login --provider <id>`).
 
 The file sets nothing else either: it is not loaded into the environment, so
 tools and commands that metacodes runs do not see its values.
