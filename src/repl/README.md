@@ -1,5 +1,7 @@
 # repl/
 
+> Historical notes for the former Metacodes CLI and its terminal interface.
+
 终端交互层:REPL 主循环、行编辑、渲染与 headless 模式。
 
 - `loop.zig` — REPL 主循环;slash 命令(`/help` `/compact` `/model` …)

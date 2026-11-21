@@ -16,7 +16,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const es = cc.api_aws_event_stream;
 const ppaths = @import("platform").paths;
@@ -760,62 +760,4 @@ test "L2 bedrock: model_tiers.bedrock picks the model a subagent's request names
     a.free(out);
     const captured = server.lastRequest() orelse return error.NoRequestCaptured;
     try std.testing.expect(std.mem.startsWith(u8, requestLine(captured), "POST /model/us.anthropic.claude-haiku-4-5-20251001-v1%3A0/converse-stream "));
-}
-
-test "L2 bedrock: the built-in profile's startup route drives an App to the Converse path" {
-    const a = std.testing.allocator;
-    const body = try endTurn(a);
-    defer a.free(body);
-    var server = try harness.MockServer.startCassette(&.{body}, 0);
-    defer server.stop();
-    const url = try server.urlOwned(a);
-    defer a.free(url);
-
-    var registry = try cc.provider_registry.ProviderRegistry.initWithBuiltins(a);
-    defer registry.deinit();
-    const outcome = try cc.provider_startup.resolve(a, &registry, .{ .provider = "bedrock", .base_url = origin(url) });
-    try std.testing.expect(outcome == .route);
-    var route = outcome.route;
-    defer route.deinit();
-    try std.testing.expectEqual(cc.types_mod.ProviderKind.bedrock, route.transport);
-    try std.testing.expectEqualStrings(MODEL, route.request_model_id);
-    try std.testing.expectEqual(cc.api_dialect.Vendor.claude, route.dialect.bound().?);
-
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const argv = [_][*:0]const u8{"metacodes"};
-    var config = cc.parseArgsForTest(&argv, arena.allocator());
-    config.provider_kind = route.transport;
-    config.base_url = route.endpoint_url;
-    config.model = route.request_model_id;
-    config.model_explicit = true;
-    config.auth_scheme = route.auth_scheme;
-    config.dialect = route.dialect;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    config.state_root = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
-    // A scratch HOME, no catalog probe, no TinyKG daemon.
-    var guards: [3]EnvGuard = undefined;
-    guards[0] = try EnvGuard.set(arena.allocator(), "HOME", (try arena.allocator().dupeZ(u8, config.state_root)).ptr);
-    defer guards[0].restore();
-    guards[1] = try EnvGuard.set(arena.allocator(), "METACODES_NO_PROBE", "1");
-    defer guards[1].restore();
-    guards[2] = try EnvGuard.set(arena.allocator(), "METACODES_KG_AUTOSTART", "0");
-    defer guards[2].restore();
-    var io_runtime = @import("platform").signal.threadedIo(a, .{});
-    defer io_runtime.deinit();
-    const app = try cc.app_module.App.init(a, io_runtime.io(), config, "brk-key");
-    defer app.deinit();
-
-    var handle = try app.provider().sendStream(&HI, null, null, null, null, null, "");
-    defer handle.deinit();
-    while (try handle.next()) |event| switch (event) {
-        .text => |bytes| a.free(bytes),
-        else => {},
-    };
-    const captured = server.lastRequest() orelse return error.NoRequestCaptured;
-    try std.testing.expect(std.mem.startsWith(u8, requestLine(captured), "POST /model/us.anthropic.claude-sonnet-4-6/converse-stream "));
-    try std.testing.expectEqualStrings("Bearer brk-key", headerValue(captured, "authorization").?);
-    try std.testing.expectEqualStrings(MODEL, app.activeModel());
 }

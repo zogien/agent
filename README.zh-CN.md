@@ -1,13 +1,13 @@
 <div align="center">
 
-# metacodes
+# agent
 
 **可以嵌进任何地方的 agent harness。**
 
-在 WorkBuddy-Bench 上与 CodeBuddy Code、Claude Code 对照评测 · 5.5 MB 原生二进制 · 任何插件都绕不过的固定内核 · 图记忆 · 面向任何宿主的 C ABI
+在 WorkBuddy-Bench 上与 CodeBuddy Code、Claude Code 对照评测 · 任何插件都绕不过的固定内核 · 图记忆 · 面向任何宿主的 C ABI
 
-[![CI](https://github.com/metask-ai/metacodes/actions/workflows/ci.yml/badge.svg)](https://github.com/metask-ai/metacodes/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/metask-ai/metacodes)](https://github.com/metask-ai/metacodes/releases)
+[![CI](https://github.com/zogien/agent/actions/workflows/ci.yml/badge.svg)](https://github.com/zogien/agent/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/zogien/agent)](https://github.com/zogien/agent/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Zig 0.16](https://img.shields.io/badge/zig-0.16-f7a41d.svg)](https://ziglang.org)
 
@@ -15,7 +15,7 @@
 
 </div>
 
-metacodes 是用 Zig 从零写成的 coding agent harness。它今天就能当终端 agent 用，但它是按"库"来设计的：一个固定的 agent loop，权限、预算和形式化判定任何插件都绕不过去；外面包着几层让任何程序都能宿主它的接口：Zig 模块、C ABI（C、C++、Rust、Python、Node 以及任何带 FFI 的语言都能调用）和 headless NDJSON。
+这个 fork 交付用 Zig 编写的 AgentCore SDK。宿主通过 Zig 模块或 C ABI 运行具有工具、权限、预算和形式化检查的 Agent 循环。
 
 ## 为什么还要一个 harness
 
@@ -159,37 +159,24 @@ TinyKG 是 Metask Lab 自研的图存储，用 Zig 编写。它的源码暂未�
 
 ## 快速开始
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/metask-ai/metacodes/main/scripts/install.sh | sh
-```
-
-它会在 macOS 或 Linux（arm64 或 x86_64）上安装最新发布版。Windows 用 `scripts\install.ps1` 配合发布的 zip 安装。然后：
+用 Zig 0.16.0 构建当前平台的 SDK。
 
 ```sh
-metacodes login                            # 在浏览器里登录 Metask
-metacodes -p "explain src/main.zig" --json # headless，输出一条 NDJSON 结果
-metacodes doctor                           # 查看每个运行时组件从哪里解析
+zig build
 ```
 
-从源码构建需要 Zig 0.16：
+SDK 输出到 `zig-out/agentcore/`。Windows 默认使用 MSVC ABI。用
+`zig build archive -Dtarget=<triple> -Doptimize=ReleaseSafe` 生成发布归档和 SHA-256 文件。
 
-```sh
-git clone https://github.com/metask-ai/metacodes.git && cd metacodes
-zig build && ./zig-out/bin/metacodes --help
-zig build example                          # 在 Zig 程序里嵌入运行时
-```
-
-没有浏览器的机器(服务器、SSH)改用设备码登录：`metacodes login --provider metask --no-browser`，它给出一个链接和一个短码，在任何设备上确认后，再选模型和推理强度。Headless 命令可以使用保存的 Metask 会话。
-
-不登录、改用自己的 provider key：写进本安装的 `~/.local/opt/metacodes/state/.env`，重新启动即可，见 [doc/LOCAL_CONFIG.md](doc/LOCAL_CONFIG.md)。用 `metacodes logout` 退出 Metask 账号。
-
-隔离安装、provider 配置、Metask OAuth、Lean 内核和 Windows 等细节见 [doc/GETTING_STARTED.md](doc/GETTING_STARTED.md)。
+接入方式见 [AgentCore SDK 指南](sdk/README.md)。已发布的 SDK 可从
+[GitHub Releases](https://github.com/zogien/agent/releases) 或
+[npm 包 @zogien/agent-sdk](https://www.npmjs.com/package/@zogien/agent-sdk) 获取。
 
 ## 架构
 
 ```mermaid
 flowchart TB
-    hosts["宿主：headless CLI · 你的应用（C ABI 或 Zig）"]
+    hosts["宿主应用（C ABI 或 Zig SDK）"]
     runtime["不可变 Runtime 代（可热替换）"]
     subgraph kernel["固定内核"]
         loop["AgentLoop 与对话账本"]
@@ -212,7 +199,6 @@ metacodes 处于 1.0 之前，版本号以 `build.zig.zon` 为准，每个发布
 
 | 部分 | 状态 |
 |---|---|
-| CLI、headless | 日常在用；1.0 前参数仍可能变化 |
 | AgentCore C ABI | 实验性；宿主锁定精确的 revision |
 | `metacodes-core` Zig 模块 | 实验性源码 API |
 | TinyKG 记忆与任务 DAG | CLI 中默认开启；AgentCore 中尚未提供 |

@@ -1011,8 +1011,8 @@ test "BashTool: 会话 cwd 已消失 → WorkingDirectoryUnavailable,detail 说�
     // 模型试到 `echo retry294` 撞上 400 轮上限。现在必须是一条说明原因的结构化错误。
     var dir_buf: [512]u8 = undefined;
     const dir = @import("test_tmp.zig").path(&dir_buf, "bash-vanished-cwd");
-    _ = std.c.mkdir(dir.ptr, 0o700);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.rmdir(dir.ptr));
+    _ = pfs.mkdir(dir.ptr, 0o700);
+    try std.testing.expectEqual(@as(c_int, 0), pfs.rmdir(dir.ptr));
     var detail: ?[]const u8 = null;
     defer if (detail) |d| std.testing.allocator.free(d);
     var ctx = testCtx();

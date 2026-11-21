@@ -4,7 +4,7 @@
 const std = @import("std");
 const pfs = @import("platform").fs;
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const psync = @import("platform").sync;
 const ppaths = @import("platform").paths;
 
@@ -224,113 +224,6 @@ const Sink = struct {
         return true;
     }
 };
-
-test "L2 repeatable --process-plugin-dir is an explicit executable authority" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const argv = [_][*:0]const u8{
-        "metacodes",
-        "--process-plugin-dir",
-        "plugins/one",
-        "--process-plugin-dir",
-        "plugins/two",
-        "--dump-plugins",
-    };
-    const config = cc.parseArgsForTest(&argv, arena.allocator());
-    try std.testing.expect(config.parse_error == null);
-    try std.testing.expectEqualStrings("plugins/one\x00plugins/two", config.process_plugin_dirs.?);
-    try std.testing.expect(config.plugin_dirs == null);
-
-    const missing = [_][*:0]const u8{ "metacodes", "--process-plugin-dir" };
-    const invalid = cc.parseArgsForTest(&missing, arena.allocator());
-    try std.testing.expect(invalid.parse_error != null);
-}
-
-test "L2 CLI process package preserves typed artifact through DynRegistry and AgentLoop" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const root = try realRoot(&tmp, &root_buffer);
-    const entrypoint = try createPackage(root, .artifact_spool, 30_000);
-    defer std.testing.allocator.free(entrypoint);
-
-    const bodies = [_][]const u8{ TOOL_SSE, FINAL_SSE };
-    var server = try harness.MockServer.startCassette(&bodies, 0);
-    defer server.stop();
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const url = try server.urlOwned(allocator);
-    const root_z = try allocator.dupeZ(u8, root);
-    const url_z = try allocator.dupeZ(u8, url);
-    const argv = [_][*:0]const u8{
-        "metacodes",
-        "--process-plugin-dir",
-        root_z.ptr,
-        "--base-url",
-        url_z.ptr,
-        "--model",
-        "test-model",
-        "--permission",
-        "bypassPermissions",
-    };
-    var config = cc.parseArgsForTest(&argv, allocator);
-    try std.testing.expect(config.parse_error == null);
-    config.long_horizon_arm = .codex_style;
-
-    const home_z = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}", .{root}, 0);
-    defer std.testing.allocator.free(home_z);
-    var home_guard = try EnvGuard.set(std.testing.allocator, "HOME", home_z.ptr);
-    defer home_guard.restore();
-    var probe_guard = try EnvGuard.set(std.testing.allocator, "METACODES_NO_PROBE", "1");
-    defer probe_guard.restore();
-
-    var io_runtime = @import("platform").signal.threadedIo(allocator, .{});
-    defer io_runtime.deinit();
-    const app = try cc.app_module.App.init(allocator, io_runtime.io(), config, "test-key");
-    defer app.deinit();
-    const dynamic = app.dyn_registry.find(TOOL_NAME) orelse return error.ProcessToolMissing;
-    try std.testing.expectEqual(cc.permission.ToolCategory.execute, dynamic.category.?);
-    try std.testing.expect(dynamic.executor == .result_body);
-    try std.testing.expect(dynamic.borrowed_input_schema.?.properties.?.get("text") != null);
-    // execute 分类在 default 下落 ask;若被当 read,default 会免询问 allow。
-    var default_permission = cc.permission.createContext(.default, allocator);
-    try std.testing.expectEqual(
-        cc.permission.PermissionResult.ask,
-        cc.permission.checkPermissionClassified(
-            &default_permission,
-            TOOL_NAME,
-            "{\"text\":\"hello\"}",
-            app.dyn_registry.category(TOOL_NAME),
-        ),
-    );
-
-    try app.conversation.appendText(.user, "call the configured process plugin");
-    var writer = cc.writer_backend.WriterBackend.initNull();
-    const backend = writer.backend();
-    const result = try cc.agent_loop.run(
-        &app.conversation,
-        app.provider(),
-        app.tool_defs,
-        &app.permission_ctx,
-        .{
-            .max_turns = 4,
-            .system_prompt = app.system_prompt,
-            .dyn_registry = &app.dyn_registry,
-            .cwd_abs = root,
-            .artifact_root = root,
-        },
-        &backend,
-        allocator,
-    );
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, result.stop_reason);
-    const body = (server.lastRequest() orelse return error.NoRequestCaptured).body();
-    try std.testing.expect(std.mem.indexOf(u8, body, TOOL_NAME) != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "ReadArtifact") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "PLUGIN_HEAD-") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "-PLUGIN_TAIL") != null);
-}
 
 test "L2 process plugin is namespaced advertised permissioned executed and projected" {
     if (@import("builtin").os.tag == .windows) return error.SkipZigTest;

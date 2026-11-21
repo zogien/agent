@@ -31,4 +31,4 @@ jobs:
         with:
           version: 0.16.0
       - name: Build AgentCore archive
-        run: zig build agentcore:archive -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+        run: zig build archive -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe

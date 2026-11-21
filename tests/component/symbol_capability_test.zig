@@ -16,7 +16,7 @@
 //! 是否存在(否则又是一个"parse 了但没接线"的静默 no-op)。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs;
 const ppaths = @import("platform").paths;
 
@@ -277,90 +277,3 @@ const EnvGuard = struct {
         self.* = undefined;
     }
 };
-
-test "L2 follow-on: LSP 默认开,--no-lsp 关,--lsp 覆盖(最后一个赢)" {
-    const a = std.testing.allocator;
-
-    const Case = struct { argv: []const [*:0]const u8, want: bool, why: []const u8 };
-    const cases = [_]Case{
-        .{ .argv = &.{"metacodes"}, .want = true, .why = "裸启动 = 开(本次 follow-on 的核心翻转)" },
-        .{ .argv = &.{ "metacodes", "--lsp" }, .want = true, .why = "显式开(向后兼容旧命令行)" },
-        .{ .argv = &.{ "metacodes", "--no-lsp" }, .want = false, .why = "逃生口" },
-        .{ .argv = &.{ "metacodes", "--no-lsp", "--lsp" }, .want = true, .why = "后写覆盖先写" },
-        .{ .argv = &.{ "metacodes", "--lsp", "--no-lsp" }, .want = false, .why = "后写覆盖先写(反向)" },
-    };
-    // arena:parseArgs 对值型 flag 会 dupe 字符串。这些用例目前只有布尔 flag,但用 arena
-    // 收口,免得后来加一条带值的用例就静默漏内存。
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    for (cases) |c| {
-        const config = cc.parseArgsForTest(c.argv, arena.allocator());
-        try std.testing.expect(config.parse_error == null); // --no-lsp 必须是已知 flag
-        if (config.lsp_enabled != c.want) {
-            std.debug.print("lsp_enabled={} want={} ({s})\n", .{ config.lsp_enabled, c.want, c.why });
-            return error.WrongLspDefault;
-        }
-    }
-}
-
-/// 真 App fixture(对齐 plugin_runtime_test / session_api_parity_test 惯例):tmp HOME + NO_PROBE。
-/// **in-place** 初始化:arena.allocator()/io_rt.io() 捕获 &self 的字段地址,按值返回会悬垂。
-const AppFixture = struct {
-    tmp: std.testing.TmpDir,
-    arena: std.heap.ArenaAllocator,
-    io_rt: std.Io.Threaded,
-    home_guard: EnvGuard,
-    probe_guard: EnvGuard,
-    app: *cc.app_module.App,
-
-    fn setup(self: *AppFixture, argv: []const [*:0]const u8) !void {
-        self.tmp = std.testing.tmpDir(.{});
-        errdefer self.tmp.cleanup();
-        var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
-        const len = try self.tmp.dir.realPath(std.testing.io, &root_buffer);
-        const root = root_buffer[0..len];
-
-        self.arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-        errdefer self.arena.deinit();
-        const allocator = self.arena.allocator();
-
-        const home_z = try allocator.dupeZ(u8, root);
-        self.home_guard = try EnvGuard.set(std.testing.allocator, "HOME", home_z.ptr);
-        errdefer self.home_guard.restore();
-        self.probe_guard = try EnvGuard.set(std.testing.allocator, "METACODES_NO_PROBE", "1");
-        errdefer self.probe_guard.restore();
-
-        const config = cc.parseArgsForTest(argv, allocator);
-        try std.testing.expect(config.parse_error == null);
-
-        self.io_rt = @import("platform").signal.threadedIo(allocator, .{});
-        errdefer self.io_rt.deinit();
-        self.app = try cc.app_module.App.init(allocator, self.io_rt.io(), config, "test-key");
-    }
-
-    fn deinit(self: *AppFixture) void {
-        self.app.deinit();
-        self.io_rt.deinit();
-        self.probe_guard.restore();
-        self.home_guard.restore();
-        self.arena.deinit();
-        self.tmp.cleanup();
-    }
-};
-
-test "L2 follow-on: 声明=接线 —— 默认装配 LSP Service,--no-lsp 真的不装配" {
-    // 只验"Service 在不在",不验"language server 起没起"——后者由运行期的注册/安装/workspace
-    // 门决定,与本 flag 无关(也正因为那些门都在,默认开在没装 server 的机器上是零成本)。
-    {
-        var fx: AppFixture = undefined;
-        try fx.setup(&.{ "metacodes", "--permission", "bypassPermissions" });
-        defer fx.deinit();
-        try std.testing.expect(fx.app.lsp_service != null);
-    }
-    {
-        var fx: AppFixture = undefined;
-        try fx.setup(&.{ "metacodes", "--permission", "bypassPermissions", "--no-lsp" });
-        defer fx.deinit();
-        try std.testing.expect(fx.app.lsp_service == null);
-    }
-}

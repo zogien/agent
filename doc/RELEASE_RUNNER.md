@@ -1,5 +1,9 @@
 # Release runners
 
+> This document describes upstream Metacodes release runners. The fork's
+> [release workflow](../.github/workflows/release.yml) builds SDK archives with
+> `zig build archive` and publishes the fork's GitHub and npm packages.
+
 `.github/workflows/release.yml` (#82, #47 stage 7) builds every release on
 GitHub-hosted runners: `ubuntu-latest` (x86_64), `macos-latest` (arm64) and
 `windows-latest` (x86_64). The dedicated self-hosted `metacodes-release` pool

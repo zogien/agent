@@ -649,7 +649,7 @@ class AgentCoreWorkflowTest(unittest.TestCase):
         self.assertNotIn("if", archive)
         self.assertEqual(
             archive["run"],
-            "zig build agentcore:archive -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe",
+            "zig build archive -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe",
         )
 
 

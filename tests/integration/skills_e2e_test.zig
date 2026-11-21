@@ -5,7 +5,7 @@
 //! and invokes the same typed activation used by AgentCore.
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs;
 
 const Runtime = cc.skills_cli_adapter.Runtime;

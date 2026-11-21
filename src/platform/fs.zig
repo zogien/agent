@@ -1279,10 +1279,11 @@ test "open/write/lseek/read/close 文件往返" {
     const paths = @import("paths.zig");
     var pbuf: [512]u8 = undefined;
     const tmp = try std.fmt.bufPrintZ(&pbuf, "{s}/metacodes_pfs_test.txt", .{paths.tempDir()});
-    defer _ = std.c.unlink(tmp.ptr);
+    defer unlinkPath(tmp.ptr) catch {};
 
     const fd = open(tmp.ptr, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, 0o644);
     try std.testing.expect(fd >= 0);
+    defer close(fd);
 
     const msg = "hello\nplatform\nfs";
     try std.testing.expectEqual(@as(isize, msg.len), write(fd, msg));
@@ -1299,7 +1300,6 @@ test "open/write/lseek/read/close 文件往返" {
     const shortened = read(fd, buf[0..]);
     try std.testing.expectEqual(@as(isize, 5), shortened);
     try std.testing.expectEqualStrings("hello", buf[0..@intCast(shortened)]);
-    close(fd);
 }
 
 test "windowsOflag 映射（编译期常量，两平台可跑）" {

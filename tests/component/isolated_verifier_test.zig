@@ -12,7 +12,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const iv = cc.isolated_verifier;
 const gate_mod = cc.check_gate;
@@ -625,57 +625,3 @@ test "L2 isolated verifier: standalone verify with no snapshot is unavailable, n
 }
 
 // ── CLI wiring ──────────────────────────────────────────────────────────────
-
-fn parse(arena: std.mem.Allocator, argv: []const [*:0]const u8) cc.types_mod.Config {
-    return cc.parseArgsForTest(argv, arena);
-}
-
-test "L2 isolated verifier flags: a pinned check is required, the model needs a verifier, the learning turn is refused" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const resolve = cc.resolveVerifier;
-    for ([_][]const [*:0]const u8{
-        &.{ "metacodes", "--verifier" },
-        &.{ "metacodes", "--verifier-observe" },
-        &.{ "metacodes", "-p", "hi", "--verifier" },
-        &.{ "metacodes", "--host-check", "make check", "--verifier" },
-    }) |argv| {
-        var config = parse(arena, argv);
-        try std.testing.expect(config.parse_error == null);
-        const refusal = resolve(&config, .{}, arena) orelse return error.TestExpectedRefusal;
-        try std.testing.expect(std.mem.indexOf(u8, refusal, "needs a pinned check") != null);
-    }
-    {
-        var config = parse(arena, &.{ "metacodes", "--host-check", "make check", "--check-gate", "--verifier", "--verifier-model", "high" });
-        try std.testing.expect(resolve(&config, .{}, arena) == null);
-        try std.testing.expect(config.verifier);
-        try std.testing.expectEqualStrings("high", config.verifier_model.?);
-        // The flag reaches the run options the hosts build.
-        const options = iv.optionsFromFlags(config.verifier, config.verifier_observe, config.verifier_model).?;
-        try std.testing.expectEqual(iv.Mode.enforce, options.mode);
-        try std.testing.expectEqualStrings("high", options.model.?);
-    }
-    {
-        var config = parse(arena, &.{ "metacodes", "--verifier-model", "x" });
-        const refusal = resolve(&config, .{}, arena) orelse return error.TestExpectedRefusal;
-        try std.testing.expect(std.mem.indexOf(u8, refusal, "--verifier-model requires") != null);
-    }
-    {
-        var config = parse(arena, &.{ "metacodes", "--host-check", "make check", "--check-gate", "--verifier", "--learning-turn" });
-        const refusal = resolve(&config, .{}, arena) orelse return error.TestExpectedRefusal;
-        try std.testing.expect(std.mem.indexOf(u8, refusal, "--learning-turn") != null);
-    }
-    {
-        // Print mode: METACODES_VERIFIER arms it over the end-of-run host check; a flag wins.
-        var config = parse(arena, &.{ "metacodes", "-p", "hi" });
-        try std.testing.expect(resolve(&config, .{ .mode = "observe", .host_check_armed = true }, arena) == null);
-        try std.testing.expect(config.verifier_observe and !config.verifier);
-        var flagged = parse(arena, &.{ "metacodes", "-p", "hi", "--verifier-observe" });
-        try std.testing.expect(resolve(&flagged, .{ .mode = "enforce", .host_check_armed = true }, arena) == null);
-        try std.testing.expect(!flagged.verifier);
-        var bad = parse(arena, &.{ "metacodes", "-p", "hi" });
-        const refusal = resolve(&bad, .{ .mode = "on", .host_check_armed = true }, arena) orelse return error.TestExpectedRefusal;
-        try std.testing.expect(std.mem.indexOf(u8, refusal, iv.MODE_ENV) != null);
-    }
-}

@@ -156,90 +156,6 @@ fn isLowerHex(value: []const u8, len: usize) bool {
     return true;
 }
 
-/// The build identity `metacodes --version` reports (#78): the `build_info`
-/// module of the two app modules (not of the library module). Every value is
-/// fixed here at configure time from its own source — git, the compiler,
-/// `sdk/zig/types.zig`, the vendored manifests, the selected TinyKG input — so
-/// the executable never reads the repository at run time to describe itself.
-fn buildInfoOptions(
-    b: *std.Build,
-    target: std.Target,
-    /// The optimize mode of the module that receives these options — the
-    /// executable's own, not the -Doptimize default (the release app is always
-    /// ReleaseSmall, the debug app always Debug).
-    optimize: std.builtin.OptimizeMode,
-    release_layout: bool,
-    tinykg_input: TinyKgBinaryInput,
-    identity: GitIdentity,
-) *std.Build.Step.Options {
-    const sdk_types = @import("sdk/zig/types.zig");
-    const ripgrep = ripgrepBundleInfo(b, target);
-    const tinykg = tinyKgContractInfo(b);
-    const options = b.addOptions();
-    options.addOption([]const u8, "commit", identity.commit);
-    options.addOption(bool, "dirty", identity.dirty);
-    options.addOption([]const u8, "zig_version", @import("builtin").zig_version_string);
-    options.addOption([]const u8, "target_triple", b.fmt("{s}-{s}-{s}", .{
-        @tagName(target.cpu.arch),
-        @tagName(target.os.tag),
-        @tagName(target.abi),
-    }));
-    options.addOption([]const u8, "optimize", @tagName(optimize));
-    options.addOption(bool, "release_layout", release_layout);
-    options.addOption(u32, "abi_version", sdk_types.ABI_VERSION_V1);
-    options.addOption(u32, "abi_revision", sdk_types.ABI_REVISION);
-    options.addOption([]const u8, "ripgrep_version", ripgrep.version);
-    options.addOption([]const u8, "ripgrep_revision", ripgrep.revision);
-    options.addOption(?[]const u8, "ripgrep_expected_sha256", ripgrep.sha256);
-    options.addOption([]const u8, "tinykg_version", tinykg.version);
-    options.addOption([]const u8, "tinykg_source_commit", tinykg.source_commit);
-    options.addOption(?[]const u8, "tinykg_expected_sha256", switch (tinykg_input) {
-        .bundled => |input| input.sha256,
-        .explicit => |input| input.sha256,
-        .disabled, .unavailable => null,
-    });
-    // The daemon digest is pinned exactly where the daemon is part of the
-    // install: the release layout ships it (manifest v2), so doctor holds the
-    // shipped copy to the bundle table. A development install carries no
-    // daemon, and doctor calls a pinned-but-unresolvable binary unhealthy.
-    const daemon_pin: ?[]const u8 = if (release_layout and tinykg_input == .bundled)
-        if (bundledTinyKgForTarget(b, target, "daemon")) |daemon| daemon.sha256 else null
-    else
-        null;
-    options.addOption(?[]const u8, "tinykgd_expected_sha256", daemon_pin);
-    options.addOption(?[]const u8, "formal_kernel_expected_sha256", g_formal_kernel_sha256);
-    options.addOption(?[]const u8, "project_kernel_expected_sha256", g_project_kernel_sha256);
-    return options;
-}
-
-const GitIdentity = struct { commit: []const u8, dirty: bool };
-
-/// `-Dbuild-commit` names the commit when no repository is available (an
-/// exported tree); otherwise git answers for the build root, and a tree
-/// without git reports "unknown" rather than failing the build.
-fn gitIdentity(b: *std.Build) GitIdentity {
-    if (b.option([]const u8, "build-commit", "Commit hash recorded in --version when the tree has no git repository")) |commit| {
-        if (!isLowerHex(commit, 40)) @panic("-Dbuild-commit must be 40 lowercase hex characters");
-        return .{ .commit = commit, .dirty = false };
-    }
-    const root = b.pathFromRoot(".");
-    const commit = gitStdout(b, &.{ "git", "-C", root, "rev-parse", "HEAD" }) orelse
-        return .{ .commit = "unknown", .dirty = false };
-    if (!isLowerHex(commit, 40)) return .{ .commit = "unknown", .dirty = false };
-    // The same question scripts/manifest_common.zig asks for the release
-    // manifest (untracked files count; ignored ones do not): `--version` and
-    // the manifest must agree, or release:verify rejects the unit.
-    const status = gitStdout(b, &.{ "git", "-C", root, "status", "--porcelain", "--untracked-files=normal" }) orelse
-        return .{ .commit = commit, .dirty = false };
-    return .{ .commit = commit, .dirty = status.len != 0 };
-}
-
-fn gitStdout(b: *std.Build, argv: []const []const u8) ?[]const u8 {
-    var code: u8 = undefined;
-    const raw = b.runAllowFail(argv, &code, .ignore) catch return null;
-    return std.mem.trim(u8, raw, " \t\r\n");
-}
-
 const RipgrepBundleInfo = struct {
     version: []const u8,
     revision: []const u8,
@@ -753,14 +669,11 @@ fn createCoreModule(
     return mod;
 }
 
-const IntegrationSuite = enum { cli, core };
-
 fn createIntegrationModule(
     b: *std.Build,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
     harness: *std.Build.Module,
-    suite: IntegrationSuite,
     implementation: *std.Build.Module,
     mock_mcp_server: std.Build.LazyPath,
 ) *std.Build.Module {
@@ -771,16 +684,12 @@ fn createIntegrationModule(
         .link_libc = true,
     });
     const options = b.addOptions();
-    options.addOption(bool, "use_core", suite == .core);
     options.addOptionPath("mock_mcp_server", mock_mcp_server);
     options.addOptionPath("mock_mcp_http_script", b.path("tests/_harness/mock_mcp_http_server.py"));
     options.addOptionPath("mock_mcp_auth_script", b.path("tests/_harness/mock_mcp_auth_server.py"));
     mod.addOptions("integration_options", options);
     mod.addImport("harness", harness);
-    mod.addImport(switch (suite) {
-        .cli => "cc",
-        .core => "metacodes-core",
-    }, implementation);
+    mod.addImport("metacodes-core", implementation);
     addPlatform(b, mod);
     return mod;
 }
@@ -852,7 +761,12 @@ pub fn build(b: *std.Build) void {
     // every App a test builds would load the developer's Codex Skills and start
     // the MCP servers in its config.toml (doc/SKILLS_AND_MCP.md).
     _ = b.graph.environ_map.orderedRemove("CODEX_HOME");
-    const target = b.standardTargetOptions(.{});
+    const target = b.standardTargetOptions(.{
+        .default_target = if (b.graph.host.result.os.tag == .windows)
+            .{ .os_tag = .windows, .abi = .msvc }
+        else
+            .{},
+    });
     const target_was_explicit = b.user_input_options.contains("target");
     const optimize = b.standardOptimizeOption(.{});
     g_formal_kernel_sha256 = b.option([]const u8, "formal-kernel-sha256", "SHA-256 of the adjacent formal governance kernel");
@@ -866,82 +780,12 @@ pub fn build(b: *std.Build) void {
     // with an absolute path plus digest. Native staging validates version and a
     // fresh store; cross staging validates digest, format, arch, and version bytes.
     const tinykg_input = tinyKgBinaryInput(b, target.result);
-    const release_layout = b.option(
-        bool,
-        "release-layout",
-        "Record the release runtime layout in the build identity (#47; the layout's asset resolution lands in a later stage)",
-    ) orelse false;
-    // A Linux release unit ships a stripped executable and, as a separate
-    // asset, its debug symbols (doc/RELEASE_RUNNER.md, "Debug symbols"): the
-    // executable is linked once with DWARF and a build ID, then split with
-    // binutils' objcopy, so the stripped file and `metacodes.debug` come from
-    // the same link and name each other (.gnu_debuglink and the build ID).
-    // `zig objcopy --extract-to` reports "unimplemented" for this executable
-    // in Zig 0.16, hence the external tool.
-    const release_symbols = b.option(
-        bool,
-        "release-symbols",
-        "Split the release executable's debug symbols into metacodes.debug with objcopy (Linux, -Drelease-layout=true)",
-    ) orelse false;
-    const objcopy_tool = b.option([]const u8, "objcopy", "objcopy used by -Drelease-symbols (default: objcopy on PATH)") orelse "objcopy";
-    // One options module per app module, because each reports its own
-    // optimize mode; git is asked once.
-    const build_identity = gitIdentity(b);
-    const build_info = buildInfoOptions(b, target.result, .ReleaseSmall, release_layout, tinykg_input, build_identity);
-    const debug_build_info = buildInfoOptions(b, target.result, .Debug, release_layout, tinykg_input, build_identity);
     const tfilter = b.option([]const u8, "tfilter", "test filter");
     const lib_test_shards = b.option(u8, "lib-test-shards", "Parallel metacodes-core test shards (1-64)") orelse 4;
     if (lib_test_shards == 0 or lib_test_shards > 64) @panic("-Dlib-test-shards must be between 1 and 64");
     const integration_test_shards = b.option(u8, "integration-test-shards", "Parallel component/integration test shards (1-64)") orelse 8;
     if (integration_test_shards == 0 or integration_test_shards > 64) @panic("-Dintegration-test-shards must be between 1 and 64");
     const agentcore_strip = b.option(bool, "agentcore-strip", "Strip AgentCore library debug information") orelse (optimize != .Debug);
-
-    // 固定产出两个二进制：metacodes (ReleaseSmall) 和 metacodes-debug (Debug)。
-    // 不受 -Doptimize 影响，一次 build 同时得到发布版和调试版。
-    const release_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = .ReleaseSmall,
-        .link_libc = true,
-        // No .eh_frame on Linux: 300 KB the stripped executable never reads.
-        // std prints no panic stack trace without debug info, and nothing
-        // imports an unwinder. Frame pointers stay, so `perf --call-graph=fp`
-        // still walks the stack. gdb unwinds a core with metacodes.debug from
-        // -Drelease-symbols, whose DWARF keeps .debug_frame
-        // (doc/PERF_MEMORY_PRINCIPLES.md §3f). Windows x64 needs its unwind
-        // data for SEH; macOS is left as is.
-        .unwind_tables = if (target.result.os.tag == .linux) std.builtin.UnwindTables.none else null,
-        // With symbols the link keeps DWARF for the split below. src/main.zig
-        // turns stack tracing off for every ReleaseSmall build, which DWARF
-        // would otherwise switch on (~100 KB), so the code stays within a few
-        // bytes of a stripped link's.
-        .strip = if (release_symbols) false else null,
-    });
-    addHl(b, release_mod);
-    release_mod.addOptions("build_info", build_info);
-    const exe = b.addExecutable(.{
-        .name = "metacodes",
-        .root_module = release_mod,
-    });
-    // What installs bin/metacodes: the linked executable, or with
-    // -Drelease-symbols its stripped half; `debug_file` is the other half,
-    // for the symbols archive (release:archive).
-    const cli_install: struct { step: *std.Build.Step, debug_file: ?std.Build.LazyPath } = if (release_symbols) blk: {
-        if (target.result.os.tag != .linux)
-            break :blk .{ .step = &b.addFail("-Drelease-symbols splits ELF symbols with objcopy: Linux targets only").step, .debug_file = null };
-        exe.build_id = .sha1;
-        const keep_debug = b.addSystemCommand(&.{ objcopy_tool, "--only-keep-debug" });
-        keep_debug.addArtifactArg(exe);
-        const debug_file = keep_debug.addOutputFileArg("metacodes.debug");
-        // --add-gnu-debuglink records the symbol file's basename and CRC-32.
-        const strip_cmd = b.addSystemCommand(&.{ objcopy_tool, "--strip-all" });
-        strip_cmd.addPrefixedFileArg("--add-gnu-debuglink=", debug_file);
-        strip_cmd.addArtifactArg(exe);
-        const stripped = strip_cmd.addOutputFileArg("metacodes");
-        break :blk .{ .step = &b.addInstallBinFile(stripped, exe.out_filename).step, .debug_file = debug_file };
-    } else .{ .step = &b.addInstallArtifact(exe, .{}).step, .debug_file = null };
-    const install_cli = cli_install.step;
-    b.getInstallStep().dependOn(install_cli);
 
     // A small trusted executor opens native tool files inside the platform
     // sandbox and passes the resulting fd back. Library hosts receive the
@@ -960,33 +804,8 @@ pub fn build(b: *std.Build) void {
     const install_sandbox_helper = b.addInstallArtifact(sandbox_helper_exe, .{ .pdb_dir = .disabled });
     g_sandbox_helper_install = &install_sandbox_helper.step;
     g_sandbox_helper_path = b.getInstallPath(.bin, sandbox_helper_exe.out_filename);
-    b.getInstallStep().dependOn(&install_sandbox_helper.step);
     const sandbox_helper_step = b.step("sandbox:helper", "Build and install the native filesystem sandbox helper");
     sandbox_helper_step.dependOn(&install_sandbox_helper.step);
-
-    // E3 causal evaluation only: same product root/provider/agent/tool path,
-    // but formal blocks are observed rather than actuated.  There is no env or
-    // CLI switch and this artifact is deliberately absent from default install.
-    const project_harness_shadow_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = .ReleaseSmall,
-        .link_libc = true,
-    });
-    addHlWithProjectHarnessActuation(b, project_harness_shadow_mod, true);
-    const project_harness_shadow_exe = b.addExecutable(.{
-        .name = "metacodes-project-harness-shadow",
-        .root_module = project_harness_shadow_mod,
-    });
-    const install_project_harness_shadow = b.addInstallArtifact(
-        project_harness_shadow_exe,
-        .{ .dest_dir = .{ .override = .{ .custom = "eval/bin" } } },
-    );
-    const project_harness_shadow_step = b.step(
-        "eval:project-harness-shadow",
-        "Build the compile-time-bound E3 shadow app (not a production install artifact)",
-    );
-    project_harness_shadow_step.dependOn(&install_project_harness_shadow.step);
 
     var staged_tinykg: ?StagedTinyKg = null;
     var staged_tinykgd: ?StagedTinyKgd = null;
@@ -1037,8 +856,6 @@ pub fn build(b: *std.Build) void {
                 .{ .custom = "vendor/tinykg" },
                 "tinykg.provenance.json",
             );
-            b.getInstallStep().dependOn(&install_binary.step);
-            b.getInstallStep().dependOn(&install_receipt.step);
             tinykg_stage_step.dependOn(&install_binary.step);
             tinykg_stage_step.dependOn(&install_receipt.step);
             staged_tinykg = .{
@@ -1103,8 +920,6 @@ pub fn build(b: *std.Build) void {
                 .{ .custom = "vendor/tinykg" },
                 "tinykg.provenance.json",
             );
-            b.getInstallStep().dependOn(&install_binary.step);
-            b.getInstallStep().dependOn(&install_receipt.step);
             tinykg_stage_step.dependOn(&install_binary.step);
             tinykg_stage_step.dependOn(&install_receipt.step);
             staged_tinykg = .{
@@ -1132,22 +947,7 @@ pub fn build(b: *std.Build) void {
     );
     const staged_lean_kernels = stageLeanKernels(b, lean_kernels_mode, target, kernels_stage_step);
 
-    // ── ripgrep for the product install (#79, #47 stage 4) ─────────────────
-    // Glob/Grep need rg at run time. The default install and the release
-    // layout stage the vendored, manifest-pinned binary beside the executable
-    // as bin/rg[.exe] (the script the AgentCore bundle already uses) and ship
-    // its MIT notice under share/licenses. A target without a vendored rg
-    // (none of the release targets since #86; a new target until its binary
-    // is vendored) still builds for development — rg then comes
-    // from PATH — but cannot be released: `release:stage` fails closed rather
-    // than shipping an executable whose Grep cannot run.
     const ripgrep_bundle = ripgrepBundleInfo(b, target.result);
-    const release_stage_step = b.step(
-        "release:stage",
-        "Install the release layout (bin/metacodes, bin/rg, libexec/metacodes kernels, vendor/tinykg CLI + daemon, share/licenses); requires -Drelease-layout=true, a Lean toolchain and pinned kernel digests, and fails closed for a target without vendored runtime assets",
-    );
-    // Shared file-copy steps: the docs gate exercises exactly the release's
-    // documents, without depending on install, executables or Lean kernels.
     const release_documents = parseJsonFile(b, struct {
         schema: []const u8,
         files: []const struct { source: []const u8, destination: []const u8 },
@@ -1160,101 +960,6 @@ pub fn build(b: *std.Build) void {
         const install_document = b.addInstallFileWithDir(b.path(document.source), .prefix, destination);
         release_docs_step.dependOn(&install_document.step);
     }
-    release_stage_step.dependOn(release_docs_step);
-    release_stage_step.dependOn(b.getInstallStep());
-    if (!release_layout) {
-        release_stage_step.dependOn(&b.addFail(
-            "release:stage requires -Drelease-layout=true so the executable resolves rg beside itself",
-        ).step);
-    }
-    if (staged_tinykg == null) {
-        release_stage_step.dependOn(&b.addFail(
-            "release:stage needs the vendored TinyKG binary for this target (it is disabled or unavailable)",
-        ).step);
-    }
-    // A v2 release unit is complete on every platform (doc/INSTALL_DESIGN.md):
-    // the TinyKG daemon and both Lean kernels ship, the executable pins the
-    // kernels it ships, and the kernels' runtime licences come along.
-    if (staged_tinykgd) |daemon| {
-        release_stage_step.dependOn(daemon.install_step);
-        release_stage_step.dependOn(daemon.receipt_install_step);
-    } else {
-        release_stage_step.dependOn(&b.addFail(
-            "release:stage needs the vendored TinyKG daemon for this target (it is disabled or unavailable)",
-        ).step);
-    }
-    release_stage_step.dependOn(kernels_stage_step);
-    if (release_layout and (g_formal_kernel_sha256 == null or g_project_kernel_sha256 == null)) {
-        release_stage_step.dependOn(&b.addFail(
-            "release:stage pins the kernels it ships: build them first (`zig build kernels:stage --prefix <dir>`) and pass their digests, e.g. `$(python3 scripts/kernel_pins.py <dir>)`",
-        ).step);
-    }
-    const target_family = b.fmt("{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag) });
-    if (ripgrep_bundle.sha256 != null) {
-        const stage_python = if (@import("builtin").os.tag == .windows) "python" else "python3";
-        const stage_ripgrep = b.addSystemCommand(&.{
-            stage_python,
-            "scripts/stage_ripgrep_binary.py",
-            @tagName(target.result.cpu.arch),
-            @tagName(target.result.os.tag),
-            b.getInstallPath(.bin, ""),
-        });
-        stage_ripgrep.setCwd(b.path("."));
-        const install_ripgrep_license = b.addInstallFileWithDir(
-            b.path("vendor/ripgrep/LICENSE-MIT"),
-            .{ .custom = "share/licenses" },
-            "ripgrep-LICENSE-MIT",
-        );
-        b.getInstallStep().dependOn(&stage_ripgrep.step);
-        b.getInstallStep().dependOn(&install_ripgrep_license.step);
-    } else {
-        std.log.warn(
-            "no vendored ripgrep for {s}: the install carries no bin/rg and Grep/Glob resolve it from PATH (#86)",
-            .{target_family},
-        );
-        release_stage_step.dependOn(&b.addFail(b.fmt(
-            "no vendored ripgrep for {s}; this target is outside the release matrix until #86",
-            .{target_family},
-        )).step);
-    }
-
-    const debug_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = .Debug,
-        .link_libc = true,
-    });
-    addHl(b, debug_mod);
-    debug_mod.addOptions("build_info", debug_build_info);
-    const debug_exe = b.addExecutable(.{
-        .name = "metacodes-debug",
-        .root_module = debug_mod,
-    });
-    const install_debug = b.addInstallArtifact(debug_exe, .{});
-    const dev_step = b.step("dev", "Install only the runnable Debug app (fast edit loop)");
-    dev_step.dependOn(&install_debug.step);
-    const dev_full_step = b.step("dev:full", "Install the Debug app and selected TinyKG binary");
-    dev_full_step.dependOn(&install_debug.step);
-    dev_full_step.dependOn(tinykg_stage_step);
-
-    // ── 共享测试模块────────────────────────────────────────────────────────
-    // cc(全 src 树)与 harness(mock SSE server)被单测/spike/integ/new/mem/agentcore/
-    // replay 多处消费,收敛为单例(platform/hl 全局单例是既有同款)。诚实注解(review-2
-    // F10):共享的是模块**描述**而非编译产物——每个测试二进制仍各自分析/编译整棵依赖树,
-    // 收益是砍掉模块图重复节点与配置漂移面;并发内存压力靠 -j 上限控制(满核 28 路 LLVM
-    // 链接在 32GB 上实测 OOM,win_verify.sh 用 -j12,全量 ≈200s)。optimize==Debug 时 cc
-    // 复用 debug_mod(少一个模块实例,非少一次编译)。
-    const test_cc_mod = if (optimize == .Debug) debug_mod else blk: {
-        const m2 = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-        });
-        addHl(b, m2);
-        m2.addOptions("build_info", buildInfoOptions(b, target.result, optimize, release_layout, tinykg_input, build_identity));
-        break :blk m2;
-    };
     const test_harness_mod = b.createModule(.{
         .root_source_file = b.path("tests/_harness/mock_sse_server.zig"),
         .target = target,
@@ -1271,7 +976,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    addPlatform(b, mock_mcp_mod); // stdin/stdout 走可移植 pfs
+    addPlatform(b, mock_mcp_mod);
+    // Keep the calibrated MCP fixture byte-identical. The MSVC helper
+    // needs the same POSIX CRT aliases as the native SDK.
+    if (target.result.os.tag == .windows and target.result.abi == .msvc) {
+        mock_mcp_mod.addCSourceFile(.{ .file = b.path("src/agentcore/windows_msvc_crt_shims.c"), .flags = &.{"-std=c11"} });
+    }
     const mock_mcp_exe = b.addExecutable(.{
         .name = "mock_mcp_server",
         .root_module = mock_mcp_mod,
@@ -1301,30 +1011,6 @@ pub fn build(b: *std.Build) void {
     });
     const install_selfexe_probe = b.addInstallArtifact(selfexe_probe_exe, .{});
 
-    // update_unit_probe 二进制:`metacodes update` 组件测试里 fixture release unit 的
-    // `bin/metacodes`。`install …` 跑真安装器(src/app/install.zig,不做 doctor 自检),
-    // 其余调用只记 argv;只链 platform + 安装器那一小块,不拖整个 app 图。
-    const install_probe_root_mod = b.createModule(.{
-        .root_source_file = b.path("src/install_root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    addPlatform(b, install_probe_root_mod);
-    const update_unit_probe_mod = b.createModule(.{
-        .root_source_file = b.path("tests/_harness/update_unit_probe.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    addPlatform(b, update_unit_probe_mod);
-    update_unit_probe_mod.addImport("install_root", install_probe_root_mod);
-    const update_unit_probe_exe = b.addExecutable(.{
-        .name = "update_unit_probe",
-        .root_module = update_unit_probe_mod,
-    });
-    const install_update_unit_probe = b.addInstallArtifact(update_unit_probe_exe, .{});
-
     // replay_server 二进制(Stage 7):从 cassette 起 mock,供 e2e replay。测试专用。
     // 三端可编:曾经的三个 Windows blocker 已清(socket server→platform/net、
     // args→iterateAllocator、cassette 文件 IO→pfs)。TTY ui_tools 用例依赖它。
@@ -1349,11 +1035,10 @@ pub fn build(b: *std.Build) void {
         .root_module = replay_mod,
     });
     const install_replay = b.addInstallArtifact(replay_exe, .{});
-    const test_harness_step = b.step("test:harness", "Install the test harness binaries: mock_mcp_server, replay_server, selfexe_probe and update_unit_probe");
+    const test_harness_step = b.step("test:harness", "Install the test harness binaries: mock_mcp_server, replay_server and selfexe_probe");
     test_harness_step.dependOn(&install_mock_mcp.step);
     test_harness_step.dependOn(&install_replay.step);
     test_harness_step.dependOn(&install_selfexe_probe.step);
-    test_harness_step.dependOn(&install_update_unit_probe.step);
 
     // ── metacodes-core 可复用库 module(root=src/lib.zig,UI 图不可达)──────────
     // 供其他 Zig 项目经 build.zig.zon 依赖 `@import("metacodes-core")`。
@@ -1545,160 +1230,6 @@ pub fn build(b: *std.Build) void {
     });
     agentcore_test_step.dependOn(&addTestRunArtifact(b, agentcore_manifest_tool_test).step);
 
-    // ── release:manifest / release:check / release:verify (#80, #47 stage 5) ──
-    // The CLI release unit is the staged prefix sealed with manifest.json
-    // (release/LAYOUT.md). The generator is a host tool beside the AgentCore
-    // one; release/manifest_contract.zig is the reader's side of the contract;
-    // scripts/verify_release_bundle.py runs the fail-closed checks, the
-    // executable-running ones only on the native target.
-    const release_contract_mod = b.createModule(.{
-        .root_source_file = b.path("src/release_contract.zig"),
-        .target = b.graph.host,
-        .optimize = .ReleaseSafe,
-    });
-    const release_manifest_tool_mod = b.createModule(.{
-        .root_source_file = b.path("scripts/release_manifest.zig"),
-        .target = b.graph.host,
-        .optimize = .ReleaseSafe,
-    });
-    release_manifest_tool_mod.addImport("metask_agentcore_types", agentcore_manifest_types_mod);
-    release_manifest_tool_mod.addImport("metacodes_release_contract", release_contract_mod);
-    // The generator writes exactly the files and schema the reader validates.
-    release_manifest_tool_mod.addImport("metacodes_manifest_contract", b.createModule(.{
-        .root_source_file = b.path("release/manifest_contract.zig"),
-        .target = b.graph.host,
-        .optimize = .ReleaseSafe,
-    }));
-    const release_manifest_tool = b.addExecutable(.{
-        .name = "release-manifest",
-        .root_module = release_manifest_tool_mod,
-    });
-    const release_manifest_tool_test = b.addTest(.{
-        .name = "release-manifest-unit",
-        .root_module = release_manifest_tool_mod,
-        .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
-    });
-    const manifest_common_test = b.addTest(.{
-        .name = "manifest-common-unit",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("scripts/manifest_common.zig"),
-            .target = b.graph.host,
-            .optimize = .ReleaseSafe,
-        }),
-        .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
-    });
-    const release_contract_test = b.addTest(.{
-        .name = "release-manifest-contract",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("release/manifest_contract.zig"),
-            .target = b.graph.host,
-            .optimize = .ReleaseSafe,
-        }),
-        .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
-    });
-    const release_test_step = b.step("release:test", "Unit tests of the release manifest generator and contract");
-    release_test_step.dependOn(&addTestRunArtifact(b, release_manifest_tool_test).step);
-    release_test_step.dependOn(&addTestRunArtifact(b, manifest_common_test).step);
-    release_test_step.dependOn(&addTestRunArtifact(b, release_contract_test).step);
-
-    const release_manifest_cmd = b.addRunArtifact(release_manifest_tool);
-    release_manifest_cmd.addArgs(&.{
-        b.install_path,
-        b.fmt("{s}-{s}-{s}", .{ @tagName(target.result.cpu.arch), @tagName(target.result.os.tag), @tagName(target.result.abi) }),
-        @tagName(target.result.cpu.arch),
-        @tagName(target.result.os.tag),
-        @tagName(target.result.abi),
-        @tagName(release_mod.optimize orelse optimize),
-        if (release_mod.strip orelse false) "true" else "false",
-        manifest.version,
-    });
-    release_manifest_cmd.setCwd(b.path("."));
-    release_manifest_cmd.has_side_effects = true;
-    release_manifest_cmd.step.dependOn(release_stage_step);
-    const release_manifest_step = b.step("release:manifest", "Write manifest.json for the staged release prefix (after release:stage)");
-    release_manifest_step.dependOn(&release_manifest_cmd.step);
-
-    const release_python = if (@import("builtin").os.tag == .windows) "python" else "python3";
-    const release_check_cmd = b.addSystemCommand(&.{ release_python, "scripts/verify_release_bundle.py", b.install_path });
-    release_check_cmd.setCwd(b.path("."));
-    release_check_cmd.has_side_effects = true;
-    release_check_cmd.step.dependOn(&release_manifest_cmd.step);
-    const release_check_step = b.step("release:check", "Static release checks: schema, digests, whitelist, licences (any target)");
-    release_check_step.dependOn(&release_check_cmd.step);
-
-    const release_verify_step = b.step("release:verify", "release:check plus the executable-running checks (native target only)");
-    const release_target_is_native = target.result.os.tag == b.graph.host.result.os.tag and
-        target.result.cpu.arch == b.graph.host.result.cpu.arch and
-        target.result.abi == b.graph.host.result.abi;
-    if (release_target_is_native) {
-        const release_verify_cmd = b.addSystemCommand(&.{ release_python, "scripts/verify_release_bundle.py", b.install_path, "--native" });
-        release_verify_cmd.setCwd(b.path("."));
-        release_verify_cmd.has_side_effects = true;
-        release_verify_cmd.step.dependOn(&release_manifest_cmd.step);
-        release_verify_step.dependOn(&release_verify_cmd.step);
-    } else {
-        release_verify_step.dependOn(&b.addFail("use release:check for cross-target validation").step);
-    }
-
-    // ── release:archive / release:sums (#81, #47 stage 6) ───────────────────
-    // The verified prefix becomes one immutable archive (zip on Windows,
-    // tar.gz elsewhere) plus its .sha256 sidecar; two runs are byte-identical
-    // (scripts/release_archive.py, shared with the AgentCore packager). A
-    // stable version archives only from a clean tree tagged with the bare
-    // X.Y.Z; a pre-release from any commit. Archives never land inside the
-    // bundle root: the default is <build root>/dist (ignored by git).
-    const release_archive_dir = b.option(
-        []const u8,
-        "release-archive-dir",
-        "Output directory for the CLI release archive and SHA256SUMS (default: dist/)",
-    ) orelse b.pathFromRoot("dist");
-    const release_archive_test_cmd = b.addSystemCommand(&.{ release_python, "scripts/release_archive.py", "--self-test" });
-    release_archive_test_cmd.setCwd(b.path("."));
-    const release_archive_cmd = b.addSystemCommand(&.{
-        release_python,
-        "scripts/release_archive.py",
-        "--kind",
-        "cli",
-        b.install_path,
-        release_archive_dir,
-    });
-    release_archive_cmd.setCwd(b.path("."));
-    release_archive_cmd.has_side_effects = true;
-    release_archive_cmd.step.dependOn(&release_archive_test_cmd.step);
-    release_archive_cmd.step.dependOn(if (release_target_is_native) release_verify_step else release_check_step);
-    const release_archive_step = b.step("release:archive", "Create the immutable CLI release archive plus .sha256 (after release:verify, or release:check for a cross target)");
-    release_archive_step.dependOn(&release_archive_cmd.step);
-    // With -Drelease-symbols the split's symbol file becomes its own archive
-    // beside the unit's, `metacodes-<version>-<target-id>-debug.tar.gz`; the
-    // packager refuses it unless the unit's bin/metacodes names that file.
-    if (cli_install.debug_file) |debug_file| {
-        const symbols_archive_cmd = b.addSystemCommand(&.{
-            release_python,
-            "scripts/release_archive.py",
-            "--kind",
-            "symbols",
-            b.install_path,
-            release_archive_dir,
-            "--debug-file",
-        });
-        symbols_archive_cmd.addFileArg(debug_file);
-        symbols_archive_cmd.setCwd(b.path("."));
-        symbols_archive_cmd.has_side_effects = true;
-        symbols_archive_cmd.step.dependOn(&release_archive_test_cmd.step);
-        symbols_archive_cmd.step.dependOn(if (release_target_is_native) release_verify_step else release_check_step);
-        release_archive_step.dependOn(&symbols_archive_cmd.step);
-    }
-
-    const release_sums_test_cmd = b.addSystemCommand(&.{ release_python, "scripts/release_sums.py", "--self-test" });
-    release_sums_test_cmd.setCwd(b.path("."));
-    const release_sums_cmd = b.addSystemCommand(&.{ release_python, "scripts/release_sums.py", release_archive_dir, manifest.version });
-    release_sums_cmd.setCwd(b.path("."));
-    release_sums_cmd.has_side_effects = true;
-    release_sums_cmd.step.dependOn(&release_sums_test_cmd.step);
-    // Every archive of the unit, the symbols one included, before the sums.
-    release_sums_cmd.step.dependOn(release_archive_step);
-    const release_sums_step = b.step("release:sums", "Join the .sha256 sidecars under the archive directory into metacodes-<version>-SHA256SUMS");
-    release_sums_step.dependOn(&release_sums_cmd.step);
     const agentcore_symbol_gate_mod = b.createModule(.{
         .root_source_file = b.path("scripts/agentcore_symbol_gate.zig"),
         .target = b.graph.host,
@@ -1840,6 +1371,27 @@ pub fn build(b: *std.Build) void {
         .implib_dir = .disabled,
         .dylib_symlinks = false,
     });
+    const install_debug = b.addInstallArtifact(agentcore_shared_lib, .{
+        .dest_dir = .{ .override = .{ .custom = b.fmt("agentcore-dev/{s}/lib", .{resolved_agentcore_target}) } },
+        .pdb_dir = .disabled,
+        .h_dir = .disabled,
+        .implib_dir = .disabled,
+        .dylib_symlinks = false,
+    });
+    const dev_requires_debug = b.addFail("AgentCore development builds require -Doptimize=Debug");
+    const dev_step = b.step("dev", "Install the Debug AgentCore shared library for local iteration");
+    if (optimize == .Debug) {
+        dev_step.dependOn(&install_debug.step);
+    } else {
+        dev_step.dependOn(&dev_requires_debug.step);
+    }
+    const dev_full_step = b.step("dev:full", "Install the Debug AgentCore shared library and stage TinyKG");
+    if (optimize == .Debug) {
+        dev_full_step.dependOn(&install_debug.step);
+        dev_full_step.dependOn(tinykg_stage_step);
+    } else {
+        dev_full_step.dependOn(&dev_requires_debug.step);
+    }
     const install_agentcore_sandbox_helper = b.addInstallArtifact(sandbox_helper_exe, .{
         .dest_dir = .{ .override = .{ .custom = b.fmt("{s}/bin", .{agentcore_bundle_rel}) } },
         .pdb_dir = .disabled,
@@ -1911,7 +1463,7 @@ pub fn build(b: *std.Build) void {
     const missing_agentcore_target = if (target_was_explicit)
         null
     else
-        b.addFail("AgentCore bundle requires explicit -Dtarget=<triple>");
+        b.addFail("This AgentCore build step requires explicit -Dtarget=<triple>");
     const manifest_cmd = b.addRunArtifact(agentcore_manifest_tool);
     manifest_cmd.addArgs(&.{
         agentcore_install_root,
@@ -1925,7 +1477,6 @@ pub fn build(b: *std.Build) void {
         agentcore_shared_file,
     });
     manifest_cmd.setCwd(b.path("."));
-    if (missing_agentcore_target) |failure| manifest_cmd.step.dependOn(&failure.step);
     manifest_cmd.step.dependOn(&agentcore_symbol_gate_cmd.step);
     manifest_cmd.step.dependOn(&agentcore_shared_gate_cmd.step);
     manifest_cmd.step.dependOn(installed_agentcore_lib_ready);
@@ -1969,7 +1520,9 @@ pub fn build(b: *std.Build) void {
     zig_package_check_cmd.setCwd(b.path("."));
     zig_package_check_cmd.step.dependOn(&manifest_cmd.step);
     const agentcore_rust_step = b.step("agentcore:rust", "Build the bundled metask-agentcore-sys crate for the selected target");
-    if (agentcoreRustTarget(target.result)) |rust_target| {
+    if (missing_agentcore_target) |failure| {
+        agentcore_rust_step.dependOn(&failure.step);
+    } else if (agentcoreRustTarget(target.result)) |rust_target| {
         const rust_manifest_path = b.fmt("{s}/bindings/rust/Cargo.toml", .{agentcore_install_root});
         const rust_target_dir = b.getInstallPath(.prefix, b.fmt(".cargo-agentcore/{s}", .{resolved_agentcore_target}));
         const rust_check_cmd = b.addSystemCommand(&.{ "cargo", "build", "--locked", "--example", "link_probe" });
@@ -2002,9 +1555,10 @@ pub fn build(b: *std.Build) void {
     rust_bindgen_cmd.setCwd(b.path("."));
     const agentcore_rust_bindgen_step = b.step("agentcore:rust-bindgen-check", "Regenerate Rust raw bindings with bindgen 0.72.1 and require no diff");
     agentcore_rust_bindgen_step.dependOn(&rust_bindgen_cmd.step);
-    const agentcore_bundle_step = b.step("agentcore:bundle", "Build and link-check an AgentCore bundle (static and shared library) for an explicit target");
+    const agentcore_bundle_step = b.step("agentcore:bundle", "Build and link-check the AgentCore SDK bundle");
     agentcore_bundle_step.dependOn(&consumer_link_cmd.step);
     agentcore_bundle_step.dependOn(&zig_package_check_cmd.step);
+    b.getInstallStep().dependOn(agentcore_bundle_step);
 
     const agentcore_python = if (@import("builtin").os.tag == .windows) "python" else "python3";
     const agentcore_archive_dir = b.option(
@@ -2028,8 +1582,12 @@ pub fn build(b: *std.Build) void {
     agentcore_archive_cmd.step.dependOn(&consumer_link_cmd.step);
     agentcore_archive_cmd.step.dependOn(&zig_package_check_cmd.step);
     agentcore_archive_cmd.step.dependOn(&agentcore_archive_test_cmd.step);
-    const agentcore_archive_step = b.step("agentcore:archive", "Create an immutable AgentCore zip or tar.gz plus SHA-256");
-    agentcore_archive_step.dependOn(&agentcore_archive_cmd.step);
+    const agentcore_archive_step = b.step("archive", "Create an immutable AgentCore zip or tar.gz plus SHA-256");
+    if (missing_agentcore_target) |failure| {
+        agentcore_archive_step.dependOn(&failure.step);
+    } else {
+        agentcore_archive_step.dependOn(&agentcore_archive_cmd.step);
+    }
 
     const consumer_cmd = b.addSystemCommand(&.{ b.graph.zig_exe, "build" });
     addNestedBuildCacheArgs(b, consumer_cmd);
@@ -2196,56 +1754,11 @@ pub fn build(b: *std.Build) void {
         "Build the zero-provider authenticated RuleImpact evaluation bridge",
     );
     rule_impact_driver_step.dependOn(&install_rule_impact_driver.step);
-    // Explicit, expensive native L2: it builds a real promoted rule, starts a
-    // loopback provider, and runs both full CLI artifacts. Keep it out of the
-    // default aggregate so routine CI health does not pay Lean-build latency.
     const project_harness_kernel_cmd = b.addSystemCommand(&.{
         "bash",
         "scripts/build-project-harness-kernel.sh",
     });
     const project_harness_python = if (@import("builtin").os.tag == .windows) "python" else "python3";
-    const project_harness_binary_boundary_cmd = b.addSystemCommand(&.{
-        project_harness_python,
-    });
-    // The Python entrypoint and its local imports are evidence-producing build
-    // inputs.  Passing only string paths lets Zig reuse a cached command after
-    // an assertion changes, which can make a stale report look freshly green.
-    project_harness_binary_boundary_cmd.addFileArg(
-        b.path("scripts/eval/project_harness_binary_boundary.py"),
-    );
-    project_harness_binary_boundary_cmd.addFileInput(
-        b.path("scripts/eval/project_harness_evolution.py"),
-    );
-    project_harness_binary_boundary_cmd.addFileInput(
-        b.path("scripts/eval/memory_agent_runtime.py"),
-    );
-    project_harness_binary_boundary_cmd.addFileInput(
-        b.path("scripts/build_project_rule.py"),
-    );
-    project_harness_binary_boundary_cmd.addArgs(&.{
-        "--repo",
-        b.build_root.path orelse ".",
-        "--production",
-    });
-    project_harness_binary_boundary_cmd.addArtifactArg(exe);
-    project_harness_binary_boundary_cmd.addArg("--shadow");
-    project_harness_binary_boundary_cmd.addArtifactArg(project_harness_shadow_exe);
-    project_harness_binary_boundary_cmd.addArg("--driver");
-    project_harness_binary_boundary_cmd.addArtifactArg(project_harness_lifecycle_driver);
-    project_harness_binary_boundary_cmd.addArgs(&.{
-        "--kernel",
-        b.pathFromRoot("zig-out/libexec/metacodes/metacodes-project-kernel"),
-        "--builder",
-        b.pathFromRoot("scripts/build_project_rule.py"),
-        "--output",
-        b.pathFromRoot("zig-out/reports/project-harness-binary-boundary.json"),
-    });
-    project_harness_binary_boundary_cmd.step.dependOn(&project_harness_kernel_cmd.step);
-    const project_harness_binary_boundary_step = b.step(
-        "test:project-harness-binary-boundary",
-        "Run the real production/enforced vs eval/shadow loopback-provider L2",
-    );
-    project_harness_binary_boundary_step.dependOn(&project_harness_binary_boundary_cmd.step);
     const rule_impact_driver_l2_cmd = b.addSystemCommand(&.{project_harness_python});
     rule_impact_driver_l2_cmd.addFileArg(b.path("scripts/eval/rule_impact_driver_l2.py"));
     rule_impact_driver_l2_cmd.addArg("--eval-driver");
@@ -2473,32 +1986,17 @@ pub fn build(b: *std.Build) void {
     );
     sealed_bench_step.dependOn(&sealed_bench_run.step);
 
-    const run_step = b.step("run", "Run the release app");
-    const run_cmd = b.addRunArtifact(exe);
-    run_step.dependOn(&run_cmd.step);
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    const run_debug_step = b.step("run-debug", "Run the debug app");
-    const run_debug_cmd = b.addRunArtifact(debug_exe);
-    run_debug_step.dependOn(&run_debug_cmd.step);
-    if (b.args) |args| {
-        run_debug_cmd.addArgs(args);
-    }
-
     // `test` is exactly its three parts; nothing else is wired into it
     // (scripts/tests/test_gate_manifest.py checks this). CI runs the parts on
     // separate runners, so a check wired straight into `test` would run on no
     // CI runner at all (doc/CI_DESIGN.md §4).
     // `test:units` is the unit and component test binaries and the
     // repository's script unit suites; `test:integration` is the integration
-    // suite (in its shards) and the spikes, which wait for the ReleaseSmall
-    // app; `test:product` drives the built product end to end (the evaluation
+    // suite (in its shards) and the spikes; `test:product` drives the built product end to end (the evaluation
     // harness, the smokes, the daemon and the TinyKG transport).
     const test_step = b.step("test", "Run tests");
     const units_test_step = b.step("test:units", "Run the unit and component test binaries and the script unit suites (part of `test`)");
-    const integration_test_step = b.step("test:integration", "Run Core and CLI integration suites and the spikes (part of `test`)");
+    const integration_test_step = b.step("test:integration", "Run Core integration tests and standalone harnesses (part of `test`)");
     const product_test_step = b.step("test:product", "Run the built product end to end: evaluation harness, smokes, daemon (part of `test`)");
     test_step.dependOn(units_test_step);
     test_step.dependOn(integration_test_step);
@@ -2523,7 +2021,7 @@ pub fn build(b: *std.Build) void {
         }).step);
     }
     if (@import("builtin").os.tag == .macos) product_test_step.dependOn(&project_rule_mac_pilot_run.step);
-    units_test_step.dependOn(release_test_step);
+    units_test_step.dependOn(&agentcore_archive_test_cmd.step);
     units_test_step.dependOn(http_status_gate_step);
     units_test_step.dependOn(subsystem_boundary_step);
     units_test_step.dependOn(provider_test_step);
@@ -2751,16 +2249,7 @@ pub fn build(b: *std.Build) void {
     gate_pr_step.dependOn(&gate_coverage.step);
     gate_pr_step.dependOn(doc_check_step);
     gate_pr_step.dependOn(&gate_diff_check.step);
-    const test_obj = b.addTest(.{
-        .name = "cc-test",
-        .root_module = test_cc_mod, // 共享模块(perf,见 debug exe 后注释)
-        .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
-    });
-    const test_run = addTestRunArtifact(b, test_obj);
-    wireTinyKgTestInput(test_run, staged_tinykg);
-    wireTinyKgdTestInput(test_run, staged_tinykgd);
-    wireLeanKernelTestInputs(test_run, staged_lean_kernels);
-    units_test_step.dependOn(&test_run.step);
+    units_test_step.dependOn(core_test_step);
 
     // Two independent Metacodes processes share one authenticated StoreActor.
     // This is the runtime actuator for the daemon transport control plane.
@@ -2829,129 +2318,7 @@ pub fn build(b: *std.Build) void {
                     eval_test_cmd.setEnvironmentVariable("METACODES_TEST_TINYKGD_BIN", daemon.installed_path);
                 }
             }
-            const arm_smoke = b.addSystemCommand(&.{
-                eval_python_exe,
-                "scripts/eval/runtime_arm_smoke.py",
-                "--binary",
-            });
-            arm_smoke.addArtifactArg(exe);
-            arm_smoke.addArg("--tinykg-binary");
-            arm_smoke.addFileArg(tinykg.artifact);
-            arm_smoke.addArgs(&.{ "--expected-version", manifest.version });
-            wireTinyKgdTestInput(arm_smoke, staged_tinykgd);
-            eval_test_step.dependOn(&arm_smoke.step);
-            product_test_step.dependOn(&arm_smoke.step);
-
-            // A session must not keep what it frees: memory growth over a
-            // scripted tool session stays below the bytes it sent, and the
-            // REPL exits cleanly (paid=0, loopback only). The release binary
-            // is what users run; the Debug one adds DebugAllocator's leak and
-            // invalid-free checks at exit.
-            for ([_]*std.Build.Step.Compile{ exe, debug_exe }) |binary| {
-                const session_memory_smoke = b.addSystemCommand(&.{
-                    eval_python_exe,
-                    "scripts/session_memory_smoke.py",
-                    "--binary",
-                });
-                session_memory_smoke.addArtifactArg(binary);
-                product_test_step.dependOn(&session_memory_smoke.step);
-            }
-
-            // A replay fixture cannot prove that memory adapters cross the
-            // real agent-loop/tool/runtime boundary.  Run all three adapters
-            // against the native binary and hash-pinned local TinyKG with a
-            // deterministic loopback provider (paid=0, external network=0).
-            // The native rollout hands the runtime its metadata as an anonymous
-            // inherited descriptor: open, unlink, pass the fd number through
-            // METACODES_EVAL_METADATA_FD via pass_fds (memory_agent_runtime.py,
-            // evaluation_backend.zig). Windows has no pass_fds, refuses to unlink
-            // an open file (sharing violation), and the runtime parses a POSIX fd
-            // number, so the smoke is POSIX-only until that hand-off gets a
-            // Windows handle design (the Python suite marks the same mechanism
-            // "anonymous inherited descriptor requires POSIX").
-            //
-            // The System-One arm runs too (#474): the CLI no longer falls back
-            // to a built-in advisor, so an arm that uses one reaches it only
-            // through the service its own environment names (the runner's
-            // loopback judge), and this is what fails when it stops doing so.
-            if (@import("builtin").os.tag != .windows) {
-                const memory_runtime_smoke = b.addSystemCommand(&.{
-                    eval_python_exe,
-                    "scripts/eval/memory_agent_runtime_smoke.py",
-                    "--include-jev-arm",
-                    "--binary",
-                });
-                memory_runtime_smoke.addArtifactArg(exe);
-                memory_runtime_smoke.addArg("--tinykg-binary");
-                memory_runtime_smoke.addFileArg(tinykg.artifact);
-                eval_test_step.dependOn(&memory_runtime_smoke.step);
-                product_test_step.dependOn(&memory_runtime_smoke.step);
-
-                // Startup/resume over a persistent store: two fresh processes and
-                // the state root's local service (`kg install` + `kgd`), which
-                // resolves the TinyKG bundle beside the installed executable, so
-                // the smoke runs the installed layout. It stops what it starts.
-                // Unwired, it rotted for weeks: it kept writing the store the
-                // sessions had stopped reading once the service became the path.
-                if (staged_tinykgd) |daemon| {
-                    const process_resume_smoke = b.addSystemCommand(&.{ "bash", "tests/e2e/process_dag_resume_smoke.sh" });
-                    process_resume_smoke.step.dependOn(b.getInstallStep());
-                    process_resume_smoke.step.dependOn(tinykg.install_step);
-                    process_resume_smoke.step.dependOn(daemon.install_step);
-                    process_resume_smoke.setEnvironmentVariable("METACODES_PROCESS_E2E_BIN", b.getInstallPath(.bin, exe.out_filename));
-                    product_test_step.dependOn(&process_resume_smoke.step);
-
-                    // Chained attempts carry memory (scripts/eval/chained_runner.py):
-                    // the real E2E harness, TinyKG daemon, store export/import and
-                    // budget journal, with a loopback provider (paid=0). A lesson
-                    // the treatment writes in attempt 1 must reach attempt 2's
-                    // request, and must not without the chain's fixed TinyKG
-                    // domain. bash harness + POSIX flock journal: POSIX only.
-                    const chained_memory_smoke = b.addSystemCommand(&.{
-                        eval_python_exe,
-                        "scripts/eval/chained_memory_smoke.py",
-                        "--binary",
-                    });
-                    chained_memory_smoke.addArtifactArg(exe);
-                    chained_memory_smoke.addArg("--tinykg-binary");
-                    chained_memory_smoke.addFileArg(tinykg.artifact);
-                    chained_memory_smoke.addArg("--tinykgd-binary");
-                    chained_memory_smoke.addFileArg(daemon.artifact);
-                    eval_test_step.dependOn(&chained_memory_smoke.step);
-                    product_test_step.dependOn(&chained_memory_smoke.step);
-                }
-            }
         }
-        // The native REPL smoke (scripts/eval/tests/test_native_runtime.py)
-        // drives the installed product against a loopback provider; it hands
-        // the evaluation metadata over inherited descriptors (pass_fds), so
-        // it is POSIX-only like the memory runtime smoke.
-        if (@import("builtin").os.tag != .windows) for (eval_test_cmds) |eval_test_cmd| {
-            eval_test_cmd.step.dependOn(b.getInstallStep());
-            eval_test_cmd.setEnvironmentVariable("METACODES_NATIVE_E2E_BIN", b.getInstallPath(.bin, exe.out_filename));
-        };
-        // What plain `-p` says when a Run fails (#417): real exit code, stdout
-        // and stderr against a loopback mock on all four wires.
-        {
-            const headless_e2e = b.addSystemCommand(&.{
-                if (@import("builtin").os.tag == .windows) "python" else "python3",
-                "tests/e2e/headless_stop_notice_e2e.py",
-            });
-            headless_e2e.step.dependOn(b.getInstallStep());
-            headless_e2e.setEnvironmentVariable("METACODES_NATIVE_E2E_BIN", b.getInstallPath(.bin, exe.out_filename));
-            const headless_step = b.step("test:headless-cli", "Run the installed headless CLI against loopback providers");
-            headless_step.dependOn(&headless_e2e.step);
-            product_test_step.dependOn(headless_step);
-        }
-        // The native project-Harness suites (E3 runtime and templates, the
-        // E2 evolution lifecycle, the calibration matrix) run the installed
-        // product, both zero-provider drivers, the project kernel and the
-        // toolchain's own lake against loopback providers. Unwired, they
-        // skipped everywhere while the driver, a replay case and both
-        // analyzers drifted from the product for weeks. POSIX only, like the
-        // memory runtime smoke above: their fixtures use POSIX paths and modes.
-        // On Linux the rule builder isolates Lean in bubblewrap, so a host
-        // without bwrap leaves them to skip; CI installs it.
         const rule_sandbox_available = switch (@import("builtin").os.tag) {
             .windows => false,
             .linux => if (b.findProgram(&.{"bwrap"}, &.{})) |_| true else |_| false,
@@ -2959,15 +2326,8 @@ pub fn build(b: *std.Build) void {
         };
         if (rule_sandbox_available) if (staged_lean_kernels.project != null) for (eval_test_cmds) |eval_test_cmd| {
             wireLeanKernelTestInputs(eval_test_cmd, staged_lean_kernels);
-            // The installed layout, not the cached artifact: the runner
-            // resolves rg and the kernels beside the executable.
-            eval_test_cmd.step.dependOn(b.getInstallStep());
             eval_test_cmd.step.dependOn(&install_project_harness_eval_driver.step);
             eval_test_cmd.step.dependOn(&install_project_harness_lifecycle_driver.step);
-            eval_test_cmd.setEnvironmentVariable(
-                "METACODES_TEST_PROJECT_HARNESS_PRODUCTION_BIN",
-                b.getInstallPath(.bin, exe.out_filename),
-            );
             eval_test_cmd.setEnvironmentVariable(
                 "METACODES_TEST_PROJECT_HARNESS_DRIVER",
                 b.getInstallPath(.bin, project_harness_eval_driver.out_filename),
@@ -3017,9 +2377,7 @@ pub fn build(b: *std.Build) void {
         spike_step.dependOn(&run_t.step);
     }
 
-    // Both suites read the same source inventory. The CLI suite still compiles
-    // once and partitions individual test names only after compilation.
-    const integration_suite_mod = createIntegrationModule(b, target, optimize, test_harness_mod, .cli, test_cc_mod, mock_mcp_exe.getEmittedBin());
+    const integration_suite_mod = createIntegrationModule(b, target, optimize, test_harness_mod, core_mod, mock_mcp_exe.getEmittedBin());
     const integration_suite_test = b.addTest(.{
         .name = "integration-suite",
         .root_module = integration_suite_mod,
@@ -3035,12 +2393,9 @@ pub fn build(b: *std.Build) void {
         run_shard.has_side_effects = true;
         run_shard.setEnvironmentVariable("METACODES_TEST_SHARD_COUNT", b.fmt("{}", .{integration_test_shards}));
         run_shard.setEnvironmentVariable("METACODES_TEST_SHARD_INDEX", b.fmt("{}", .{shard_index}));
-        run_shard.setEnvironmentVariable("METACODES_TEST_CLI_BIN", b.getInstallPath(.bin, exe.out_filename));
         run_shard.expectExitCode(0);
-        run_shard.step.dependOn(install_cli);
         run_shard.step.dependOn(&install_mock_mcp.step);
         run_shard.step.dependOn(&install_selfexe_probe.step);
-        run_shard.step.dependOn(&install_update_unit_probe.step);
         wireTinyKgTestInput(run_shard, staged_tinykg);
         wireTinyKgdTestInput(run_shard, staged_tinykgd);
         wireLeanKernelTestInputs(run_shard, staged_lean_kernels);
@@ -3056,16 +2411,13 @@ pub fn build(b: *std.Build) void {
     const integration_monolithic_run = addTestRunArtifact(b, integration_suite_test);
     integration_monolithic_run.setEnvironmentVariable("METACODES_TEST_SHARD_COUNT", "1");
     integration_monolithic_run.setEnvironmentVariable("METACODES_TEST_SHARD_INDEX", "0");
-    integration_monolithic_run.setEnvironmentVariable("METACODES_TEST_CLI_BIN", b.getInstallPath(.bin, exe.out_filename));
-    integration_monolithic_run.step.dependOn(install_cli);
     integration_monolithic_run.step.dependOn(&install_mock_mcp.step);
     integration_monolithic_run.step.dependOn(&install_selfexe_probe.step);
-    integration_monolithic_run.step.dependOn(&install_update_unit_probe.step);
     wireTinyKgTestInput(integration_monolithic_run, staged_tinykg);
     wireTinyKgdTestInput(integration_monolithic_run, staged_tinykgd);
     wireLeanKernelTestInputs(integration_monolithic_run, staged_lean_kernels);
     wirePinnedRipgrepTestInput(b, integration_monolithic_run, ripgrep_bundle);
-    const integration_monolithic_step = b.step("test:integration-monolithic", "Run the Core and CLI integration suites in one process each");
+    const integration_monolithic_step = b.step("test:integration-monolithic", "Run the Core integration suite in one process");
     integration_monolithic_step.dependOn(&integration_monolithic_run.step);
 
     const integration_timed_test = b.addTest(.{
@@ -3078,11 +2430,8 @@ pub fn build(b: *std.Build) void {
         },
     });
     const integration_timed_run = addTestRunArtifact(b, integration_timed_test);
-    integration_timed_run.setEnvironmentVariable("METACODES_TEST_CLI_BIN", b.getInstallPath(.bin, exe.out_filename));
-    integration_timed_run.step.dependOn(install_cli);
     integration_timed_run.step.dependOn(&install_mock_mcp.step);
     integration_timed_run.step.dependOn(&install_selfexe_probe.step);
-    integration_timed_run.step.dependOn(&install_update_unit_probe.step);
     wireTinyKgTestInput(integration_timed_run, staged_tinykg);
     wireTinyKgdTestInput(integration_timed_run, staged_tinykgd);
     wireLeanKernelTestInputs(integration_timed_run, staged_lean_kernels);
@@ -3090,39 +2439,8 @@ pub fn build(b: *std.Build) void {
     const integration_times_step = b.step("test:integration-times", "Run aggregate component/integration tests with per-test timings");
     integration_times_step.dependOn(&integration_timed_run.step);
 
-    const core_integration_mod = createIntegrationModule(b, target, optimize, test_harness_mod, .core, core_mod, mock_mcp_exe.getEmittedBin());
-    const core_integration_test = b.addTest(.{
-        .name = "core-integration-suite",
-        .root_module = core_integration_mod,
-        .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
-    });
-    const core_integration_run = addTestRunArtifact(b, core_integration_test);
-    core_integration_run.step.dependOn(&install_selfexe_probe.step);
-    wireTinyKgTestInput(core_integration_run, staged_tinykg);
-    wireTinyKgdTestInput(core_integration_run, staged_tinykgd);
-    wireLeanKernelTestInputs(core_integration_run, staged_lean_kernels);
-    wirePinnedRipgrepTestInput(b, core_integration_run, ripgrep_bundle);
-    const core_integration_step = b.step("test:core-integration", "Run integration tests against the Core library");
-    core_integration_step.dependOn(&core_integration_run.step);
-    spike_step.dependOn(core_integration_step);
-    integration_monolithic_step.dependOn(core_integration_step);
-
-    const core_integration_timed_test = b.addTest(.{
-        .name = "core-integration-suite-times",
-        .root_module = core_integration_mod,
-        .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
-        .test_runner = .{
-            .path = b.path("scripts/time_test_runner.zig"),
-            .mode = .simple,
-        },
-    });
-    const core_integration_timed_run = addTestRunArtifact(b, core_integration_timed_test);
-    core_integration_timed_run.step.dependOn(&install_selfexe_probe.step);
-    wireTinyKgTestInput(core_integration_timed_run, staged_tinykg);
-    wireTinyKgdTestInput(core_integration_timed_run, staged_tinykgd);
-    wireLeanKernelTestInputs(core_integration_timed_run, staged_lean_kernels);
-    wirePinnedRipgrepTestInput(b, core_integration_timed_run, ripgrep_bundle);
-    integration_times_step.dependOn(&core_integration_timed_run.step);
+    const core_integration_step = b.step("test:core-integration", "Run Core integration tests against the library");
+    core_integration_step.dependOn(&run_integration_reporter.step);
 
     // ToolDispatcher metadata 验收(issue #5):直接消费 AgentCore 包装层
     // (session_budget/mcp_session/model_skill_tool)与 metacodes-core 目录的
@@ -3154,7 +2472,7 @@ pub fn build(b: *std.Build) void {
     // through the broad `test` graph.
     const skill_runtime_step = b.step(
         "test:skill-runtime",
-        "Run the shared Skill Runtime and CLI adapter integration tests",
+        "Run the Skill Runtime integration tests",
     );
     const skill_runtime_files = [_][]const u8{
         "tests/integration/skills_e2e_test.zig",
@@ -3168,7 +2486,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         m.addImport("harness", test_harness_mod);
-        m.addImport("cc", test_cc_mod);
+        m.addImport("metacodes-core", core_mod);
         addPlatform(b, m);
         const t = b.addTest(.{
             .name = "skill-runtime",
@@ -3204,42 +2522,32 @@ pub fn build(b: *std.Build) void {
 
     integration_test_step.dependOn(spike_step);
 
-    // test:new —— 只跑本次 e2e 框架新增的 L2 component 测试(隔离运行,绕开主套件已知
-    // 的 integration 挂起)。每个文件独立 artifact,使用所属套件的实现入口。
-    const new_step = b.step("test:new", "Run only the new e2e-framework L2 component tests");
-    const new_files = [_][]const u8{
-        "tests/component/plugin_runtime_test.zig",
-        "tests/component/plugin_process_test.zig",
-        "tests/component/base_url_flag_test.zig",
-        "tests/component/headless_json_test.zig",
-        "tests/component/auth_test.zig",
-        "tests/component/render_region_test.zig",
-        "tests/component/ui_state_test.zig",
-        "tests/component/ui_render_test.zig",
-        "tests/component/diff_highlight_test.zig",
-        "tests/component/swarm_process_test.zig",
-    };
-    const new_core_files = [_][]const u8{
-        "tests/component/gemini_provider_test.zig",
-        "tests/component/http_error_test.zig",
-        "tests/component/agent_session_tools_test.zig",
-        "tests/component/agent_session_host_tools_test.zig",
-        "tests/component/agent_session_ui_test.zig",
+    const new_step = b.step("test:new", "Run focused Core integration tests (use -Dtfilter)");
+    const focused_test_files = [_][]const u8{
         "tests/component/add_dir_test.zig",
         "tests/component/agent_background_test.zig",
+        "tests/component/agent_session_host_tools_test.zig",
+        "tests/component/agent_session_tools_test.zig",
+        "tests/component/agent_session_ui_test.zig",
         "tests/component/answer_queue_test.zig",
+        "tests/component/auth_test.zig",
         "tests/component/auto_compact_request_test.zig",
         "tests/component/background_main_test.zig",
+        "tests/component/base_url_flag_test.zig",
         "tests/component/cache_break_test.zig",
         "tests/component/capability_gate_test.zig",
         "tests/component/compact_summary_test.zig",
         "tests/component/compound_perm_test.zig",
         "tests/component/diagnostics_test.zig",
         "tests/component/dialect_matrix_test.zig",
+        "tests/component/gemini_provider_test.zig",
         "tests/component/goal_state_test.zig",
+        "tests/component/http_error_test.zig",
         "tests/component/kg_task_projection_test.zig",
         "tests/component/microcompact_test.zig",
         "tests/component/openai_provider_test.zig",
+        "tests/component/plugin_process_test.zig",
+        "tests/component/plugin_runtime_test.zig",
         "tests/component/prompt_override_test.zig",
         "tests/component/protected_skill_inject_test.zig",
         "tests/component/provider_vtable_test.zig",
@@ -3254,6 +2562,7 @@ pub fn build(b: *std.Build) void {
         "tests/component/subagent_agentdef_fields_test.zig",
         "tests/component/suspend_resume_test.zig",
         "tests/component/swarm_dag_test.zig",
+        "tests/component/swarm_process_test.zig",
         "tests/component/swarm_security_test.zig",
         "tests/component/swarm_tools_test.zig",
         "tests/component/task_batch_test.zig",
@@ -3270,32 +2579,22 @@ pub fn build(b: *std.Build) void {
         "tests/component/user_context_inject_test.zig",
         "tests/component/weak_model_test.zig",
     };
-    const new_test_groups = [_]struct {
-        files: []const []const u8,
-        import_name: []const u8,
-        implementation: *std.Build.Module,
-    }{
-        .{ .files = &new_files, .import_name = "cc", .implementation = test_cc_mod },
-        .{ .files = &new_core_files, .import_name = "metacodes-core", .implementation = core_mod },
-    };
-    for (new_test_groups) |group| {
-        for (group.files) |f| {
-            const m = b.createModule(.{
-                .root_source_file = b.path(f),
-                .target = target,
-                .optimize = optimize,
-                .link_libc = true,
-            });
-            m.addImport("harness", test_harness_mod); // 共享模块(见 integ 循环前注释:perf)
-            m.addImport(group.import_name, group.implementation);
-            addPlatform(b, m); // 测试文件用 platform 的可移植 env/net 封装(setEnv、clientRoundtrip)
-            const t = b.addTest(.{
-                .name = "new-l2",
-                .root_module = m,
-                .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
-            });
-            new_step.dependOn(&addTestRunArtifact(b, t).step);
-        }
+    for (focused_test_files) |path| {
+        const module = b.createModule(.{
+            .root_source_file = b.path(path),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        module.addImport("harness", test_harness_mod);
+        module.addImport("metacodes-core", core_mod);
+        addPlatform(b, module);
+        const focused_test = b.addTest(.{
+            .name = "core-l2",
+            .root_module = module,
+            .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
+        });
+        new_step.dependOn(&addTestRunArtifact(b, focused_test).step);
     }
 
     // 五个 AgentDef 运行字段的聚焦门；开发时无需编译整套 component artifacts。
@@ -3356,7 +2655,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         m.addImport("harness", test_harness_mod);
-        m.addImport("cc", test_cc_mod);
+        m.addImport("metacodes-core", core_mod);
         addPlatform(b, m);
         const t = b.addTest(.{
             .name = "kg-governance-l2",
@@ -3381,7 +2680,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         m.addImport("harness", test_harness_mod);
-        m.addImport("cc", test_cc_mod);
+        m.addImport("metacodes-core", core_mod);
         addPlatform(b, m);
         const t = b.addTest(.{
             .name = "kg-ontology-feedback-l2",
@@ -3406,7 +2705,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         m.addImport("harness", test_harness_mod);
-        m.addImport("cc", test_cc_mod);
+        m.addImport("metacodes-core", core_mod);
         addPlatform(b, m);
         const t = b.addTest(.{
             .name = "kg-experience-feedback-l2",
@@ -3419,42 +2718,13 @@ pub fn build(b: *std.Build) void {
         kg_experience_feedback_step.dependOn(&run_t.step);
     }
 
-    const windows_gate_failure = if (!target_was_explicit)
-        b.addFail("windows:gate requires explicit -Dtarget=x86_64-windows-gnu")
-    else if (target.result.os.tag != .windows or !agentcore_target_is_native)
-        b.addFail(b.fmt(
-            "Windows native gate cannot run target {s} on host {s}",
-            .{ resolved_agentcore_target, host_agentcore_triple },
-        ))
-    else
-        null;
-    const windows_gate_step = b.step(
-        "windows:gate",
-        "Run native Windows platform keystones + CLI smoke (full suite: zig build test)",
-    );
-    if (windows_gate_failure) |failure| {
-        windows_gate_step.dependOn(&failure.step);
-    } else {
-        const windows_help_cmd = b.addRunArtifact(exe);
-        windows_help_cmd.addArg("--help");
-        windows_help_cmd.step.dependOn(b.getInstallStep());
-        // This gate proves the Windows portability layer and installed CLI can
-        // execute natively. The repository-wide suite is a separate gate: the
-        // `units`, `integration` and `product` legs of ci.yml's windows-gates
-        // job run its three parts on native Windows runners (#53 wired it;
-        // before that no workflow ran it and Windows regressions accumulated
-        // silently).
-        // Keep the two decoupled: do not couple the full suite's unrelated
-        // subsystem timing/concurrency failures to this platform gate.
+    const windows_gate_step = b.step("windows:gate", "Run Windows platform and native AgentCore tests");
+    if (target.result.os.tag == .windows) {
         windows_gate_step.dependOn(platform_test_step);
-        // The LSP subsystem's server lookup is native-platform logic (PATH
-        // separator, path joiner, PATHEXT probing), so its suite belongs on the
-        // native Windows gate rather than only on POSIX hosts. It is a leaf
-        // subsystem with no timing/concurrency coupling to the rest of the
-        // repository suite, so it does not reintroduce the flakiness the
-        // comment above is guarding against.
         windows_gate_step.dependOn(lsp_test_step);
-        windows_gate_step.dependOn(&windows_help_cmd.step);
+        windows_gate_step.dependOn(agentcore_gate_step);
+    } else {
+        windows_gate_step.dependOn(&b.addFail("windows:gate requires a Windows target").step);
     }
 
     _ = b.addFmt(.{

@@ -14,10 +14,9 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const ppaths = @import("platform").paths;
 
-const App = cc.app_module.App;
 const Slug = cc.provider_ids.Slug;
 const provider_login = cc.api_provider_login;
 const key_store = cc.provider_api_key_store;
@@ -116,13 +115,6 @@ const Case = struct {
         }
         self.tmp.cleanup();
         self.arena.deinit();
-    }
-
-    fn config(self: *Case, argv: []const [*:0]const u8) !cc.types_mod.Config {
-        var parsed = cc.parseArgsForTest(argv, self.arena.allocator());
-        try std.testing.expect(parsed.parse_error == null);
-        parsed.state_root = self.root;
-        return parsed;
     }
 };
 
@@ -252,54 +244,6 @@ test "L2 key login: a key never follows a redirect, from the check or any catalo
     try std.testing.expect(headerValue(followed, "authorization") == null);
 }
 
-test "L2 key login: a stored key starts a Z.AI session and reaches its requests, and no other provider's" {
-    var case: Case = undefined;
-    try case.init();
-    defer case.deinit();
-    const allocator = case.arena.allocator();
-    try key_store.save(std.testing.allocator, case.root, Slug.lit("zai-coding-plan"), .zai_coding_plan_api_key, GOOD_KEY, "cn-personal", 1);
-
-    // Startup: no variable holds a key; the store answers for Z.AI.
-    {
-        const argv = [_][*:0]const u8{ "metacodes", "--provider", "zai-coding-plan" };
-        const config = try case.config(&argv);
-        const secret = try cc.resolveProviderScopedSecret(std.testing.allocator, config, "zai-coding-plan");
-        defer std.testing.allocator.free(secret);
-        try std.testing.expectEqualStrings(GOOD_KEY, secret);
-        // ...and not for OpenAI.
-        try std.testing.expectError(error.MissingCredentials, cc.resolveProviderScopedSecret(std.testing.allocator, config, "openai"));
-    }
-
-    // A session on the Z.AI route sends it.
-    var server = try harness.MockServer.start(ANTHROPIC_END_TURN_SSE, 0);
-    defer server.stop();
-    const messages_url = try allocator.dupeZ(u8, try server.urlOwned(allocator));
-    const argv = [_][*:0]const u8{ "metacodes", "--provider", "zai-coding-plan", "--model", "glm-5.3", "--base-url", messages_url.ptr };
-    const config = try case.config(&argv);
-    const secret = try cc.resolveProviderScopedSecret(std.testing.allocator, config, "zai-coding-plan");
-    defer std.testing.allocator.free(secret);
-    var io_runtime = @import("platform").signal.threadedIo(allocator, .{});
-    defer io_runtime.deinit();
-    const app = try App.init(std.testing.allocator, io_runtime.io(), config, secret);
-    defer app.deinit();
-    const messages = [_]cc.types_mod.ApiMessage{
-        .{ .role = .user, .content = &[_]cc.types_mod.ApiContent{.{ .text = "hi" }} },
-    };
-    var handle = try app.provider().sendStream(&messages, null, null, null, null, null, "");
-    while (try handle.next()) |event| switch (event) {
-        .text => |text| app.allocator.free(text),
-        else => {},
-    };
-    handle.deinit();
-    const captured = server.lastRequest() orelse return error.NoRequestCaptured;
-    try std.testing.expectEqualStrings("POST /v1/messages HTTP/1.1", requestLine(captured));
-    try std.testing.expectEqualStrings("Bearer " ++ GOOD_KEY, headerValue(captured, "authorization").?);
-}
-
-// ── phase 2: every built-in vendor takes a pasted key ───────────────────────
-
-/// A vendor `/login <id>` now guides to a key page, and where its requests
-/// (so its key check) carry the key.
 const GuidedVendor = struct {
     id: []const u8,
     /// The page the default channel's region leads to.

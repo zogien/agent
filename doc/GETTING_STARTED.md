@@ -1,5 +1,8 @@
 # Getting started
 
+> This page documents the former Metacodes CLI. For the current build and
+> host integration instructions, see the [AgentCore SDK guide](../sdk/README.md).
+
 Install, configure a model, build from source. The [README](../README.md) is
 the overview; this page holds the details it links to.
 

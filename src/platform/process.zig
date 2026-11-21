@@ -2143,8 +2143,8 @@ fn testScratchPath(a: std.mem.Allocator, buf: []u8, name: []const u8) ![:0]const
 /// to its own cwd when it renames or removes it mid-session.
 fn testVanishedDir(a: std.mem.Allocator, buf: []u8, name: []const u8) ![:0]const u8 {
     const dir = try testScratchPath(a, buf, name);
-    _ = std.c.mkdir(dir.ptr, 0o700);
-    if (std.c.rmdir(dir.ptr) != 0) return error.TestScratchDirNotRemovable;
+    _ = pfs.mkdir(dir.ptr, 0o700);
+    if (pfs.rmdir(dir.ptr) != 0) return error.TestScratchDirNotRemovable;
     return dir;
 }
 

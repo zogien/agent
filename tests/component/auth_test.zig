@@ -5,11 +5,35 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 // 可移植 env 写入走 platform.paths(POSIX setenv / Windows _putenv_s)。
 // 保留 POSIX 调用形状的薄壳,免改下面二十多个调用点。
 const ppaths = @import("platform").paths;
+const pfs = @import("platform").fs;
+
+const InvalidParameterHandler = *const fn (
+    ?[*:0]const u16,
+    ?[*:0]const u16,
+    ?[*:0]const u16,
+    c_uint,
+    usize,
+) callconv(.c) void;
+extern "c" fn _set_thread_local_invalid_parameter_handler(handler: ?InvalidParameterHandler) ?InvalidParameterHandler;
+
+fn ignoreInvalidParameter(_: ?[*:0]const u16, _: ?[*:0]const u16, _: ?[*:0]const u16, _: c_uint, _: usize) callconv(.c) void {}
+
+fn expectClosedDescriptor(fd: pfs.Fd) !void {
+    // MSVC aborts on a closed descriptor unless the calling thread handles
+    // the invalid parameter. Scope the handler to this deliberate probe.
+    const msvc = builtin.os.tag == .windows and builtin.abi == .msvc;
+    const previous = if (msvc) _set_thread_local_invalid_parameter_handler(ignoreInvalidParameter) else null;
+    defer if (msvc) {
+        _ = _set_thread_local_invalid_parameter_handler(previous);
+    };
+    try std.testing.expect(pfs.lseek(fd, 0, .set) < 0);
+}
+
 /// 每进程唯一的 auth fixture 目录 `<tmpRoot>/cc-zig-auth-l2-<pid>`(建好)。
 var auth_dir_buf: [512]u8 = undefined;
 fn authDir() [:0]const u8 {
@@ -39,17 +63,6 @@ const OK_SSE =
     "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" ++
     "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" ++
     "data: {\"type\":\"message_stop\"}\n\n";
-
-test "L2 auth: --auth-precedence parses into Config" {
-    const a = std.testing.allocator;
-    const argv = [_][*:0]const u8{
-        "metacodes",
-        "--auth-precedence",
-        "oauth-first",
-    };
-    const config = cc.parseArgsForTest(&argv, a);
-    try std.testing.expectEqual(cc.types_mod.AuthPrecedence.oauth_first, config.auth_precedence);
-}
 
 fn drain(resp: *cc.client_mod.StreamResponse) !void {
     while (true) {
@@ -237,7 +250,6 @@ test "L2 auth: ordinary environment credential remains compatible with process t
 
 test "L2 auth: inherited credential FD authenticates without secret in initial environment" {
     const a = std.testing.allocator;
-    const pfs = @import("platform").fs;
     const ppaths_local = @import("platform").paths;
     const secret = "runtime-fd-secret-l2";
     var missing_auth_buf: [512]u8 = undefined;
@@ -255,7 +267,8 @@ test "L2 auth: inherited credential FD authenticates without secret in initial e
     defer @import("platform").fs.unlinkPath(path_z.ptr) catch {};
     const fd = pfs.open(path_z.ptr, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, 0o600);
     if (fd < 0) return error.CredentialTestFileOpenFailed;
-    errdefer pfs.close(fd);
+    var test_owns_fd = true;
+    defer if (test_owns_fd) pfs.close(fd);
     try std.testing.expectEqual(@as(isize, secret.len), pfs.write(fd, secret));
     try std.testing.expectEqual(@as(i64, 0), pfs.lseek(fd, 0, .set));
 
@@ -267,8 +280,10 @@ test "L2 auth: inherited credential FD authenticates without secret in initial e
 
     // The inherited FD is explicit runtime authority and must win even when
     // the general stored-credential policy says oauth_first.
+    test_owns_fd = false;
     var resolved = try cc.core_auth.resolveRuntimeCredential(a, "", null, .oauth_first);
-    errdefer resolved.deinit(a);
+    var credential_open = true;
+    defer if (credential_open) resolved.deinit(a);
     try std.testing.expectEqual(cc.core_auth.CredentialSource.fd_api_key, resolved.source);
     try std.testing.expectEqualStrings(secret, resolved.bearer_token);
     try std.testing.expect(std.c.getenv(cc.core_auth.RUNTIME_API_KEY_FD_ENV) != null);
@@ -296,12 +311,12 @@ test "L2 auth: inherited credential FD authenticates without secret in initial e
     try drain(&resp);
     resp.deinit();
     try std.testing.expect(rawHasAuth((srv.lastRequest() orelse return error.NoRequestCaptured).raw, secret));
+    credential_open = false;
     resolved.deinit(a);
-    try std.testing.expect(pfs.lseek(fd, 0, .set) < 0);
+    try expectClosedDescriptor(fd);
 }
 
 test "L2 auth: runtime FD rejects an ambient second credential channel" {
-    const pfs = @import("platform").fs;
     const ppaths_local = @import("platform").paths;
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/metacodes-auth-fd-ambiguous-{d}", .{
         ppaths_local.tempDir(),
@@ -329,11 +344,10 @@ test "L2 auth: runtime FD rejects an ambient second credential channel" {
     );
     try std.testing.expect(std.c.getenv(cc.core_auth.RUNTIME_API_KEY_FD_ENV) != null);
     try std.testing.expect(std.c.getenv(cc.core_auth.METASK_API_KEY_ENV) != null);
-    try std.testing.expect(pfs.lseek(fd, 0, .set) < 0);
+    try expectClosedDescriptor(fd);
 }
 
 test "L2 auth: runtime FD rejects a METASK_API_KEY in the layer below the environment (#486)" {
-    const pfs = @import("platform").fs;
     const ppaths_local = @import("platform").paths;
     const path = try std.fmt.allocPrint(std.testing.allocator, "{s}/metacodes-auth-fd-state-env-{d}", .{
         ppaths_local.tempDir(),
@@ -358,12 +372,11 @@ test "L2 auth: runtime FD rejects a METASK_API_KEY in the layer below the enviro
         error.AmbiguousRuntimeCredentials,
         cc.core_auth.resolveRuntimeCredentialWithEnvFallback(std.testing.allocator, "", null, .api_key_first, "file-secret"),
     );
-    try std.testing.expect(pfs.lseek(fd, 0, .set) < 0);
+    try expectClosedDescriptor(fd);
 }
 
 test "L2 auth: oversized runtime credential fails closed and closes inherited FD" {
     const a = std.testing.allocator;
-    const pfs = @import("platform").fs;
     const ppaths_local = @import("platform").paths;
     const path = try std.fmt.allocPrint(a, "{s}/metacodes-auth-fd-oversize-{d}", .{
         ppaths_local.tempDir(),
@@ -396,7 +409,7 @@ test "L2 auth: oversized runtime credential fails closed and closes inherited FD
         cc.core_auth.resolveRuntimeCredential(a, "", null, .api_key_first),
     );
     try std.testing.expect(std.c.getenv(cc.core_auth.RUNTIME_API_KEY_FD_ENV) != null);
-    try std.testing.expect(pfs.lseek(fd, 0, .set) < 0);
+    try expectClosedDescriptor(fd);
 }
 
 test "L2 auth: malformed runtime credential descriptor fails without mutating environment" {

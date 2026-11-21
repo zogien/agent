@@ -23,10 +23,7 @@ fn writeFile(path: [*:0]const u8, content: []const u8) !void {
 
 fn fixtureFailure(op: []const u8, path: [*:0]const u8) error{FixtureIoFailed} {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd: []const u8 = if (std.c.getcwd(&cwd_buf, cwd_buf.len)) |raw|
-        std.mem.span(@as([*:0]const u8, @ptrCast(raw)))
-    else
-        "?";
+    const cwd = pfs.getCwd(&cwd_buf) orelse "?";
     std.debug.print(
         "read_state fixture: {s} failed path={s} errno={d} cwd={s}\n",
         .{ op, path, std.c._errno().*, cwd },

@@ -12,7 +12,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const MINIMAL_END_TURN_SSE =
     "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"role\":\"assistant\",\"model\":\"x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n" ++
@@ -657,22 +657,5 @@ test "L2 e2e: a ToolSearch miss names only tools the request carried (#287)" {
     try std.testing.expect(std.mem.indexOf(u8, detail, "knowforge__search") != null);
     for ([_][]const u8{ "SendMessage", "TeamCreate", "TeamDelete", "SpawnTeammate", "Bash" }) |name| {
         try std.testing.expect(std.mem.indexOf(u8, detail, name) == null);
-    }
-}
-
-test "L2: --sections refines --dump-prompt and is refused on its own" {
-    const a = std.testing.allocator;
-    {
-        const argv = [_][*:0]const u8{ "metacodes", "--dump-prompt", "--sections" };
-        const config = cc.parseArgsForTest(&argv, a);
-        try std.testing.expect(config.dump_prompt and config.dump_prompt_sections);
-        try std.testing.expect(config.parse_error == null);
-    }
-    {
-        const argv = [_][*:0]const u8{ "metacodes", "--sections" };
-        const config = cc.parseArgsForTest(&argv, a);
-        const message = config.parse_error orelse return error.ExpectedParseError;
-        defer a.free(message);
-        try std.testing.expectEqualStrings("--sections requires --dump-prompt", message);
     }
 }

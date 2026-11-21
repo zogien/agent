@@ -220,7 +220,6 @@ const LIBRARY = Library{
         // The out-of-process teammate main loop drives a whole `App`. The
         // library reaches it from `swarm/context.zig` inside function bodies
         // only, so lazy analysis never compiles it into the library.
-        .{ .from = "src/swarm/teammate_process.zig", .to = "src/app.zig" },
     },
 };
 

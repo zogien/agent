@@ -16,7 +16,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs;
 
 const Slug = cc.provider_ids.Slug;
@@ -365,28 +365,6 @@ test "L2: a credential cannot cross provider boundaries and never reaches a UI s
 
 // ── CLI wiring ───────────────────────────────────────────────────────────────
 
-test "L2: --provider/--channel/--offer parse into Config" {
-    const a = std.testing.allocator;
-    const argv = [_][*:0]const u8{
-        "metacodes",
-        "--provider",
-        "zai-coding-plan",
-        "--channel",
-        "cn-openai",
-        "--offer",
-        "offer-0123456789abcdef0123456789abcdef",
-    };
-    const config = cc.parseArgsForTest(&argv, a);
-    defer a.free(config.provider_profile.?);
-    defer a.free(config.provider_channel.?);
-    defer a.free(config.provider_offer.?);
-    try std.testing.expectEqualStrings("zai-coding-plan", config.provider_profile.?);
-    try std.testing.expectEqualStrings("cn-openai", config.provider_channel.?);
-    try std.testing.expectEqualStrings("offer-0123456789abcdef0123456789abcdef", config.provider_offer.?);
-}
-
-// ── cross-UI control plane ───────────────────────────────────────────────────
-
 test "L2: two clients read the same catalog and selection from one kernel" {
     const a = std.testing.allocator;
     var registry = try ProviderRegistry.initWithBuiltins(a);
@@ -654,75 +632,6 @@ test "L2: a durable selection survives a reload and does not clobber other keys"
 
 // ── credential scoping at startup ────────────────────────────────────────────
 
-test "L2: only a non-Metask profile leaves the historical credential path" {
-    // Startup keeps Metask on `core/auth.zig` (stored OAuth, stored key, and
-    // the one-shot descriptor) and scopes every other profile to its own
-    // declared material. Getting this predicate wrong is what let a Metask
-    // token authenticate a Z.AI route.
-    // Naming no provider keeps the historical path.
-    try std.testing.expect(cc.selectedProfileIsMetask(.{}));
-
-    // The decision reads the id route resolution already recorded, not a second
-    // lookup of the user's alias. An alias resolves to its canonical id first.
-    try std.testing.expect(cc.selectedProfileIsMetask(.{
-        .provider_profile = "anthropic",
-        .resolved_provider_id = "metask",
-    }));
-    try std.testing.expect(!cc.selectedProfileIsMetask(.{
-        .provider_profile = "glm-coding-plan",
-        .resolved_provider_id = "zai-coding-plan",
-    }));
-    try std.testing.expect(!cc.selectedProfileIsMetask(.{
-        .provider_profile = "openai",
-        .resolved_provider_id = "openai",
-    }));
-
-    // Fail closed: a named provider with no recorded id must not re-enter the
-    // Metask credential path. That fallback is exactly how a Metask token
-    // reached a Z.AI route before this scoping existed.
-    try std.testing.expect(!cc.selectedProfileIsMetask(.{ .provider_profile = "zai-coding-plan" }));
-}
-
-test "L2: provider-scoped startup resolution accepts --api-key and fails closed otherwise" {
-    const a = std.testing.allocator;
-    const with_key = try cc.resolveProviderScopedSecret(
-        a,
-        .{ .provider_profile = "zai-coding-plan", .api_key = "cli-plan-key" },
-        "zai-coding-plan",
-    );
-    defer a.free(with_key);
-    try std.testing.expectEqualStrings("cli-plan-key", with_key);
-
-    // An unknown profile name is an error, not a silent `null` that would let
-    // the caller fall back to the Metask path.
-    try std.testing.expectError(error.UnknownProviderProfile, cc.resolveProviderScopedSecret(
-        a,
-        .{ .provider_profile = "not-a-vendor" },
-        "not-a-vendor",
-    ));
-
-    // The Metask credential store is not consulted for another provider. Both
-    // branches below prove that: with `OPENAI_API_KEY` present the result is
-    // exactly that value, and without it resolution fails before any client is
-    // constructed. A Metask fallback would produce neither outcome. Written
-    // this way so the assertion does not depend on the developer's shell.
-    if (std.c.getenv("OPENAI_API_KEY")) |raw| {
-        const from_env = try cc.resolveProviderScopedSecret(
-            a,
-            .{ .provider_profile = "openai" },
-            "openai",
-        );
-        defer a.free(from_env);
-        try std.testing.expectEqualStrings(std.mem.span(raw), from_env);
-    } else {
-        try std.testing.expectError(error.MissingCredentials, cc.resolveProviderScopedSecret(
-            a,
-            .{ .provider_profile = "openai" },
-            "openai",
-        ));
-    }
-}
-
 test "L2: an idempotent retry is recognized after intervening commits" {
     const a = std.testing.allocator;
     const path = try tempConfigPath(a, "idempotent");
@@ -818,62 +727,6 @@ fn setEnvZ(name: [*:0]const u8, value: [*:0]const u8) void {
 
 fn unsetEnvZ(name: [*:0]const u8) void {
     @import("platform").paths.unsetEnv(name);
-}
-
-test "L2: a globally committed selection routes the next process, model inference does not" {
-    const a = std.testing.allocator;
-    const path = try tempConfigPath(a, "restart");
-    defer a.free(path);
-    removeTempDir(path);
-    defer removeTempDir(path);
-
-    const path_z = try a.dupeZ(u8, path);
-    defer a.free(path_z);
-    setEnvZ(cc.provider_config_store.CONFIG_PATH_ENV, path_z);
-    defer unsetEnvZ(cc.provider_config_store.CONFIG_PATH_ENV);
-
-    var registry = try ProviderRegistry.initWithBuiltins(a);
-    defer registry.deinit();
-    var catalog = try registry.buildCatalog(a, .{ .only_provider = Slug.lit("zai-coding-plan") });
-    defer catalog.deinit();
-    // The OpenAI-wire GLM route: proof the transport comes from the offer's
-    // protocol and not from the model name, which starts with "glm".
-    var target: *const cc.provider_offer.ModelOffer = undefined;
-    for (catalog.items()) |*candidate| {
-        if (candidate.channel_id.eqlText("cn-openai") and
-            std.mem.eql(u8, candidate.request_model_id, "glm-5.3")) target = candidate;
-    }
-
-    {
-        var store = try cc.provider_config_store.Store.initHome(a, "");
-        defer store.deinit();
-        _ = try cc.provider_config_store.setGlobalSelection(
-            &store,
-            cc.provider_selection.RuntimeSelection.pinned(target.offer_id, target.offer_revision, .global),
-            null,
-            "restart-commit",
-        );
-    }
-
-    // A fresh process: nothing on the command line names a provider.
-    var config = cc.types_mod.Config{};
-    try std.testing.expect(cc.applyPersistedGlobalSelection(&config, a));
-    defer {
-        if (config.selected_offer_id) |value| a.free(value);
-        if (config.resolved_provider_id) |value| a.free(value);
-        if (config.base_url) |value| a.free(value);
-        a.free(config.model);
-    }
-
-    try std.testing.expectEqualStrings("glm-5.3", config.model);
-    try std.testing.expectEqualStrings(target.endpoint_ref, config.base_url.?);
-    try std.testing.expectEqual(cc.types_mod.ProviderKind.openai, config.provider_kind);
-    // Credential scope has to follow the restored route, or the session would
-    // re-enter the Metask credential path for a Z.AI endpoint.
-    try std.testing.expectEqualStrings("zai-coding-plan", config.provider_profile.?);
-    try std.testing.expect(!cc.selectedProfileIsMetask(config));
-    // Model-name inference would have said `anthropic` for "glm-5.3".
-    try std.testing.expect(cc.inferProviderKind(config.model) != config.provider_kind);
 }
 
 test "L2: a stored pin the catalog no longer offers is never silently remapped" {
@@ -1576,90 +1429,6 @@ test "L2: an opaque upstream identity is preserved rather than derived" {
         // id rather than inventing one.
         try std.testing.expect(item.canonical_model_id == null);
     }
-}
-
-test "L2: a configured pool entry's account label outlives the read that produced it" {
-    const a = std.testing.allocator;
-    const path = try tempConfigPath(a, "pool-lifetime");
-    defer a.free(path);
-    removeTempDir(path);
-    defer removeTempDir(path);
-
-    var store = try cc.provider_config_store.Store.initPath(a, path);
-    defer store.deinit();
-
-    const Seed = struct {
-        fn run(_: *anyopaque, document: *cc.provider_config_doc.Document) anyerror!void {
-            var entry = cc.provider_config_doc.ProviderEntry{ .id = Slug.lit("openai") };
-            try entry.credentials.append(.{
-                .id = Slug.lit("work"),
-                .env = try cc.provider_config_doc.AliasName.parse("METACODES_POOL_LIFETIME_KEY"),
-                .kind = try cc.provider_controls.Bounded(32).parse("api_key"),
-                .account_or_plan = try cc.provider_config_doc.AliasName.parse("acme-workspace"),
-            });
-            try document.upsertProvider(entry);
-        }
-    };
-    var anchor: u8 = 0;
-    _ = try store.commit(.{ .mutation = .{ .ctx = @ptrCast(&anchor), .applyFn = Seed.run } });
-
-    setEnvZ("METACODES_POOL_LIFETIME_KEY", "sk-pool-lifetime");
-    defer unsetEnvZ("METACODES_POOL_LIFETIME_KEY");
-
-    // Read the document, build the pool, and keep only the pool — the shape a
-    // caller that freed the document too early would produce.
-    var document = try store.load();
-    defer document.deinit();
-    var buffer: [cc.provider_config_doc.MAX_POOL_CREDENTIALS]cc.provider_credential.PoolEntry = undefined;
-    const pool = cc.app_module.App.credentialPoolFrom(&document, &buffer, cc.provider_credential.EnvLookup.empty());
-    try std.testing.expectEqual(@as(usize, 1), pool.len);
-
-    // Everything the entry borrows must still read correctly while the document
-    // is alive — including the account label, which lives inside it.
-    try std.testing.expectEqualStrings("sk-pool-lifetime", pool[0].secret);
-    try std.testing.expectEqualStrings("acme-workspace", pool[0].account_or_plan.?);
-    try std.testing.expect(pool[0].id.eqlText("work"));
-
-    // The label is not a copy: it points into the *stored* entry, which is
-    // exactly why the document has to outlive the pool. Reading it out of a
-    // by-value `provider()` lookup would compare against a temporary — the
-    // same mistake that made the pool builder hand back dangling slices.
-    const stored = &document.providers.items[0].credentials.entries[0];
-    try std.testing.expect(pool[0].account_or_plan.?.ptr == stored.account_or_plan.?.slice().ptr);
-}
-
-test "L2: a pool credential's variable is read from the state root's .env when the environment leaves it unset (#486)" {
-    const a = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = root_buf[0..try tmp.dir.realPath(std.testing.io, &root_buf)];
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".env", .data = "METACODES_POOL_FILE_KEY=sk-pool-from-file\n" });
-
-    // The pool names its variable in config.json; the allowlist the host
-    // builds from that document is what lets the file set it.
-    var document = try cc.provider_config_doc.parse(a,
-        \\{"providers": {"openai": {"credentials": [{"id": "work", "env": "METACODES_POOL_FILE_KEY", "kind": "api_key"}]}}}
-    );
-    defer document.deinit();
-    var arena_state = std.heap.ArenaAllocator.init(a);
-    defer arena_state.deinit();
-    const allowlist = try cc.app_state_env.allowlistFrom(arena_state.allocator(), &cc.provider_registry.BUILTIN_PROFILES, &document, null);
-    var layer = try cc.app_state_env.load(a, root, allowlist);
-    defer layer.deinit();
-
-    unsetEnvZ("METACODES_POOL_FILE_KEY");
-    var buffer: [cc.provider_config_doc.MAX_POOL_CREDENTIALS]cc.provider_credential.PoolEntry = undefined;
-    const from_file = cc.app_module.App.credentialPoolFrom(&document, &buffer, layer.lookup());
-    try std.testing.expectEqual(@as(usize, 1), from_file.len);
-    try std.testing.expectEqualStrings("sk-pool-from-file", from_file[0].secret);
-    // Without the layer the member has no secret and is left out.
-    try std.testing.expectEqual(@as(usize, 0), cc.app_module.App.credentialPoolFrom(&document, &buffer, cc.provider_credential.EnvLookup.empty()).len);
-
-    setEnvZ("METACODES_POOL_FILE_KEY", "sk-pool-from-env");
-    defer unsetEnvZ("METACODES_POOL_FILE_KEY");
-    const from_env = cc.app_module.App.credentialPoolFrom(&document, &buffer, layer.lookup());
-    try std.testing.expectEqualStrings("sk-pool-from-env", from_env[0].secret);
 }
 
 test "L2: a session that named its provider on the command line has a current offer" {

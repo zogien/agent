@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const output_semantics = cc.output_semantics;
 const Disposition = output_semantics.Disposition;
@@ -284,73 +284,6 @@ test "L2 输出语义:工具调用前的文本是 commentary,end_turn 的文本�
     try std.testing.expectEqualStrings("Nothing there.", assembled.items);
 }
 
-test "L2 输出语义:max_tokens 续写的多段合成一个 final" {
-    const a = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = try tmpRoot(&tmp, &root_buf);
-
-    const cut = try textSseAlloc(a, "m1", "first half ", "max_tokens");
-    defer a.free(cut);
-    const rest = try textSseAlloc(a, "m2", "second half", "end_turn");
-    defer a.free(rest);
-
-    var scenario = try runCassette(a, &.{ cut, rest }, root, null, 2);
-    defer scenario.deinit();
-
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, scenario.result.stop_reason);
-    try std.testing.expectEqual(@as(usize, 2), scenario.capture.closed.items.len);
-
-    const cut_seg = scenario.capture.closed.items[0];
-    const final_seg = scenario.capture.closed.items[1];
-    try std.testing.expectEqual(Disposition.continued, cut_seg.disposition);
-    try std.testing.expectEqual(Disposition.final, final_seg.disposition);
-    // One logical output ⇒ one group; `stream_done` fired twice and meant
-    // nothing about completion.
-    try std.testing.expectEqual(cut_seg.group, final_seg.group);
-
-    try std.testing.expectEqualStrings("first half second half", scenario.ledger.finalText().?);
-
-    var assembled: std.ArrayList(u8) = .empty;
-    defer assembled.deinit(a);
-    try scenario.capture.assembledFinal(&assembled, a);
-    try std.testing.expectEqualStrings("first half second half", assembled.items);
-
-    // issue #269: the seamless text is the only thing a result reader sees, so
-    // the continuation is counted on the RunResult and carried to `--json`.
-    try std.testing.expectEqual(@as(u32, 1), scenario.result.continuations);
-    const usage = cc.app_module.UsageTotals{};
-    const line = try cc.repl_headless.buildResultLine(a, scenario.ledger.finalText().?, "final", null, null, scenario.result, &usage, "m");
-    defer a.free(line);
-    const parsed = try std.json.parseFromSlice(std.json.Value, a, std.mem.trimEnd(u8, line, "\n"), .{});
-    defer parsed.deinit();
-    try std.testing.expectEqual(@as(i64, 1), parsed.value.object.get("continuations").?.integer);
-    try std.testing.expectEqualStrings("end_turn", parsed.value.object.get("stop_reason").?.string);
-}
-
-test "L2 输出语义:没有续写的 Run 结果行 continuations 为 0" {
-    const a = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const root = try tmpRoot(&tmp, &root_buf);
-
-    const whole = try textSseAlloc(a, "m1", "whole answer", "end_turn");
-    defer a.free(whole);
-    var scenario = try runCassette(a, &.{whole}, root, null, 0);
-    defer scenario.deinit();
-
-    try std.testing.expectEqual(cc.agent_loop.StopReason.end_turn, scenario.result.stop_reason);
-    try std.testing.expectEqual(@as(u32, 0), scenario.result.continuations);
-    const usage = cc.app_module.UsageTotals{};
-    const line = try cc.repl_headless.buildResultLine(a, "whole answer", "final", null, null, scenario.result, &usage, "m");
-    defer a.free(line);
-    const parsed = try std.json.parseFromSlice(std.json.Value, a, std.mem.trimEnd(u8, line, "\n"), .{});
-    defer parsed.deinit();
-    try std.testing.expectEqual(@as(i64, 0), parsed.value.object.get("continuations").?.integer);
-}
-
 test "L2 输出语义:中断产出的文本是 partial,永远不是 final" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -419,42 +352,6 @@ test "L2 输出语义:流内失败回滚的那段标 discarded,重试后的才�
     defer assembled.deinit(a);
     try scenario.capture.assembledFinal(&assembled, a);
     try std.testing.expectEqualStrings("clean answer", assembled.items);
-}
-
-test "L2 输出语义:headless 结果行按 core 的定性给 text_kind" {
-    const a = std.testing.allocator;
-    var ledger = output_semantics.Ledger.init(a);
-    defer ledger.deinit();
-
-    // No output yet.
-    try std.testing.expectEqualStrings("none", cc.repl_headless.projectRunText(&ledger).kind);
-
-    ledger.record(.{ .index = 0, .turn = 1, .group = 0, .disposition = .partial, .bytes = 4 }, "frag");
-    const partial = cc.repl_headless.projectRunText(&ledger);
-    try std.testing.expectEqualStrings("partial", partial.kind);
-    try std.testing.expectEqualStrings("frag", partial.text.?);
-
-    ledger.record(.{ .index = 1, .turn = 2, .group = 1, .disposition = .final, .bytes = 6 }, "answer");
-    const final = cc.repl_headless.projectRunText(&ledger);
-    try std.testing.expectEqualStrings("final", final.kind);
-    try std.testing.expectEqualStrings("answer", final.text.?);
-
-    const usage = cc.app_module.UsageTotals{};
-    const line = try cc.repl_headless.buildResultLine(
-        a,
-        final.text.?,
-        final.kind,
-        null,
-        null,
-        .{ .stop_reason = .end_turn, .turns = 2, .tool_calls = 0 },
-        &usage,
-        "m",
-    );
-    defer a.free(line);
-    const parsed = try std.json.parseFromSlice(std.json.Value, a, std.mem.trimEnd(u8, line, "\n"), .{});
-    defer parsed.deinit();
-    try std.testing.expectEqualStrings("final", parsed.value.object.get("text_kind").?.string);
-    try std.testing.expectEqualStrings("answer", parsed.value.object.get("text").?.string);
 }
 
 test "L2 输出语义:required_first 修复轮的文本是 commentary,段协议保持配对" {

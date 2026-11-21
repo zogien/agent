@@ -12,7 +12,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const ppaths = @import("platform").paths;
 const net = @import("platform").net;
@@ -376,117 +376,6 @@ test "L2 provider login: the recorded client is the one the refresh grant presen
     defer legacy.deinit();
     try std.testing.expectEqualStrings("profile-client", legacy.clientIdFor("profile-client"));
     try std.testing.expectEqualStrings("openai", legacy.clientIdFor(null));
-}
-
-test "L2 provider login: an imported token response records the installation's configured client" {
-    // `providers.<id>.oauth_client_id` (#87) reaches the import path with the
-    // same precedence as the interactive grant: it stands in for the missing
-    // declaration and an explicit `--client-id` still wins. Codex review of
-    // the first draft found the import path ignoring the configured client.
-    const a = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(std.testing.io, &root_buffer);
-    const oauth_dir = try a.dupeZ(u8, root_buffer[0..root_len]);
-    defer a.free(oauth_dir);
-    ppaths.setEnv("METACODES_OAUTH_DIR", oauth_dir.ptr);
-    defer ppaths.unsetEnv("METACODES_OAUTH_DIR");
-
-    const openai = &cc.provider_registry.openai.PROFILE;
-    try std.testing.expect(openai.oauth_client_id == null);
-    const token_json =
-        \\{"access_token":"configured-access","refresh_token":"configured-refresh","token_type":"Bearer","expires_in":3600}
-    ;
-    try std.testing.expectEqual(
-        @as(u8, 0),
-        cc.loginProviderWithTokenResponse(a, openai, token_json, null, "app_installation"),
-    );
-    {
-        var session = try provider_oauth.Session.initHome(a, "", openai.id);
-        defer session.deinit();
-        try std.testing.expect(try session.load());
-        try std.testing.expectEqualStrings("app_installation", session.clientIdFor(openai.oauth_client_id));
-    }
-
-    // Explicit wins over configured, as on the command line.
-    try std.testing.expectEqual(
-        @as(u8, 0),
-        cc.loginProviderWithTokenResponse(a, openai, token_json, "explicit-client", "app_installation"),
-    );
-    var session = try provider_oauth.Session.initHome(a, "", openai.id);
-    defer session.deinit();
-    try std.testing.expect(try session.load());
-    try std.testing.expectEqualStrings("explicit-client", session.clientIdFor(openai.oauth_client_id));
-}
-
-test "L2 provider login: an imported token response records the explicit client" {
-    // `--client-id` was accepted on the `--oauth-token-json` path and then
-    // ignored: the import always took the profile's declared client, which for
-    // the built-in openai profile is none, so the stored login refreshed as
-    // `client_id=openai`. This drives the wiring itself, not the parts.
-    const a = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(std.testing.io, &root_buffer);
-    const oauth_dir = try a.dupeZ(u8, root_buffer[0..root_len]);
-    defer a.free(oauth_dir);
-    ppaths.setEnv("METACODES_OAUTH_DIR", oauth_dir.ptr);
-    defer ppaths.unsetEnv("METACODES_OAUTH_DIR");
-
-    const openai = &cc.provider_registry.openai.PROFILE;
-    try std.testing.expect(openai.oauth_client_id == null);
-    const token_json =
-        \\{"access_token":"imported-access","refresh_token":"imported-refresh","token_type":"Bearer","expires_in":3600}
-    ;
-    try std.testing.expectEqual(
-        @as(u8, 0),
-        cc.loginProviderWithTokenResponse(a, openai, token_json, "explicit-client", null),
-    );
-
-    var session = try provider_oauth.Session.initHome(a, "", openai.id);
-    defer session.deinit();
-    try std.testing.expect(try session.load());
-    try std.testing.expectEqualStrings("imported-access", session.tokens.?.access_token);
-    // The refresh grant will present the client the user named, not the
-    // provider id.
-    try std.testing.expectEqualStrings("explicit-client", session.clientIdFor(openai.oauth_client_id));
-}
-
-test "L2 provider login: a provider that accepts no OAuth kind is refused before anything is stored" {
-    // Credential resolution opens the OAuth session only for kinds
-    // `servesKind` recognizes. A login stored for any other profile would be
-    // reported as a success and then never consulted.
-    const a = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const root_len = try tmp.dir.realPath(std.testing.io, &root_buffer);
-    const oauth_dir = try a.dupeZ(u8, root_buffer[0..root_len]);
-    defer a.free(oauth_dir);
-    ppaths.setEnv("METACODES_OAUTH_DIR", oauth_dir.ptr);
-    defer ppaths.unsetEnv("METACODES_OAUTH_DIR");
-
-    const Slug = cc.provider_ids.Slug;
-    const key_only = cc.provider_profile.ProviderProfile{
-        .id = Slug.lit("keyonly"),
-        .implementation_id = Slug.lit("keyonly"),
-        .display_name = "Key only",
-        .channels = &.{},
-        .accepted_credential_kinds = &.{.api_key},
-        .oauth_token_url = "https://example.invalid/token",
-    };
-    const token_json =
-        \\{"access_token":"a","refresh_token":"r","token_type":"Bearer","expires_in":3600}
-    ;
-    try std.testing.expectEqual(
-        @as(u8, 2),
-        cc.loginProviderWithTokenResponse(a, &key_only, token_json, "some-client", null),
-    );
-    var session = try provider_oauth.Session.initHome(a, "", key_only.id);
-    defer session.deinit();
-    try std.testing.expect(!(try session.load()));
 }
 
 test "L2 provider login: a configured provider declares its own OAuth endpoints" {
