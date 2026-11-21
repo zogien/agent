@@ -75,11 +75,9 @@ Run `zig build gate:pr` to execute the single AGENTS.md pre-submit checklist.
   adopts, defers or rejects point by point; not the current behaviour.
 - [Performance and memory principles](PERF_MEMORY_PRINCIPLES.md)
 - [UI/backend boundary](UI_DECOUPLE_BACKEND_FRAMEWORK.md)
-- [TUI state architecture](TUI_STATE_ARCHITECTURE.md)
-- [TUI viewport ownership](TUI_VIEWPORT_OWNERSHIP.md) — ADR: only the
-  Renderer erases the screen or writes past the inline region; ED 0 only,
-  no saved cursor, the half-line snapshot; enforced by
-  `zig build test:scrollback`.
+- [TUI state architecture](TUI_STATE_ARCHITECTURE.md) — historical upstream design.
+- [TUI viewport ownership](TUI_VIEWPORT_OWNERSHIP.md) — historical upstream ADR
+  on rendering and scrollback ownership.
 - [Swarm design](SWARM_DESIGN.md)
 - [Teamwork design](TEAMWORK_DESIGN.md) — harness-agnostic multi-agent runs:
   runtime vs seat, the worker contract, configuration, run directory and

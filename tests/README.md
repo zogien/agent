@@ -9,7 +9,7 @@
 | L2 组件 | `tests/component/*.zig`(mock HTTP / pty / 子进程) | `zig build test:spike` | 进程内 mock SSE server |
 | L3 集成 | `tests/integration/*.zig`(真 fs、真子进程、真本地 TinyKG) | 同上,或 `zig build test:integration-monolithic` 单进程对照 | tmp 目录 + bundled TinyKG |
 | L4 合约/门禁 | AgentCore ABI、TinyKG 边界、eval 框架、平台层 | `zig build agentcore:test` / `test:tinykg-binary` / `test:eval` / `test:platform` | 见下 |
-| L5 E2E(可选) | `tests/e2e/`、`tests/tty/` 真模型/真终端 | `tests/e2e/run_e2e.sh`、`zig build test:e2e-tty` | 真实 API key,不进默认 CI |
+| L5 E2E(可选) | `tests/e2e/` 上游 CLI 的真实模型测试 | 为 `tests/e2e/run_e2e.sh` 设置 `E2E_BIN_PATH` | 单独提供的上游 CLI 和真实 API key |
 
 各命令的分片方式与参数见下方"常用命令"。
 
@@ -19,7 +19,7 @@ L2 必要条件:一条组件测试要跨 ≥3 个真实模块接线(声明=接�
 ## 常用命令
 
 ```bash
-zig build test                   # 完整离线门:core + 聚合 L2/L3 + eval + TinyKG 合约 + 规则传感器 + 隔离根(platform/lsp/provider/picker)
+zig build test                   # 完整离线门:core + 聚合 L2/L3 + eval + TinyKG 合约 + 规则传感器 + 隔离根(platform/lsp/provider)
 zig build test:lib               # core 全图;默认 4 个确定性、fail-closed 分片
 zig build test:lib -Dlib-test-shards=2   # 资源紧张机器可降低并发,不减覆盖
 zig build test:lib-monolithic    # 单进程诊断/与分片基线对照
@@ -33,16 +33,13 @@ zig build test:platform          # 可移植平台抽象层(fork 子进程的测
 zig build test:mem               # 记忆系统 L2(隔离)
 zig build test:lsp               # LSP 子系统(隔离)
 zig build agentcore:test         # AgentCore 二进制 ABI v1 测试
-zig build dev                    # 仅 Debug app;保存即编的最快编辑环
-zig build dev:full               # Debug app + TinyKG;首次安装或 TinyKG 变更后运行
+zig build dev                    # 编译 Debug SDK 动态库
+zig build dev:full               # 编译 Debug SDK 动态库并安装 TinyKG
 
 # 单测试调试:图内文件经主套件 + -Dtfilter 过滤(直接 zig test 单文件会因
 # 模块内相对 import 失败);自包含的平台层文件可以单测
 zig build test:lib -Dtfilter="max_turns"
 METACODES_PROC_TEST=1 zig test src/platform/process.zig -lc --test-filter "capture cwd"
-
-# 性能基线
-hyperfine --warmup 3 './zig-out/bin/metacodes --help'
 ```
 
 TinyKG 相关门禁:`test:tinykg-binary`(bundled/显式二进制边界)、
@@ -73,21 +70,12 @@ tests/
 ├── integration/             集成测试(子进程、真 fs)
 ├── integration_suite.zig    聚合 L2/L3 的 inventory source of truth
 ├── agentcore_artifact_consumer/  source-free AgentCore 消费端 fixture
-├── e2e/                     真模型 e2e(不进默认 CI)
-├── tty/                     虚拟屏幕网格 TTY 回放框架
+├── e2e/                     使用上游 CLI 的真实模型测试
 ├── fixtures/ helpers/       数据与辅助
 ```
 
 新增 component/integration 测试文件必须登记进 `tests/integration_suite.zig`
 (build graph 会在构建期强制检查,漏登记直接失败)。
-
-TUI 渲染的组件测试断言"终端最后显示什么",不断言字节序:`component/vterm.zig` 是
-`tty/screen.py` 的 Zig 移植(行列网格、光标、SGR、ED/EL、autowrap pending-wrap、DEC 2026 帧、
-alt-screen、宽字符、底部滚入 scrollback,外加有界的 scrollback 内容缓冲),
-`component/region_harness.zig` 把真实 `RenderRegion` 的输出(`RenderRegion.sink`)经 tty 的
-ONLCR 回放进去。只走公共入口驱动 render_region,只读屏幕/scrollback,不读内部字段。
-用例:`render_region_contract_test.zig`(emit/erase 成对、半行续接、阶段交接、窄终端 footer)、
-`md_stream_convergence_test.zig`(助手 markdown 流在任意切分下收敛到整段渲染)。
 
 ## 已知执行覆盖缺口(登记非沉默)
 
@@ -97,12 +85,12 @@ ONLCR 回放进去。只走公共入口驱动 render_region,只读屏幕/scrollb
 - WebFetch(需真实网络)
 - Cron(需时钟推进)
 - PushNotification(发真实系统通知)
-- AskUserQuestion(需 TTY 交互)
+- AskUserQuestion(需宿主响应交互请求)
 - Monitor(长驻进程)
 - Worktree(改 cwd + 真实 git 状态)
 - MCP 工具族(需外部 server;mock server 只覆盖协议层)
 
-变更这些工具的执行语义时,用 `tests/e2e/` 或 `tests/tty/` 真实路径验证,
+变更这些工具的执行语义时,用真实宿主验证实际行为,
 不要以 schema 测试通过冒充执行覆盖。来源:`tests/component/tool_smoke_test.zig`
 头注释;新增缺口时同步更新两处。
 
@@ -113,8 +101,8 @@ ONLCR 回放进去。只走公共入口驱动 render_region,只读屏幕/scrollb
 Zig 版本和 cache 状态。冷缓存与暖缓存是两个实验条件,不能混作同一组比较;
 分片测试虽把 stdout 捕获成报告,但 build graph 强制每次重新执行,缓存命中只能
 省编译,不能拿旧测试结果冒充本轮反馈;
-默认 `zig build dev` 是不重编 TinyKG/ReleaseSmall 的编辑热路径,首次安装或
-TinyKG 变化时用 `zig build dev:full`;`zig build test` 是完整门,三者不互相替代。
+日常迭代用 `zig build dev` 编译 Debug SDK 动态库，需要安装或更新 TinyKG 时用
+`zig build dev:full`。完整测试用 `zig build test`。
 `python3 scripts/rule_control.py check` 的
 `build.test-throughput-integrity.l2` 规则会用 Lean 固定五项覆盖/失败语义,
 并以真实分片、单体和负例反馈重观测,耗时下降但规则缺失时仍 fail closed。
