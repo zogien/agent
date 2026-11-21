@@ -84,8 +84,8 @@ pub fn bwrapEnv() ?[]const u8 {
 /// `launcherBody`), so messages can name the command the user ran (#482).
 pub const launcher_env_name = "METACODES_LAUNCHER";
 
-/// `METACODES_LAUNCHER`, UTF-8; empty = unset. Believe it only through
-/// app/invocation.zig, which checks the launcher it names.
+/// `METACODES_LAUNCHER`, UTF-8. An empty value is unset.
+/// Callers must validate the launcher before trusting the value.
 pub fn launcherEnv() ?[]const u8 {
     if (is_windows) return envNonEmptyW(std.unicode.utf8ToUtf16LeStringLiteral(launcher_env_name), &launcher_utf8);
     return envNonEmpty(launcher_env_name);
