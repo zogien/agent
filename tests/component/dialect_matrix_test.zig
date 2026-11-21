@@ -9,7 +9,7 @@
 //! 断言 body 含/不含方言字段。不需 MockServer(序列化是纯函数,无网络)。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const openai = cc.api_openai;
 const gemini = cc.api_gemini;

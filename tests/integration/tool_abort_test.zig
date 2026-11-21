@@ -4,7 +4,7 @@
 //! 整条链路工作。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 test "Bash tool aborts sleep within 3s" {
     const a = std.testing.allocator;

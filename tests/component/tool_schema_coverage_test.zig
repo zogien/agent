@@ -12,7 +12,7 @@
 //! 反向验证(plan §验证):临时删掉某工具一个 required 对应的 prop_spec,本测试应变红。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const tools = cc.tools;
 

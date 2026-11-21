@@ -10,7 +10,7 @@
 //! 通过 cc 模块导入,跑 `zig build test:new`(绕开主 cc-test 套件已知 integration 挂起)。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs; // 可移植文件 IO(std.c.open 的 O 在 Windows 是 void)
 
 const render = cc.skills_render;

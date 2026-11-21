@@ -4,7 +4,7 @@
 //! 并发:批1 工具并发后 Read 在其它线程 record,record/get 须线程安全。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs; // 可移植文件 IO(std.c.open 的 O 在 Windows 是 void)
 
 const ReadState = cc.core_read_state.ReadState;

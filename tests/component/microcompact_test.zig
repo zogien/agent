@@ -4,7 +4,7 @@
 //! 条不动;text/tool_use block 不受影响;幂等(重复清不重复算)。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const Conversation = cc.conversation.Conversation;
 const msg = cc.core_message;

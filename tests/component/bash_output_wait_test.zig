@@ -20,7 +20,7 @@
 //! the tool, which is not worth carrying for this test.
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 /// How long after the test's timing origin the helper thread releases the
 /// delayed job's output. `waited_ms > 0` needs the dispatcher to reach its

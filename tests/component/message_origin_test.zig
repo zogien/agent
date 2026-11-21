@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const Origin = cc.message.Message.Origin;
 const CONTINUATION_PREFIX = "Your previous response was cut off by the token limit.";

@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 /// 模型发**小写 bash** 的 tool_use(P0.6 会把它归一化到 Bash 真执行)。
 const LOWERCASE_BASH_SSE =

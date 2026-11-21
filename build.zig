@@ -2770,7 +2770,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    kg_transport_probe_mod.addImport("cc", test_cc_mod);
+    kg_transport_probe_mod.addImport("metacodes-core", core_mod);
     addPlatform(b, kg_transport_probe_mod);
     const kg_transport_probe = b.addExecutable(.{
         .name = "kg-daemon-transport-probe",
@@ -3097,7 +3097,11 @@ pub fn build(b: *std.Build) void {
         .filters = if (tfilter) |filter_text| &.{filter_text} else &.{},
     });
     const core_integration_run = addTestRunArtifact(b, core_integration_test);
+    core_integration_run.step.dependOn(&install_selfexe_probe.step);
+    wireTinyKgTestInput(core_integration_run, staged_tinykg);
+    wireTinyKgdTestInput(core_integration_run, staged_tinykgd);
     wireLeanKernelTestInputs(core_integration_run, staged_lean_kernels);
+    wirePinnedRipgrepTestInput(b, core_integration_run, ripgrep_bundle);
     const core_integration_step = b.step("test:core-integration", "Run integration tests against the Core library");
     core_integration_step.dependOn(&core_integration_run.step);
     spike_step.dependOn(core_integration_step);
@@ -3113,7 +3117,11 @@ pub fn build(b: *std.Build) void {
         },
     });
     const core_integration_timed_run = addTestRunArtifact(b, core_integration_timed_test);
+    core_integration_timed_run.step.dependOn(&install_selfexe_probe.step);
+    wireTinyKgTestInput(core_integration_timed_run, staged_tinykg);
+    wireTinyKgdTestInput(core_integration_timed_run, staged_tinykgd);
     wireLeanKernelTestInputs(core_integration_timed_run, staged_lean_kernels);
+    wirePinnedRipgrepTestInput(b, core_integration_timed_run, ripgrep_bundle);
     integration_times_step.dependOn(&core_integration_timed_run.step);
 
     // ToolDispatcher metadata 验收(issue #5):直接消费 AgentCore 包装层
@@ -3200,60 +3208,16 @@ pub fn build(b: *std.Build) void {
     // 的 integration 挂起)。每个文件独立 artifact,使用所属套件的实现入口。
     const new_step = b.step("test:new", "Run only the new e2e-framework L2 component tests");
     const new_files = [_][]const u8{
-        "tests/component/user_context_inject_test.zig",
-        "tests/component/subagent_agentdef_fields_test.zig",
-        "tests/component/sealed_publication_test.zig",
-        "tests/component/recovery_allowance_test.zig",
         "tests/component/plugin_runtime_test.zig",
         "tests/component/plugin_process_test.zig",
-        "tests/component/answer_queue_test.zig",
         "tests/component/base_url_flag_test.zig",
-        "tests/component/task_error_test.zig",
-        "tests/component/tool_loop_breaker_test.zig",
-        "tests/component/rule_author_test.zig",
-        "tests/component/self_evolution_test.zig",
-        "tests/component/agent_background_test.zig",
-        "tests/component/skill_fileref_test.zig",
-        "tests/component/transcript_roundtrip_test.zig",
         "tests/component/headless_json_test.zig",
-        "tests/component/compound_perm_test.zig",
-        "tests/component/protected_skill_inject_test.zig",
-        "tests/component/read_state_test.zig",
-        "tests/component/tool_concurrency_test.zig",
-        "tests/component/tool_result_storage_test.zig",
-        "tests/component/cache_break_test.zig",
-        "tests/component/microcompact_test.zig",
-        "tests/component/kg_task_projection_test.zig",
-        "tests/component/goal_state_test.zig",
         "tests/component/auth_test.zig",
-        "tests/component/schema_validation_test.zig",
-        "tests/component/tool_schema_coverage_test.zig",
-        "tests/component/tool_smoke_test.zig",
-        "tests/component/compact_summary_test.zig",
-        "tests/component/auto_compact_request_test.zig",
         "tests/component/render_region_test.zig",
-        "tests/component/stream_retry_test.zig",
         "tests/component/ui_state_test.zig",
         "tests/component/ui_render_test.zig",
-        "tests/component/ui_backend_test.zig",
-        "tests/component/ui_multifrontend_test.zig",
-        "tests/component/diagnostics_test.zig",
-        "tests/component/provider_vtable_test.zig",
-        "tests/component/capability_gate_test.zig",
-        "tests/component/openai_provider_test.zig",
-        "tests/component/background_main_test.zig",
-        "tests/component/suspend_resume_test.zig",
         "tests/component/diff_highlight_test.zig",
-        "tests/component/prompt_override_test.zig",
-        "tests/component/weak_model_test.zig",
-        "tests/component/task_batch_test.zig",
-        "tests/component/teammate_runtime_test.zig",
-        "tests/component/swarm_tools_test.zig",
-        "tests/component/swarm_dag_test.zig",
-        "tests/component/swarm_security_test.zig",
         "tests/component/swarm_process_test.zig",
-        "tests/component/add_dir_test.zig",
-        "tests/component/dialect_matrix_test.zig",
     };
     const new_core_files = [_][]const u8{
         "tests/component/gemini_provider_test.zig",
@@ -3261,6 +3225,50 @@ pub fn build(b: *std.Build) void {
         "tests/component/agent_session_tools_test.zig",
         "tests/component/agent_session_host_tools_test.zig",
         "tests/component/agent_session_ui_test.zig",
+        "tests/component/add_dir_test.zig",
+        "tests/component/agent_background_test.zig",
+        "tests/component/answer_queue_test.zig",
+        "tests/component/auto_compact_request_test.zig",
+        "tests/component/background_main_test.zig",
+        "tests/component/cache_break_test.zig",
+        "tests/component/capability_gate_test.zig",
+        "tests/component/compact_summary_test.zig",
+        "tests/component/compound_perm_test.zig",
+        "tests/component/diagnostics_test.zig",
+        "tests/component/dialect_matrix_test.zig",
+        "tests/component/goal_state_test.zig",
+        "tests/component/kg_task_projection_test.zig",
+        "tests/component/microcompact_test.zig",
+        "tests/component/openai_provider_test.zig",
+        "tests/component/prompt_override_test.zig",
+        "tests/component/protected_skill_inject_test.zig",
+        "tests/component/provider_vtable_test.zig",
+        "tests/component/read_state_test.zig",
+        "tests/component/recovery_allowance_test.zig",
+        "tests/component/rule_author_test.zig",
+        "tests/component/schema_validation_test.zig",
+        "tests/component/sealed_publication_test.zig",
+        "tests/component/self_evolution_test.zig",
+        "tests/component/skill_fileref_test.zig",
+        "tests/component/stream_retry_test.zig",
+        "tests/component/subagent_agentdef_fields_test.zig",
+        "tests/component/suspend_resume_test.zig",
+        "tests/component/swarm_dag_test.zig",
+        "tests/component/swarm_security_test.zig",
+        "tests/component/swarm_tools_test.zig",
+        "tests/component/task_batch_test.zig",
+        "tests/component/task_error_test.zig",
+        "tests/component/teammate_runtime_test.zig",
+        "tests/component/tool_concurrency_test.zig",
+        "tests/component/tool_loop_breaker_test.zig",
+        "tests/component/tool_result_storage_test.zig",
+        "tests/component/tool_schema_coverage_test.zig",
+        "tests/component/tool_smoke_test.zig",
+        "tests/component/transcript_roundtrip_test.zig",
+        "tests/component/ui_backend_test.zig",
+        "tests/component/ui_multifrontend_test.zig",
+        "tests/component/user_context_inject_test.zig",
+        "tests/component/weak_model_test.zig",
     };
     const new_test_groups = [_]struct {
         files: []const []const u8,
@@ -3300,7 +3308,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         });
         m.addImport("harness", test_harness_mod);
-        m.addImport("cc", test_cc_mod);
+        m.addImport("metacodes-core", core_mod);
         addPlatform(b, m);
         const t = b.addTest(.{
             .name = "agentdef-fields",
@@ -3326,7 +3334,7 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             });
             m.addImport("harness", test_harness_mod); // 共享模块(见 integ 循环前注释:perf)
-            m.addImport("cc", test_cc_mod);
+            m.addImport("metacodes-core", core_mod);
             addPlatform(b, m); // 测试文件用 platform 的可移植 env/net 封装
             const t = b.addTest(.{
                 .name = "mem-l2",

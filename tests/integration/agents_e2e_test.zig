@@ -1,7 +1,7 @@
 //! Subagent E2E:加载、内置、tool 过滤、context 注入、Task 工具签名。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs; // 可移植文件 IO(std.c.open 的 O 在 Windows 是 void)
 
 fn makeAgent(parent: []const u8, filename: []const u8, md: []const u8) !void {
@@ -175,7 +175,7 @@ test "Subagents E2E: buildSubagentContext for Explore skips CLAUDE.md+git" {
     try set.loadFromStandardPaths("");
 
     const expl = set.find("Explore").?;
-    const preload = @import("cc").agents_preload;
+    const preload = @import("metacodes-core").test_support.agents_preload;
     const project_dir = try currentProjectRoot(a);
     defer a.free(project_dir);
     const sys = try preload.buildSubagentContext(a, expl, .{
@@ -206,7 +206,7 @@ test "Subagents E2E: buildSubagentContext for general-purpose includes git statu
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "untracked-note.txt", .data = "note\n" });
 
     const gp = set.find("general-purpose").?;
-    const preload = @import("cc").agents_preload;
+    const preload = @import("metacodes-core").test_support.agents_preload;
     const sys = try preload.buildSubagentContext(a, gp, .{
         .project_dir = repo,
         .parent_model = "claude-opus-4-7",
@@ -242,7 +242,7 @@ test "Subagents E2E: subagents section in system prompt" {
     defer agset.deinit();
     try agset.loadFromStandardPaths("");
 
-    const sp = @import("cc").system_prompt;
+    const sp = @import("metacodes-core").test_support.system_prompt;
     const prompt = try sp.buildWithSkillsAndAgents(a, "claude-opus-4-7", &skset, &agset, "/tmp");
     defer a.free(prompt);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "# Available subagents") != null);

@@ -1,5 +1,5 @@
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core");
 
 pub fn main(init: std.process.Init) !void {
     // iterateAllocator:Windows 上 `iterate` 是 @compileError(须 allocator 版

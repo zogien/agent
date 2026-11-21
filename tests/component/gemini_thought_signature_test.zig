@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const gemini = cc.api_gemini;
 const types = cc.types_mod;

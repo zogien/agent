@@ -11,7 +11,7 @@
 //! 本测验证具名 error 真的端到端生效(execute 缺字段 → 具名 error,非 MissingField)。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 fn ctxWithStore(store: *cc.core_task_store.TaskStore) cc.tool_context.ToolContext {
     return cc.tool_context.ToolContext{ .allocator = std.testing.allocator, .tasks = store };

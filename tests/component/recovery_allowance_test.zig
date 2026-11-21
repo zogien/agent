@@ -7,7 +7,7 @@
 //! same way `tool_result_storage_test.zig` observes projection.
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const harness = @import("harness");
 
 const ARTIFACT_BYTES: usize = 100_000;

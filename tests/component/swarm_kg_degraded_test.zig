@@ -14,7 +14,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const task_store = cc.core_task_store;
 
 test "Bug ②: KG 降级时 lead 写 mirror,teammate 读 mirror 看到任务" {

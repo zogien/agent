@@ -4,7 +4,7 @@
 //! 这里经 cc 模块重导出,放进 test:new 隔离套件可靠运行。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const decision = cc.permission_decision;
 const settings_mod = cc.permission_settings;

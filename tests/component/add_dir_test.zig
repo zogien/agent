@@ -16,7 +16,7 @@
 //! 符合 tests/README.md 的 L2 必要条件。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const settings_mod = cc.permission_settings;
 

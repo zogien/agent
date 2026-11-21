@@ -4,7 +4,7 @@
 //! 丢老消息 + summary prepend 到队首 + 保留最近 N;summarizer 返 null → 降级纯丢。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const harness = @import("harness");
 const psync = @import("platform").sync;
 const util_time = cc.util_time;

@@ -12,7 +12,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 var background_dialect_ctx: u8 = 0;
 

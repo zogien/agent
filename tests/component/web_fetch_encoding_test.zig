@@ -7,7 +7,7 @@
 //! production artifact path and the legacy inline path, through the real curl.
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const net = @import("platform").net;
 
 const MARKER = "ISSUE358 readable body: Python release 中文内容";

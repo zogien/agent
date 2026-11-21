@@ -13,7 +13,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const ti = cc.test_integrity;
 const gate_mod = cc.check_gate;

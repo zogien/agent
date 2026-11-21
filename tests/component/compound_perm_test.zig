@@ -23,7 +23,7 @@
 //! 注:`rm -rf /` 这类硬危险命令另由 shell_lex.validate(扫所有段)兜底,不依赖规则系统。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const rs = cc.permission_rule_spec;
 const Decision = cc.permission.PermissionResult;
