@@ -8,9 +8,9 @@ permissions:
   contents: read
 
 jobs:
-  agentcore:
+  sdk:
     if: ${{ !github.event.deleted }}
-    name: AgentCore (${{ matrix.target }})
+    name: Build SDK (${{ matrix.target }})
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -39,26 +39,29 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.16.0
-      - name: Build AgentCore archive
+      - name: Build SDK archive
         run: zig build archive -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Upload SDK archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: agentcore-${{ matrix.target }}
           path: zig-out/agentcore-archives/
           if-no-files-found: error
 
   publish:
-    needs: agentcore
+    name: Publish GitHub release
+    needs: sdk
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Download SDK archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: agentcore-*
           merge-multiple: true
           path: dist
-      - name: Publish AgentCore archives
+      - name: Create GitHub release
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
@@ -66,8 +69,8 @@ jobs:
         run: gh release create "$RELEASE_TAG" --verify-tag --notes "" dist/*
 
   pack-npm:
-    name: Pack and verify Agent SDK npm packages
-    needs: agentcore
+    name: Pack and verify npm packages
+    needs: sdk
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -77,26 +80,28 @@ jobs:
         with:
           node-version: '24.21.0'
           package-manager-cache: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Download SDK archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: agentcore-*
           merge-multiple: true
           path: ${{ runner.temp }}/agentcore-archives
-      - name: Check npm release retry behavior
+      - name: Test npm publication retries
         run: node --test scripts/npm/publish-release.test.mjs
-      - name: Pack and install-check the seven tarballs
+      - name: Pack and install-check npm packages
         run: >-
           node scripts/npm/pack-release.mjs
           "$RUNNER_TEMP/agentcore-archives" "$GITHUB_REF_NAME"
           "$(git rev-parse HEAD)" "$RUNNER_TEMP/agentcore-npm"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Upload npm packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: npm-packages
           path: ${{ runner.temp }}/agentcore-npm/
           if-no-files-found: error
 
   publish-npm:
-    name: Publish Agent SDK to npm
+    name: Publish SDK to npm
     if: github.repository == 'zogien/agent'
     needs: [publish, pack-npm]
     runs-on: ubuntu-24.04
@@ -116,7 +121,8 @@ jobs:
           node-version: '24.21.0'
           package-manager-cache: false
           registry-url: https://registry.npmjs.org
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Download npm packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: npm-packages
           path: ${{ runner.temp }}/agentcore-npm

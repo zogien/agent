@@ -477,7 +477,7 @@ class ForkReleaseWorkflowTest(unittest.TestCase):
         workflow = yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8"))
         self.assertEqual(workflow.get("on", workflow.get(True)), {"push": {"tags": ["fork/v*-fork.*"]}})
         steps = workflow["jobs"]["publish"]["steps"]
-        publish = next(step for step in steps if step.get("name") == "Publish AgentCore archives")
+        publish = next(step for step in steps if step.get("name") == "Create GitHub release")
         self.assertEqual(publish["env"]["RELEASE_TAG"], "${{ github.ref_name }}")
         self.assertIn('gh release create "$RELEASE_TAG" --verify-tag', publish["run"])
 
