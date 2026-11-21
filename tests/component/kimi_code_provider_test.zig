@@ -16,7 +16,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const ppaths = @import("platform").paths;
 const pfs = @import("platform").fs;
 
@@ -117,13 +117,6 @@ const Case = struct {
         self.arena.deinit();
     }
 
-    fn config(self: *Case, argv: []const [*:0]const u8) !cc.types_mod.Config {
-        var parsed = cc.parseArgsForTest(argv, self.arena.allocator());
-        try std.testing.expect(parsed.parse_error == null);
-        parsed.state_root = self.root;
-        return parsed;
-    }
-
     /// `http://127.0.0.1:<port>`, the origin `urlOwned` puts `/v1/messages` behind.
     fn originOf(self: *Case, server: *harness.MockServer) ![]const u8 {
         const url = try server.urlOwned(self.arena.allocator());
@@ -135,10 +128,22 @@ const Case = struct {
         return std.fmt.allocPrint(self.arena.allocator(), "{s}/coding/v1", .{try self.originOf(server)});
     }
 
-    /// The credential `metacodes --provider <name>` would start with.
-    fn secretFor(self: *Case, name: [:0]const u8) ![]u8 {
-        const argv = [_][*:0]const u8{ "metacodes", "--provider", name.ptr };
-        return cc.resolveProviderScopedSecret(std.testing.allocator, try self.config(&argv), name);
+    fn secretFor(self: *Case, name: []const u8) ![]u8 {
+        const allocator = std.testing.allocator;
+        var registry = try cc.provider_registry.ProviderRegistry.initWithBuiltins(allocator);
+        defer registry.deinit();
+        const profile = registry.find(name) orelse return error.UnknownProviderProfile;
+        var stored = try key_store.load(allocator, self.root, profile.id);
+        defer if (stored) |*key| key.deinit();
+        var reference: [cc.provider_ids.MAX_SLUG_LEN]u8 = undefined;
+        const resolved = try cc.provider_credential.resolve(.{
+            .provider_id = profile.id,
+            .accepted_kinds = profile.accepted_credential_kinds,
+            .env_aliases = profile.env_aliases,
+            .stored_api_key = if (stored) |*key| key.entry() else null,
+            .env = cc.provider_credential.EnvLookup.process(),
+        }, &reference);
+        return allocator.dupe(u8, resolved.secret);
     }
 };
 

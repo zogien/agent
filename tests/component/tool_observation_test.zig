@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const observation = cc.tools.tool_observation;
 const observation_journal = cc.tool_observation_journal;

@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 // Anthropic 文本回合 SSE(每个子 agent 一次:回一句 text 然后 end_turn)。
 fn textSSE(comptime body: []const u8) []const u8 {
@@ -43,7 +43,7 @@ test "P1.2 e2e: TaskBatch 对每个 item 展开模板 + spawn 真子 agent,聚�
         .agent_depth = 0,
     };
 
-    const task_batch = @import("cc").tools_task_batch;
+    const task_batch = @import("metacodes-core").test_support.tools_task_batch;
     const args =
         \\{"prompt_template":"Process item {name} number {n}","items":[{"name":"alpha","n":1},{"name":"beta","n":2},{"name":"gamma","n":3}]}
     ;
@@ -105,7 +105,7 @@ test "P1.2 e2e: TaskBatch 并发路径(有 registry)真起 N 线程各 spawn 子
     const args =
         \\{"prompt_template":"handle {x}","items":[{"x":"a"},{"x":"b"},{"x":"c"},{"x":"d"}]}
     ;
-    const res = @import("cc").tools_task_batch.execute(&ctx, args) catch |e| {
+    const res = @import("metacodes-core").test_support.tools_task_batch.execute(&ctx, args) catch |e| {
         std.debug.print("TaskBatch concurrent failed: {s}\n", .{@errorName(e)});
         return error.SkipZigTest;
     };
@@ -148,7 +148,7 @@ test "P1.2 e2e: 部分失败——一个 item 报错记 error,其它 completed(�
     const args =
         \\{"prompt_template":"do {x}","items":[{"x":"first"},{"x":"second"}]}
     ;
-    const res = @import("cc").tools_task_batch.execute(&ctx, args) catch |e| {
+    const res = @import("metacodes-core").test_support.tools_task_batch.execute(&ctx, args) catch |e| {
         std.debug.print("batch failed: {s}\n", .{@errorName(e)});
         return error.SkipZigTest;
     };
@@ -201,7 +201,7 @@ test "#394 e2e: 续写耗尽的子 agent 带正文 + incomplete,api_error 的仍
     const args =
         \\{"prompt_template":"report on {x}","items":[{"x":"first"},{"x":"second"}]}
     ;
-    const res = try @import("cc").tools_task_batch.execute(&ctx, args);
+    const res = try @import("metacodes-core").test_support.tools_task_batch.execute(&ctx, args);
     defer a.free(res);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, a, res, .{});
@@ -236,7 +236,7 @@ test "P1.2: TaskBatch 拒绝空 items / 超限 items" {
     ctx.tool_defs = empty_defs;
     ctx.permission_ctx = @constCast(&perm);
 
-    try std.testing.expectError(error.EmptyItems, @import("cc").tools_task_batch.execute(&ctx, "{\"prompt_template\":\"x\",\"items\":[]}"));
-    try std.testing.expectError(error.MissingItems, @import("cc").tools_task_batch.execute(&ctx, "{\"prompt_template\":\"x\"}"));
-    try std.testing.expectError(error.MissingPromptTemplate, @import("cc").tools_task_batch.execute(&ctx, "{\"items\":[{\"a\":1}]}"));
+    try std.testing.expectError(error.EmptyItems, @import("metacodes-core").test_support.tools_task_batch.execute(&ctx, "{\"prompt_template\":\"x\",\"items\":[]}"));
+    try std.testing.expectError(error.MissingItems, @import("metacodes-core").test_support.tools_task_batch.execute(&ctx, "{\"prompt_template\":\"x\"}"));
+    try std.testing.expectError(error.MissingPromptTemplate, @import("metacodes-core").test_support.tools_task_batch.execute(&ctx, "{\"items\":[{\"a\":1}]}"));
 }

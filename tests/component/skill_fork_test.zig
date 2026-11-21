@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs;
 
 const MINIMAL_END_TURN_SSE =
@@ -41,10 +41,7 @@ fn mkdirOrExisting(path: [*:0]const u8) !void {
 /// like a Skill Runtime bug.
 fn fixtureFailure(op: []const u8, path: [*:0]const u8) error{FixtureIoFailed} {
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd: []const u8 = if (std.c.getcwd(&cwd_buf, cwd_buf.len)) |raw|
-        std.mem.span(@as([*:0]const u8, @ptrCast(raw)))
-    else
-        "?";
+    const cwd = pfs.getCwd(&cwd_buf) orelse "?";
     std.debug.print(
         "skill_fork fixture: {s} failed path={s} errno={d} cwd={s}\n",
         .{ op, path, std.c._errno().*, cwd },

@@ -1,5 +1,8 @@
 # Installation, per-install state, and bundled governance kernels
 
+> This document describes the upstream Metacodes CLI installer. For this
+> fork's package and installation commands, see the [AgentCore SDK guide](../sdk/README.md).
+
 Status: implemented. Owner of the decisions below: the maintainer; this
 document records them so the implementation and reviews have one source.
 

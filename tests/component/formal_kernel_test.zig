@@ -1,12 +1,10 @@
 const std = @import("std");
 const pfs = @import("platform").fs;
+const paths = @import("platform").paths;
 const builtin = @import("builtin");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const tinykg_binary = @import("tinykg_binary.zig");
-
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
 const FORMAL_TOOL_SSE_TEMPLATE =
     "data: {\"type\":\"message_start\",\"message\":{\"id\":\"formal-1\",\"role\":\"assistant\",\"model\":\"x\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n" ++
@@ -115,12 +113,10 @@ test "L2 headless formal tool crosses registry, TinyKG sensor, compiled Lean, an
     defer allocator.free(checker_path_z);
     const checker_hash_z = try allocator.dupeZ(u8, checker_hash);
     defer allocator.free(checker_hash_z);
-    if (setenv("METACODES_FORMAL_KERNEL_PATH", checker_path_z.ptr, 1) != 0)
-        return error.SkipZigTest;
-    defer _ = unsetenv("METACODES_FORMAL_KERNEL_PATH");
-    if (setenv("METACODES_FORMAL_KERNEL_SHA256", checker_hash_z.ptr, 1) != 0)
-        return error.SkipZigTest;
-    defer _ = unsetenv("METACODES_FORMAL_KERNEL_SHA256");
+    paths.setEnv("METACODES_FORMAL_KERNEL_PATH", checker_path_z.ptr);
+    defer paths.unsetEnv("METACODES_FORMAL_KERNEL_PATH");
+    paths.setEnv("METACODES_FORMAL_KERNEL_SHA256", checker_hash_z.ptr);
+    defer paths.unsetEnv("METACODES_FORMAL_KERNEL_SHA256");
 
     const tinykg_bin = findTinyKg(allocator) orelse return error.SkipZigTest;
     defer allocator.free(tinykg_bin);
@@ -308,22 +304,13 @@ test "L2 headless formal tool crosses registry, TinyKG sensor, compiled Lean, an
     // path must not advance the canonical task lifecycle.
     try std.testing.expectEqual(cc.kg_client.TaskStatus.open, try kg.taskStatus(root_task_id));
 
-    const final_text = try cc.repl_headless.lastAssistantText(&conversation, allocator);
-    defer allocator.free(final_text);
-    try std.testing.expectEqualStrings("formal audit receipt observed", final_text);
-    const result_line = try cc.repl_headless.buildResultLine(
-        allocator,
-        final_text,
-        "final",
-        null,
-        null,
-        result,
-        &cc.app_module.UsageTotals{},
-        "fixture-model",
-    );
-    defer allocator.free(result_line);
-    try std.testing.expect(std.mem.indexOf(u8, result_line, "formal audit receipt observed") != null);
-    try std.testing.expectEqual(@as(u8, 0), cc.repl_headless.exitCodeFor(result.stop_reason));
+    const final_message = conversation.messages.items[conversation.messages.items.len - 1];
+    try std.testing.expectEqual(.assistant, final_message.role);
+    try std.testing.expectEqual(@as(usize, 1), final_message.blocks.len);
+    switch (final_message.blocks[0]) {
+        .text => |text| try std.testing.expectEqualStrings("formal audit receipt observed", text),
+        else => return error.ExpectedAssistantText,
+    }
 
     // The same registry entry must fail closed before checker execution when
     // the host pin is tampered. This is not a model-visible override: only the
@@ -331,11 +318,7 @@ test "L2 headless formal tool crosses registry, TinyKG sensor, compiled Lean, an
     var tampered_hash = try allocator.dupeZ(u8, checker_hash);
     defer allocator.free(tampered_hash);
     tampered_hash[0] = if (tampered_hash[0] == '0') '1' else '0';
-    try std.testing.expectEqual(@as(c_int, 0), setenv(
-        "METACODES_FORMAL_KERNEL_SHA256",
-        tampered_hash.ptr,
-        1,
-    ));
+    paths.setEnv("METACODES_FORMAL_KERNEL_SHA256", tampered_hash.ptr);
     const formal_tool = cc.tools.getTool("FormalAuditTask") orelse return error.MissingFormalAuditTask;
     const args = try std.fmt.allocPrint(allocator, "{{\"root_task_id\":{d}}}", .{root_task_id});
     defer allocator.free(args);
@@ -624,7 +607,7 @@ fn installTaskSnapshotWrapper(
 fn overwriteFile(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
-    const file = std.c.fopen(path_z.ptr, "w") orelse return error.WriteFailed;
+    const file = pfs.fopen(path_z.ptr, "w") orelse return error.WriteFailed;
     defer _ = std.c.fclose(file);
     if (bytes.len > 0 and std.c.fwrite(bytes.ptr, 1, bytes.len, file) != bytes.len)
         return error.WriteFailed;

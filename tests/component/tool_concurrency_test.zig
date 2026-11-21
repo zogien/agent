@@ -5,7 +5,7 @@
 //! 用 Glob(spawn ripgrep,离线可跑)做真实并发执行。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs; // 可移植文件 IO(std.c.open 的 O 在 Windows 是 void)
 
 const tool_exec = cc.tool_exec;

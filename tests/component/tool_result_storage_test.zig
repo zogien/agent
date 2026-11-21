@@ -1,7 +1,7 @@
 //! L2 组件测试：统一 Tool Result CAS 投影、恢复、resume 与 prompt-cache 稳定性。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const harness = @import("harness");
 const pfs = @import("platform").fs;
 

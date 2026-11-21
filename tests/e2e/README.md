@@ -1,5 +1,8 @@
 # metacodes 交互式 e2e 测试
 
+> 本目录记录旧 Metacodes CLI 的测试夹具。AgentCore 的当前验收入口是
+> `zig build test:core-integration` 和 `zig build agentcore:gate -Dtarget=<target>`。
+
 打**真实模型**驱动 metacodes 跑真实多步开发场景,验证工具调用链 + 多轮对话 + 文件产出真的能跑通。
 
 > ⚠️ 这不是单元/L2 测试。它需要**真网络 + 真 token**、消耗真实 model 用量,**不进默认 CI**。

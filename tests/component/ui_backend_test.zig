@@ -2,7 +2,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const ui_event = cc.ui_event;
 const ui_backend = cc.ui_backend;

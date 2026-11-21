@@ -3,7 +3,7 @@
 //! of TinyKG internals: the graph engine is an external protocol dependency.
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const projection = cc.kg_task_projection;
 

@@ -1,13 +1,13 @@
 <div align="center">
 
-# metacodes
+# agent
 
 **The agent harness you can embed anywhere.**
 
-Benchmarked on WorkBuddy-Bench against CodeBuddy Code and Claude Code · a 5.5 MB native binary · a fixed kernel no plugin can bypass · graph memory · a C ABI for every host
+Benchmarked on WorkBuddy-Bench against CodeBuddy Code and Claude Code · a fixed kernel no plugin can bypass · graph memory · a C ABI for every host
 
-[![CI](https://github.com/metask-ai/metacodes/actions/workflows/ci.yml/badge.svg?event=pull_request)](https://github.com/metask-ai/metacodes/actions/workflows/ci.yml?query=event%3Apull_request)
-[![Release](https://img.shields.io/github/v/release/metask-ai/metacodes)](https://github.com/metask-ai/metacodes/releases)
+[![CI](https://github.com/zogien/agent/actions/workflows/ci.yml/badge.svg?event=pull_request)](https://github.com/zogien/agent/actions/workflows/ci.yml?query=event%3Apull_request)
+[![Release](https://img.shields.io/github/v/release/zogien/agent)](https://github.com/zogien/agent/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Zig 0.16](https://img.shields.io/badge/zig-0.16-f7a41d.svg)](https://ziglang.org)
 
@@ -15,12 +15,7 @@ Benchmarked on WorkBuddy-Bench against CodeBuddy Code and Claude Code · a 5.5 M
 
 </div>
 
-metacodes is a coding-agent harness written from scratch in Zig. You can use
-it today as a terminal agent, but it is built as a library: one fixed agent
-loop, with permissions, budgets and formal checks that no plugin can bypass,
-inside surfaces that let any program host it. Those surfaces are a Zig module,
-a C ABI (callable from C, C++, Rust, Python, Node and anything else with an
-FFI), and headless NDJSON.
+This fork distributes AgentCore, an embeddable coding-agent SDK in Zig. Hosts use the Zig module or the C ABI to run the agent loop with tools, permissions, budgets, and formal checks.
 
 ## Why another harness
 
@@ -249,45 +244,25 @@ This is the research frontier of the project and an open invitation.
 
 ## Quick start
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/metask-ai/metacodes/main/scripts/install.sh | sh
-```
-
-That installs the latest release on macOS or Linux, arm64 or x86_64. Windows
-uses `scripts\install.ps1` with the release zip. Then:
+Build the SDK for the current platform with Zig 0.16.0.
 
 ```sh
-metacodes login                            # sign in to Metask in the browser
-metacodes -p "explain src/main.zig" --json # headless, one NDJSON result
-metacodes doctor                           # where every runtime asset resolves from
-metacodes update                           # move this install to the latest release
+zig build
 ```
 
-To build from source you need Zig 0.16:
+The SDK is staged under `zig-out/agentcore/`. Windows defaults to MSVC. Use
+`zig build archive -Dtarget=<triple> -Doptimize=ReleaseSafe` to create a
+redistributable archive and its SHA-256 file.
 
-```sh
-git clone https://github.com/metask-ai/metacodes.git && cd metacodes
-zig build && ./zig-out/bin/metacodes --help
-zig build example                          # embed the runtime from Zig
-```
-
-On a machine without a browser (a server, an SSH session), sign in with a
-device code instead: `metacodes login --provider metask --no-browser` prints
-a link and a code to confirm on any device, then asks for the model and
-reasoning level. Headless runs can use the saved Metask session.
-
-To use your own provider key instead of signing in, put it in the install's
-`~/.local/opt/metacodes/state/.env` and start again:
-[doc/LOCAL_CONFIG.md](doc/LOCAL_CONFIG.md). Use `metacodes logout` to sign out of the Metask account.
-
-[doc/GETTING_STARTED.md](doc/GETTING_STARTED.md) covers isolated installs,
-providers, Metask OAuth, Lean kernels and Windows.
+See the [AgentCore SDK guide](sdk/README.md) for host integration. Published
+bundles are available on [GitHub Releases](https://github.com/zogien/agent/releases)
+and as [@zogien/agent-sdk](https://www.npmjs.com/package/@zogien/agent-sdk).
 
 ## Architecture
 
 ```mermaid
 flowchart TB
-    hosts["Hosts: headless CLI · your app (C ABI or Zig)"]
+    hosts["Hosts: applications using the C ABI or Zig SDK"]
     runtime["Immutable Runtime generation (hot-swappable)"]
     subgraph kernel["Fixed kernel"]
         loop["AgentLoop and conversation ledger"]
@@ -311,7 +286,6 @@ ship for five targets with checksums.
 
 | Area | Status |
 |---|---|
-| CLI and headless | Used daily; flags may still change before 1.0 |
 | AgentCore C ABI | Experimental; hosts pin the exact revision |
 | `metacodes-core` Zig module | Experimental source API |
 | TinyKG memory and task DAG | On by default in the CLI; not yet in AgentCore |

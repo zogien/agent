@@ -16,7 +16,7 @@
 //! file sized by `setSize`, which `_chsize_s` does not make cheap on Windows.
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs;
 
 const artifact = cc.tool_result_artifact;

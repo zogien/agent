@@ -150,6 +150,9 @@ text. Rewinding drops the original message and all subsequent messages.
 
 ## CLI surface
 
+> Historical interface of the former Metacodes CLI. This fork delivers the
+> [AgentCore SDK](../sdk/README.md).
+
 `metacodes --help` enumerates the current flag set and is the authoritative
 pre-1.0 surface; `metacodes --version` prints `metacodes <semver>` as its first
 line, then the build identity (commit and dirty state, Zig, target and

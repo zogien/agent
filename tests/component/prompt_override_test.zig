@@ -9,7 +9,7 @@
 //! 并验证"不设 env → 走默认"(零回归)。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 // 可移植 env 写入走 platform.paths(POSIX setenv / Windows _putenv_s)。
 // 保留 POSIX 调用形状的薄壳,免改下面的调用点。

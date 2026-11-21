@@ -7,7 +7,7 @@
 const std = @import("std");
 const pfs = @import("platform").fs;
 const builtin = @import("builtin");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const tinykg_binary = @import("tinykg_binary.zig");
 
 const KgClient = cc.kg_client.KgClient;
@@ -19,7 +19,7 @@ fn findBin(allocator: std.mem.Allocator) ?[]u8 {
 fn overwriteFile(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
-    const file = std.c.fopen(path_z.ptr, "w") orelse return error.WriteFailed;
+    const file = pfs.fopen(path_z.ptr, "w") orelse return error.WriteFailed;
     defer _ = std.c.fclose(file);
     if (bytes.len > 0 and std.c.fwrite(bytes.ptr, 1, bytes.len, file) != bytes.len) return error.WriteFailed;
 }
@@ -37,7 +37,7 @@ fn unlinkPath(path: []const u8) !void {
     if (path.len >= path_buf.len) return error.PathTooLong;
     @memcpy(path_buf[0..path.len], path);
     path_buf[path.len] = 0;
-    if (std.c.unlink(@ptrCast(&path_buf)) != 0) return error.UnlinkFailed;
+    try pfs.unlinkPath(&path_buf);
 }
 
 fn renamePathForTest(from: []const u8, to: []const u8) !void {
@@ -621,12 +621,12 @@ test "L2 KG governance: lexical query plan binds variants and measures informati
     if (!kg.ready) return error.SkipZigTest;
     const memory_id = try kg.remember(.decision, "panic 时通过 checkpoint 恢复任务", "decision", false);
 
-    var ledger = @import("cc").kg_lexical_query_plan.Ledger{};
-    const ctx = @import("cc").tool_context.ToolContext{ .allocator = a, .kg = &kg, .kg_lexical_ledger = &ledger };
+    var ledger = @import("metacodes-core").test_support.kg_lexical_query_plan.Ledger{};
+    const ctx = @import("metacodes-core").test_support.tool_context.ToolContext{ .allocator = a, .kg = &kg, .kg_lexical_ledger = &ledger };
     const first_args =
         \\{"query":"panic crash checkpoint","lexical_plan":{"schema_version":"lexical-query-plan-v2","intent":"task_recovery","stage":"semantic_expansion","variants":[{"kind":"synonym","text":"panic crash checkpoint"},{"kind":"mechanism","text":"checkpoint recovery"}],"variant_index":0}}
     ;
-    const first_out = try @import("cc").kg_tools.executeRecall(&ctx, first_args);
+    const first_out = try @import("metacodes-core").test_support.kg_tools.executeRecall(&ctx, first_args);
     defer a.free(first_out);
     var first_parsed = try std.json.parseFromSlice(std.json.Value, a, first_out, .{});
     defer first_parsed.deinit();
@@ -653,7 +653,7 @@ test "L2 KG governance: lexical query plan binds variants and measures informati
     const second_args =
         \\{"query":"checkpoint recovery","lexical_plan":{"schema_version":"lexical-query-plan-v2","intent":"task_recovery","stage":"semantic_expansion","variants":[{"kind":"synonym","text":"panic crash checkpoint"},{"kind":"mechanism","text":"checkpoint recovery"}],"variant_index":1}}
     ;
-    const second_out = try @import("cc").kg_tools.executeRecall(&ctx, second_args);
+    const second_out = try @import("metacodes-core").test_support.kg_tools.executeRecall(&ctx, second_args);
     defer a.free(second_out);
     var second_parsed = try std.json.parseFromSlice(std.json.Value, a, second_out, .{});
     defer second_parsed.deinit();
@@ -683,8 +683,8 @@ test "L2 KG governance: lexical query plan binds variants and measures informati
 
     var detail: ?[]const u8 = null;
     defer if (detail) |value| a.free(value);
-    const bad_ctx = @import("cc").tool_context.ToolContext{ .allocator = a, .kg = &kg, .error_detail = &detail };
-    try std.testing.expectError(error.InvalidLexicalPlan, @import("cc").kg_tools.executeRecall(
+    const bad_ctx = @import("metacodes-core").test_support.tool_context.ToolContext{ .allocator = a, .kg = &kg, .error_detail = &detail };
+    try std.testing.expectError(error.InvalidLexicalPlan, @import("metacodes-core").test_support.kg_tools.executeRecall(
         &bad_ctx,
         "{\"query\":\"mismatch\",\"lexical_plan\":{\"schema_version\":\"lexical-query-plan-v2\",\"intent\":\"fact_lookup\",\"stage\":\"seed\",\"variants\":[{\"kind\":\"exact\",\"text\":\"needle\"}],\"variant_index\":0}}",
     ));
@@ -695,7 +695,7 @@ test "L2 KG governance: lexical query plan binds variants and measures informati
     // any TinyKG subprocess can run, rather than merely unit-testing parse().
     var caller_seen_detail: ?[]const u8 = null;
     defer if (caller_seen_detail) |value| a.free(value);
-    const caller_seen_ctx = @import("cc").tool_context.ToolContext{
+    const caller_seen_ctx = @import("metacodes-core").test_support.tool_context.ToolContext{
         .allocator = a,
         .kg = &kg,
         .kg_lexical_ledger = &ledger,
@@ -709,7 +709,7 @@ test "L2 KG governance: lexical query plan binds variants and measures informati
             kg.bin_path = saved_bin;
             a.free(poisoned_bin);
         }
-        try std.testing.expectError(error.InvalidLexicalPlan, @import("cc").kg_tools.executeRecall(
+        try std.testing.expectError(error.InvalidLexicalPlan, @import("metacodes-core").test_support.kg_tools.executeRecall(
             &caller_seen_ctx,
             "{\"query\":\"needle\",\"lexical_plan\":{\"schema_version\":\"lexical-query-plan-v2\",\"intent\":\"fact_lookup\",\"stage\":\"seed\",\"variants\":[{\"kind\":\"exact\",\"text\":\"needle\"}],\"variant_index\":0,\"seen_node_ids\":[41]}}",
         ));
@@ -719,16 +719,16 @@ test "L2 KG governance: lexical query plan binds variants and measures informati
 
     var no_ledger_detail: ?[]const u8 = null;
     defer if (no_ledger_detail) |value| a.free(value);
-    const no_ledger_ctx = @import("cc").tool_context.ToolContext{ .allocator = a, .kg = &kg, .error_detail = &no_ledger_detail };
-    try std.testing.expectError(error.LexicalPlanLedgerUnavailable, @import("cc").kg_tools.executeRecall(&no_ledger_ctx, first_args));
+    const no_ledger_ctx = @import("metacodes-core").test_support.tool_context.ToolContext{ .allocator = a, .kg = &kg, .error_detail = &no_ledger_detail };
+    try std.testing.expectError(error.LexicalPlanLedgerUnavailable, @import("metacodes-core").test_support.kg_tools.executeRecall(&no_ledger_ctx, first_args));
     try std.testing.expect(std.mem.indexOf(u8, no_ledger_detail.?, "fail closed") != null);
 
-    try std.testing.expectError(error.InvalidQuery, @import("cc").kg_tools.executeRecall(&ctx, "{\"query\":\"\"}"));
-    try std.testing.expectError(error.InvalidQuery, @import("cc").kg_tools.executeRecall(&ctx, "{\"query\":7}"));
+    try std.testing.expectError(error.InvalidQuery, @import("metacodes-core").test_support.kg_tools.executeRecall(&ctx, "{\"query\":\"\"}"));
+    try std.testing.expectError(error.InvalidQuery, @import("metacodes-core").test_support.kg_tools.executeRecall(&ctx, "{\"query\":7}"));
     const long_query = [_]u8{'x'} ** 401;
     const long_args = try std.fmt.allocPrint(a, "{{\"query\":\"{s}\"}}", .{&long_query});
     defer a.free(long_args);
-    try std.testing.expectError(error.InvalidQuery, @import("cc").kg_tools.executeRecall(&ctx, long_args));
+    try std.testing.expectError(error.InvalidQuery, @import("metacodes-core").test_support.kg_tools.executeRecall(&ctx, long_args));
 }
 
 test "L2 KG governance: v3 batch executes every variant and exposes each node body once" {
@@ -750,12 +750,12 @@ test "L2 KG governance: v3 batch executes every variant and exposes each node bo
     if (!kg.ready) return error.SkipZigTest;
     const memory_id = try kg.remember(.decision, "panic crash checkpoint recovery procedure", "decision", false);
 
-    var ledger = @import("cc").kg_lexical_query_plan.Ledger{};
-    const ctx = @import("cc").tool_context.ToolContext{ .allocator = a, .kg = &kg, .kg_lexical_ledger = &ledger };
+    var ledger = @import("metacodes-core").test_support.kg_lexical_query_plan.Ledger{};
+    const ctx = @import("metacodes-core").test_support.tool_context.ToolContext{ .allocator = a, .kg = &kg, .kg_lexical_ledger = &ledger };
     const args =
         \\{"query":"panic crash checkpoint","type":"decision","lexical_plan":{"schema_version":"lexical-query-plan-v3","intent":"enumeration","stage":"semantic_expansion","variants":[{"kind":"synonym","text":"panic crash checkpoint"},{"kind":"mechanism","text":"checkpoint recovery procedure"}]}}
     ;
-    const output = try @import("cc").kg_tools.executeRecall(&ctx, args);
+    const output = try @import("metacodes-core").test_support.kg_tools.executeRecall(&ctx, args);
     defer a.free(output);
     var parsed = try std.json.parseFromSlice(std.json.Value, a, output, .{});
     defer parsed.deinit();
@@ -1156,10 +1156,10 @@ test "L2 KG governance: KgContext emits evidence, freshness, and supersession si
     try kg.addEdge(root_id, "verified_by", evidence_id);
     try kg.addEdge(old_id, "deprecated_by", root_id);
 
-    const ctx = @import("cc").tool_context.ToolContext{ .allocator = a, .kg = &kg };
+    const ctx = @import("metacodes-core").test_support.tool_context.ToolContext{ .allocator = a, .kg = &kg };
     const args = try std.fmt.allocPrint(a, "{{\"node_id\":{d},\"limit\":5,\"text_offset\":0,\"text_limit\":16}}", .{root_id});
     defer a.free(args);
-    const out = try @import("cc").kg_tools.executeContext(&ctx, args);
+    const out = try @import("metacodes-core").test_support.kg_tools.executeContext(&ctx, args);
     defer a.free(out);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, a, out, .{});
@@ -1186,7 +1186,7 @@ test "L2 KG governance: KgContext emits evidence, freshness, and supersession si
 
     const old_args = try std.fmt.allocPrint(a, "{{\"node_id\":{d},\"limit\":20}}", .{old_id});
     defer a.free(old_args);
-    const old_out = try @import("cc").kg_tools.executeContext(&ctx, old_args);
+    const old_out = try @import("metacodes-core").test_support.kg_tools.executeContext(&ctx, old_args);
     defer a.free(old_out);
     var old_parsed = try std.json.parseFromSlice(std.json.Value, a, old_out, .{});
     defer old_parsed.deinit();
@@ -1198,18 +1198,18 @@ test "L2 KG governance: KgContext emits evidence, freshness, and supersession si
 
     var detail: ?[]const u8 = null;
     defer if (detail) |d| a.free(d);
-    const bad_ctx = @import("cc").tool_context.ToolContext{ .allocator = a, .kg = &kg, .error_detail = &detail };
-    try std.testing.expectError(error.InvalidLimit, @import("cc").kg_tools.executeContext(&bad_ctx, "{\"node_id\":1,\"limit\":21}"));
+    const bad_ctx = @import("metacodes-core").test_support.tool_context.ToolContext{ .allocator = a, .kg = &kg, .error_detail = &detail };
+    try std.testing.expectError(error.InvalidLimit, @import("metacodes-core").test_support.kg_tools.executeContext(&bad_ctx, "{\"node_id\":1,\"limit\":21}"));
     try std.testing.expect(detail != null);
     try std.testing.expect(std.mem.indexOf(u8, detail.?, "1..20") != null);
     a.free(detail.?);
     detail = null;
-    try std.testing.expectError(error.InvalidLimit, @import("cc").kg_tools.executeContext(&bad_ctx, "{\"node_id\":1,\"limit\":0}"));
+    try std.testing.expectError(error.InvalidLimit, @import("metacodes-core").test_support.kg_tools.executeContext(&bad_ctx, "{\"node_id\":1,\"limit\":0}"));
     try std.testing.expect(detail != null);
     try std.testing.expect(std.mem.indexOf(u8, detail.?, "1..20") != null);
     a.free(detail.?);
     detail = null;
-    try std.testing.expectError(error.InvalidLimit, @import("cc").kg_tools.executeContext(&bad_ctx, "{\"node_id\":1,\"text_limit\":1}"));
+    try std.testing.expectError(error.InvalidLimit, @import("metacodes-core").test_support.kg_tools.executeContext(&bad_ctx, "{\"node_id\":1,\"text_limit\":1}"));
     try std.testing.expect(detail != null);
     try std.testing.expect(std.mem.indexOf(u8, detail.?, "4..12000") != null);
 }
@@ -1400,7 +1400,7 @@ test "L2 KG: plan 落图 → frontier → 闭合解锁(DAG 驱动全链)" {
     kg.ensureReady();
     if (!kg.ready) return error.SkipZigTest;
 
-    const plan_commit = @import("cc").kg_plan_commit;
+    const plan_commit = @import("metacodes-core").test_support.kg_plan_commit;
     const plan =
         \\重构解析器
         \\1. 读现有代码
@@ -1524,7 +1524,7 @@ test "L2 KG: 无结构计划 → 全文单 root task(不阻塞,设计降级)" {
     kg.ensureReady();
     if (!kg.ready) return error.SkipZigTest;
 
-    const plan_commit = @import("cc").kg_plan_commit;
+    const plan_commit = @import("metacodes-core").test_support.kg_plan_commit;
     const r = try plan_commit.commit(a, &kg, "就改个 typo,没有步骤结构");
     try std.testing.expect(!r.structured); // 无结构
     try std.testing.expect(r.root_id > 0); // 但仍落图(全文单 root task)
@@ -1549,17 +1549,17 @@ test "L2 KG: DAG 驱动闭环经工具 — TaskList 呈现 frontier + TaskUpdate
     if (!kg.ready) return error.SkipZigTest;
 
     // 落图 3 步线性计划 + 写 kg_root 指针。
-    const plan_commit = @import("cc").kg_plan_commit;
-    const inject = @import("cc").kg_inject;
+    const plan_commit = @import("metacodes-core").test_support.kg_plan_commit;
+    const inject = @import("metacodes-core").test_support.kg_inject;
     const r = try plan_commit.commit(a, &kg, "计划\n1. A\n2. B\n3. C");
     try inject.writeIdPointer(a, proj_dir, "kg_root", r.root_id);
 
     // 构造 ToolContext(kg + kg_projects_dir + tasks)。
-    const task_tools = @import("cc").task_tools;
-    const TaskStore = @import("cc").core_task_store.TaskStore;
+    const task_tools = @import("metacodes-core").test_support.task_tools;
+    const TaskStore = @import("metacodes-core").test_support.core_task_store.TaskStore;
     var tstore = TaskStore.init(a);
     defer tstore.deinit();
-    const ctx = @import("cc").tool_context.ToolContext{
+    const ctx = @import("metacodes-core").test_support.tool_context.ToolContext{
         .allocator = a,
         .tasks = &tstore,
         .kg = &kg,
@@ -1935,7 +1935,7 @@ test "L2 KG: legacy kg_inbox lease survives fresh-process startup recovery" {
     try std.testing.expect(std.mem.indexOfPos(u8, list, id_pos + id_needle.len, id_needle) == null);
 }
 
-test "L2 KG: 启动重建镜像记下真实租约持有者,别人的认领不算本 agent 的进行中任务" {
+test "L2 KG: startup recovers only this agent's lease among several inbox tasks" {
     const a = std.testing.allocator;
     const bin = findBin(a) orelse return error.SkipZigTest;
     defer a.free(bin);
@@ -1957,31 +1957,23 @@ test "L2 KG: 启动重建镜像记下真实租约持有者,别人的认领不算
     try cc.kg_inject.writeIdPointer(a, proj_dir, "kg_inbox", inbox);
     const mine = try kg.createChildTask(inbox, "本 agent 的任务", "todo");
     const theirs = try kg.createChildTask(inbox, "队友的任务", "todo");
-    const open = try kg.createChildTask(inbox, "没人认领", "todo");
+    _ = try kg.createChildTask(inbox, "没人认领", "todo");
     try kg.claimTask(mine, "worker@team");
     try kg.claimTask(theirs, "lead-session");
 
-    var tasks = cc.core_task_store.TaskStore.init(a);
-    defer tasks.deinit();
-    cc.app_module.App.mirrorInboxFrontier(a, &kg, proj_dir, &tasks);
+    const summary = cc.kg_inject.buildSummaryForAgent(a, &kg, proj_dir, "worker@team") orelse return error.TestUnexpectedResult;
+    defer a.free(summary);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "Active task recovery packet") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "没人认领") != null);
+    const claimed = try std.fmt.allocPrint(a, "CLAIMED [{d}] 队友的任务 (by lead-session)", .{theirs});
+    defer a.free(claimed);
+    try std.testing.expect(std.mem.indexOf(u8, summary, claimed) != null);
 
-    var idbuf: [3][24]u8 = undefined;
-    const mine_id = try std.fmt.bufPrint(&idbuf[0], "kg-{d}", .{mine});
-    const theirs_id = try std.fmt.bufPrint(&idbuf[1], "kg-{d}", .{theirs});
-    const open_id = try std.fmt.bufPrint(&idbuf[2], "kg-{d}", .{open});
-    try std.testing.expectEqualStrings("worker@team", tasks.get(mine_id).?.claimed_by.?);
-    try std.testing.expectEqualStrings("lead-session", tasks.get(theirs_id).?.claimed_by.?);
-    try std.testing.expect(tasks.get(theirs_id).?.status == .in_progress);
-    try std.testing.expect(tasks.get(open_id).?.status == .pending);
-    try std.testing.expect(tasks.get(open_id).?.claimed_by == null);
-
-    // 以 teammate 身份运行:只有自己的租约算进行中任务(锚/关闭提示/溯源)。
-    try tasks.setClaimer("worker@team");
-    const own = try tasks.snapshotOwnInProgress(a);
-    defer cc.core_task_store.TaskStore.freeTaskViews(a, own);
-    try std.testing.expectEqual(@as(usize, 1), own.len);
-    try std.testing.expectEqualStrings(mine_id, own[0].id);
-    try std.testing.expectEqual(@as(?u64, mine), tasks.latestInProgressKgTaskId());
+    var idbuf: [2][48]u8 = undefined;
+    const mine_id = try std.fmt.bufPrint(&idbuf[0], "\"task_id\":{d}", .{mine});
+    const theirs_id = try std.fmt.bufPrint(&idbuf[1], "\"task_id\":{d}", .{theirs});
+    try std.testing.expect(std.mem.indexOf(u8, summary, mine_id) != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, theirs_id) == null);
 }
 
 test "L2 KG: stale task anchor falls back to legacy root in the same startup" {
@@ -2048,8 +2040,8 @@ test "L2 KG: 深树全链 — 嵌套子任务/branch 聚合/path/claim 租约/�
     if (!kg.ready) return error.SkipZigTest;
 
     // 计划:步骤一/步骤二串行;运行中给步骤一拆两个**并行**子任务(挂步骤一下,不拍平)。
-    const plan_commit = @import("cc").kg_plan_commit;
-    const inject = @import("cc").kg_inject;
+    const plan_commit = @import("metacodes-core").test_support.kg_plan_commit;
+    const inject = @import("metacodes-core").test_support.kg_inject;
     const r = try plan_commit.commit(a, &kg, "深树计划\n1. 步骤一\n2. 步骤二");
     try inject.writeIdPointer(a, proj_dir, "kg_root", r.root_id);
 
@@ -2089,11 +2081,11 @@ test "L2 KG: 深树全链 — 嵌套子任务/branch 聚合/path/claim 租约/�
     }
 
     // TaskList:两个 ready 无主叶子 → 并行 fan-out 提示;branch 不上看板;path 字段在。
-    const task_tools = @import("cc").task_tools;
-    const TaskStore = @import("cc").core_task_store.TaskStore;
+    const task_tools = @import("metacodes-core").test_support.task_tools;
+    const TaskStore = @import("metacodes-core").test_support.core_task_store.TaskStore;
     var tstore = TaskStore.init(a);
     defer tstore.deinit();
-    const ctx = @import("cc").tool_context.ToolContext{
+    const ctx = @import("metacodes-core").test_support.tool_context.ToolContext{
         .allocator = a,
         .tasks = &tstore,
         .kg = &kg,
@@ -2175,8 +2167,8 @@ test "L2 KG: 12b 锚单入口 — TaskList 经 task 锚看全多计划,镜像 to
     kg.ensureReady();
     if (!kg.ready) return error.SkipZigTest;
 
-    const plan_commit = @import("cc").kg_plan_commit;
-    const inject = @import("cc").kg_inject;
+    const plan_commit = @import("metacodes-core").test_support.kg_plan_commit;
+    const inject = @import("metacodes-core").test_support.kg_inject;
     // 两个计划树(锚下多计划一次看全——旧 kg_root 单指针做不到)。
     const r1 = try plan_commit.commit(a, &kg, "计划甲\n1. 甲一\n2. 甲二");
     const r2 = try plan_commit.commit(a, &kg, "计划乙\n1. 乙一\n2. 乙二");
@@ -2185,11 +2177,11 @@ test "L2 KG: 12b 锚单入口 — TaskList 经 task 锚看全多计划,镜像 to
     const aid = try kg.ensureTaskAnchorId();
     try inject.writeIdPointer(a, proj_dir, "kg_task_anchor", aid);
 
-    const task_tools = @import("cc").task_tools;
-    const TaskStore = @import("cc").core_task_store.TaskStore;
+    const task_tools = @import("metacodes-core").test_support.task_tools;
+    const TaskStore = @import("metacodes-core").test_support.core_task_store.TaskStore;
     var tstore = TaskStore.init(a);
     defer tstore.deinit();
-    var ctx = @import("cc").tool_context.ToolContext{
+    var ctx = @import("metacodes-core").test_support.tool_context.ToolContext{
         .allocator = a,
         .tasks = &tstore,
         .kg = &kg,
@@ -2230,11 +2222,11 @@ test "L2 KG: TaskList live frontier 瞬时失败时回退本地 kg 镜像" {
     kg.ensureReady();
     if (!kg.ready) return error.SkipZigTest;
 
-    const task_tools = @import("cc").task_tools;
-    const TaskStore = @import("cc").core_task_store.TaskStore;
+    const task_tools = @import("metacodes-core").test_support.task_tools;
+    const TaskStore = @import("metacodes-core").test_support.core_task_store.TaskStore;
     var tstore = TaskStore.init(a);
     defer tstore.deinit();
-    const ctx = @import("cc").tool_context.ToolContext{
+    const ctx = @import("metacodes-core").test_support.tool_context.ToolContext{
         .allocator = a,
         .tasks = &tstore,
         .kg = &kg,
@@ -2274,7 +2266,7 @@ test "L2 KG: derived_from 溯源 — 认领计划步骤后 KgRemember 的记忆�
     kg.ensureReady();
     if (!kg.ready) return error.SkipZigTest;
 
-    const plan_commit = @import("cc").kg_plan_commit;
+    const plan_commit = @import("metacodes-core").test_support.kg_plan_commit;
     const r = try plan_commit.commit(a, &kg, "溯源计划\n1. 调查根因\n2. 写修复");
     const rows = try kg.frontier(r.root_id, 10);
     var step_id: u64 = 0;
@@ -2285,12 +2277,12 @@ test "L2 KG: derived_from 溯源 — 认领计划步骤后 KgRemember 的记忆�
     a.free(rows);
     try std.testing.expect(step_id != 0);
 
-    const task_tools = @import("cc").task_tools;
-    const kg_tools_mod = @import("cc").kg_tools;
-    const TaskStore = @import("cc").core_task_store.TaskStore;
+    const task_tools = @import("metacodes-core").test_support.task_tools;
+    const kg_tools_mod = @import("metacodes-core").test_support.kg_tools;
+    const TaskStore = @import("metacodes-core").test_support.core_task_store.TaskStore;
     var tstore = TaskStore.init(a);
     defer tstore.deinit();
-    var ctx = @import("cc").tool_context.ToolContext{
+    var ctx = @import("metacodes-core").test_support.tool_context.ToolContext{
         .allocator = a,
         .tasks = &tstore,
         .kg = &kg,
@@ -2346,12 +2338,12 @@ test "L2 KG: 多个进行中任务 — derived_from 挂最近认领的,各关闭
     kg.ensureReady();
     if (!kg.ready) return error.SkipZigTest;
 
-    const task_tools = @import("cc").task_tools;
-    const kg_tools_mod = @import("cc").kg_tools;
-    const TaskStore = @import("cc").core_task_store.TaskStore;
+    const task_tools = @import("metacodes-core").test_support.task_tools;
+    const kg_tools_mod = @import("metacodes-core").test_support.kg_tools;
+    const TaskStore = @import("metacodes-core").test_support.core_task_store.TaskStore;
     var tstore = TaskStore.init(a);
     defer tstore.deinit();
-    const ctx = @import("cc").tool_context.ToolContext{
+    const ctx = @import("metacodes-core").test_support.tool_context.ToolContext{
         .allocator = a,
         .tasks = &tstore,
         .kg = &kg,
@@ -2467,11 +2459,11 @@ test "L2 KG: TaskCreate write-through — ad-hoc todo 落图 inbox,TaskList 呈�
     kg.ensureReady();
     if (!kg.ready) return error.SkipZigTest;
 
-    const task_tools = @import("cc").task_tools;
-    const TaskStore = @import("cc").core_task_store.TaskStore;
+    const task_tools = @import("metacodes-core").test_support.task_tools;
+    const TaskStore = @import("metacodes-core").test_support.core_task_store.TaskStore;
     var tstore = TaskStore.init(a);
     defer tstore.deinit();
-    const ctx = @import("cc").tool_context.ToolContext{
+    const ctx = @import("metacodes-core").test_support.tool_context.ToolContext{
         .allocator = a,
         .tasks = &tstore,
         .kg = &kg,
@@ -2536,7 +2528,7 @@ test "L2 KG: plan 落图同时建 markdown 文档,render 回人类可读(P3 D3)"
     kg.ensureReady();
     if (!kg.ready) return error.SkipZigTest;
 
-    const plan_commit = @import("cc").kg_plan_commit;
+    const plan_commit = @import("metacodes-core").test_support.kg_plan_commit;
     const plan =
         \\重构解析器
         \\1. 步骤一:读代码
@@ -2606,10 +2598,10 @@ test "L2 KG: B/C 合并 — Write memdir markdown 自动入图,召回命中 sect
     kg.ensureReady();
     if (!kg.ready) return error.SkipZigTest;
 
-    const write_tool = @import("cc").write_tool;
-    var rs = @import("cc").core_read_state.ReadState.init(a);
+    const write_tool = @import("metacodes-core").test_support.write_tool;
+    var rs = @import("metacodes-core").test_support.core_read_state.ReadState.init(a);
     defer rs.deinit();
-    const ctx = @import("cc").tool_context.ToolContext{
+    const ctx = @import("metacodes-core").test_support.tool_context.ToolContext{
         .allocator = a,
         .kg = &kg,
         .kg_projects_dir = proj_dir,
@@ -2791,16 +2783,16 @@ test "L2 KG: 目标导向投影 — 任务闭合经工具写 acts_on/uses/produc
     kg.ensureReady();
     if (!kg.ready) return error.SkipZigTest;
 
-    const plan_commit = @import("cc").kg_plan_commit;
-    const inject = @import("cc").kg_inject;
+    const plan_commit = @import("metacodes-core").test_support.kg_plan_commit;
+    const inject = @import("metacodes-core").test_support.kg_inject;
     const r = try plan_commit.commit(a, &kg, "计划\n1. A\n2. B");
     try inject.writeIdPointer(a, proj_dir, "kg_root", r.root_id);
 
-    const task_tools = @import("cc").task_tools;
-    const TaskStore = @import("cc").core_task_store.TaskStore;
+    const task_tools = @import("metacodes-core").test_support.task_tools;
+    const TaskStore = @import("metacodes-core").test_support.core_task_store.TaskStore;
     var tstore = TaskStore.init(a);
     defer tstore.deinit();
-    const ctx = @import("cc").tool_context.ToolContext{
+    const ctx = @import("metacodes-core").test_support.tool_context.ToolContext{
         .allocator = a,
         .tasks = &tstore,
         .kg = &kg,

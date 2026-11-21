@@ -6,7 +6,7 @@
 //! daemon readiness probe, the tool envelope and the doctor report.
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const platform = @import("platform");
 const pfs = platform.fs;
 const paths = platform.paths;
@@ -417,59 +417,4 @@ test "KgState: retryReadyNow probes inside the backoff window, retryReadyIfDue d
     try std.testing.expect(!client.retryReadyNow()); // explicit request: probes now
     try std.testing.expectEqual(DegradedKind.daemon_unreachable, client.degradedKind().?);
     try std.testing.expectEqualStrings("daemon", client.transportName());
-}
-
-test "KgState: doctor names the configuration source and shares the repair hint" {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
-    clearKgEnv();
-    const a = std.testing.allocator;
-    var home = try Home.init();
-    defer home.deinit();
-
-    // No client at all (App could not build one): still a hint, never "-".
-    const none = (try cc.kgDiagnosis(a, null, home.root())).?;
-    defer none.deinit(a);
-    try std.testing.expectEqualStrings("unconfigured", none.state);
-    try std.testing.expectEqualStrings(KgClient.hintFor(.unconfigured), none.hint);
-
-    // Default path: reported even though the file does not exist yet.
-    var plain = try initClient(a, home.root());
-    defer plain.deinit();
-    const plain_diag = (try cc.kgDiagnosis(a, &plain, home.root())).?;
-    defer plain_diag.deinit(a);
-    const default_path = try std.fmt.allocPrint(a, "{s}/kg/daemon.json", .{home.root()});
-    defer a.free(default_path);
-    try std.testing.expectEqualStrings("unconfigured", plain_diag.state);
-    try std.testing.expectEqualStrings(default_path, plain_diag.config);
-    try std.testing.expectEqualStrings(KgClient.hintFor(.unconfigured), plain_diag.hint);
-
-    // METACODES_KG_CONFIG names the file the binding was read from.
-    const missing_path = try std.fmt.allocPrint(a, "{s}/explicit.json", .{home.root()});
-    defer a.free(missing_path);
-    const missing = try a.dupeZ(u8, missing_path);
-    defer a.free(missing);
-    paths.setEnv("METACODES_KG_CONFIG", missing.ptr);
-    defer paths.unsetEnv("METACODES_KG_CONFIG");
-    var explicit = try initClient(a, home.root());
-    defer explicit.deinit();
-    const explicit_diag = (try cc.kgDiagnosis(a, &explicit, home.root())).?;
-    defer explicit_diag.deinit(a);
-    try std.testing.expectEqualStrings("config_invalid", explicit_diag.state);
-    try std.testing.expectEqualStrings(missing_path, explicit_diag.config);
-    try std.testing.expectEqualStrings(KgClient.hintFor(.config_invalid), explicit_diag.hint);
-
-    // The METACODES_KG_* triple wins over the file and is reported as "env".
-    paths.setEnv("METACODES_KG_URL", "http://127.0.0.1:1");
-    defer paths.unsetEnv("METACODES_KG_URL");
-    paths.setEnv("METACODES_KG_API_KEY", "k");
-    defer paths.unsetEnv("METACODES_KG_API_KEY");
-    paths.setEnv("METACODES_KG_EXPECTED_BUILD_ID", BUILD_ID);
-    defer paths.unsetEnv("METACODES_KG_EXPECTED_BUILD_ID");
-    var env_client = try initClient(a, home.root());
-    defer env_client.deinit();
-    const env_diag = (try cc.kgDiagnosis(a, &env_client, home.root())).?;
-    defer env_diag.deinit(a);
-    try std.testing.expectEqualStrings("daemon_unreachable", env_diag.state);
-    try std.testing.expectEqualStrings("daemon", env_diag.transport);
-    try std.testing.expectEqualStrings("env", env_diag.config);
 }

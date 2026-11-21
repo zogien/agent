@@ -10,7 +10,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const tinykg_binary = @import("tinykg_binary.zig");
 
 const learning = cc.learning_turn;
@@ -314,82 +314,3 @@ test "L2 end-of-run learning: the pinned host check fills the evidence the turn 
 }
 
 // ── CLI wiring (step 6) ───────────────────────────────────────────────────
-
-fn parse(arena: std.mem.Allocator, argv: []const [*:0]const u8) cc.types_mod.Config {
-    return cc.parseArgsForTest(argv, arena);
-}
-
-test "L2 learning-turn flags: no verdict source is refused, like --check-gate without --host-check" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const resolve = cc.resolveLearningTurn;
-    // Alone, in either mode, REPL or print mode: refused.
-    for ([_][]const [*:0]const u8{
-        &.{ "metacodes", "--learning-turn" },
-        &.{ "metacodes", "--learning-turn-observe" },
-        &.{ "metacodes", "-p", "hi", "--learning-turn" },
-        // --host-check without the gate gives the in-run turn no verdict.
-        &.{ "metacodes", "--host-check", "make check", "--learning-turn" },
-    }) |argv| {
-        var config = parse(arena, argv);
-        try std.testing.expect(config.parse_error == null);
-        const refusal = resolve(&config, .{}, arena) orelse return error.TestExpectedRefusal;
-        try std.testing.expect(std.mem.indexOf(u8, refusal, "needs a verdict source") != null);
-    }
-    // The env source counts only in print mode.
-    {
-        var config = parse(arena, &.{ "metacodes", "--learning-turn" });
-        try std.testing.expect(resolve(&config, .{ .host_check_armed = true }, arena) != null);
-    }
-    // The check gate is a source anywhere; the env host check in print mode.
-    {
-        var config = parse(arena, &.{ "metacodes", "--host-check", "make check", "--check-gate-observe", "--learning-turn" });
-        try std.testing.expect(resolve(&config, .{}, arena) == null);
-        try std.testing.expect(config.learning_turn);
-    }
-    {
-        var config = parse(arena, &.{ "metacodes", "-p", "hi", "--learning-turn-observe" });
-        try std.testing.expect(resolve(&config, .{ .host_check_armed = true }, arena) == null);
-        try std.testing.expect(config.learning_turn_observe and !config.learning_turn);
-    }
-    // Nothing asked for: nothing refused, whatever the environment holds.
-    {
-        var config = parse(arena, &.{"metacodes"});
-        try std.testing.expect(resolve(&config, .{ .mode = "enforce" }, arena) == null);
-        try std.testing.expect(!config.learning_turn and !config.learning_turn_observe);
-    }
-}
-
-test "L2 learning-turn flags: METACODES_LEARNING_TURN arms print mode only; a flag wins; a bad value is refused" {
-    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-    const resolve = cc.resolveLearningTurn;
-    {
-        var config = parse(arena, &.{ "metacodes", "-p", "hi" });
-        try std.testing.expect(resolve(&config, .{ .mode = "enforce", .host_check_armed = true }, arena) == null);
-        try std.testing.expect(config.learning_turn);
-    }
-    {
-        var config = parse(arena, &.{ "metacodes", "-p", "hi" });
-        try std.testing.expect(resolve(&config, .{ .mode = "observe", .host_check_armed = true }, arena) == null);
-        try std.testing.expect(config.learning_turn_observe and !config.learning_turn);
-    }
-    {
-        // A flag wins over the environment.
-        var config = parse(arena, &.{ "metacodes", "-p", "hi", "--learning-turn-observe" });
-        try std.testing.expect(resolve(&config, .{ .mode = "enforce", .host_check_armed = true }, arena) == null);
-        try std.testing.expect(!config.learning_turn);
-    }
-    {
-        // Print mode with the variable but no verdict source: refused.
-        var config = parse(arena, &.{ "metacodes", "-p", "hi" });
-        try std.testing.expect(resolve(&config, .{ .mode = "enforce" }, arena) != null);
-    }
-    {
-        var config = parse(arena, &.{ "metacodes", "-p", "hi" });
-        const refusal = resolve(&config, .{ .mode = "on" }, arena) orelse return error.TestExpectedRefusal;
-        try std.testing.expect(std.mem.indexOf(u8, refusal, learning.MODE_ENV) != null);
-    }
-}

@@ -32,7 +32,7 @@ These rules apply to the entire repository.
   `std.Thread.spawn`: std's 16 MiB default stack is a 16 MiB commit per thread
   on Windows. Pick the `Stack` class by what the thread runs; outside test
   blocks `zig build test:thread-stack` enforces it.
-- In the headless CLI and permission prompts, preserve interrupted-read
+- In permission prompts, preserve interrupted-read
   handling and write terminal output through `pfs.writeAll`.
   `zig build test:terminal-io` checks the relevant sources.
 - Session state leaves the machine for a service only where the user named it.

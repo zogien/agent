@@ -32,7 +32,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const Wire = enum { anthropic, openai_chat, openai_responses, gemini, bedrock };
 const ALL_WIRES = [_]Wire{ .anthropic, .openai_chat, .openai_responses, .gemini, .bedrock };

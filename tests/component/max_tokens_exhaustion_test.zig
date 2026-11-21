@@ -8,23 +8,18 @@
 //! `stop_reason=max_tokens` and Gemini's `finishReason=MAX_TOKENS`. Before the
 //! fix only a cut turn with no text reached `max_tokens_exhausted`; one that
 //! carried text fell through to the common tail and closed as the final
-//! answer: `end_turn`, `text_kind=final`, exit 0, and a timeline of
 //! `continued → continued → continued → final`.
 //!
 //! These tests drive the real clients and the real agent loop against a
-//! loopback cassette server, then project the Run through the pieces headless
-//! `-p --json --stream-json` uses: the stream-json backend for the timeline,
-//! `projectRunText` and `buildResultLine` for the result line, and
-//! `exitCodeFor` for the exit code. The controls keep the neighbouring
-//! contracts in place: a continuation that ends cleanly is still one final
-//! answer, and a complete tool_use on the last cut turn still runs.
+//! loopback cassette server. The host captures Core events and reads the
+//! output ledger. A continuation that ends cleanly yields a final answer,
+//! and a complete tool call on the last cut turn still runs.
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const agent_loop = cc.agent_loop;
-const headless = cc.repl_headless;
 const Disposition = cc.output_semantics.Disposition;
 
 const Wire = enum { anthropic, openai_chat, openai_responses, gemini };
@@ -139,65 +134,41 @@ fn toolCallBody(a: std.mem.Allocator, wire: Wire, id: []const u8, ending: Ending
 // ── driver ───────────────────────────────────────────────────────────────────
 
 /// The `--stream-json` lines, as headless writes them to stdout.
-const Lines = struct {
+const Capture = struct {
     allocator: std.mem.Allocator,
-    bytes: std.ArrayList(u8) = .empty,
+    timeline: std.ArrayList(Disposition) = .empty,
+    stop: ?agent_loop.StopReason = null,
+    oom: bool = false,
 
-    fn write(ctx: *anyopaque, line: []const u8) void {
-        const self: *Lines = @ptrCast(@alignCast(ctx));
-        self.bytes.appendSlice(self.allocator, line) catch {};
+    fn emit(ctx: *anyopaque, _: cc.ui_backend.SessionId, event: cc.ui_backend.CoreEvent) void {
+        const self: *Capture = @ptrCast(@alignCast(ctx));
+        switch (event) {
+            .output_segment_end => |segment| self.timeline.append(self.allocator, segment.disposition) catch {
+                self.oom = true;
+            },
+            .diag_run_end => |end| self.stop = std.meta.stringToEnum(agent_loop.StopReason, end.stop_reason_name),
+            else => {},
+        }
     }
 
-    /// The `disposition` of every `output_segment_end` line, in order.
-    fn dispositions(self: *const Lines, a: std.mem.Allocator) ![]Disposition {
-        var out: std.ArrayList(Disposition) = .empty;
-        errdefer out.deinit(a);
-        var it = std.mem.tokenizeScalar(u8, self.bytes.items, '\n');
-        while (it.next()) |line| {
-            const parsed = try std.json.parseFromSlice(std.json.Value, a, line, .{});
-            defer parsed.deinit();
-            const obj = parsed.value.object;
-            if (!std.mem.eql(u8, obj.get("type").?.string, "output_segment_end")) continue;
-            try out.append(a, std.meta.stringToEnum(Disposition, obj.get("disposition").?.string).?);
-        }
-        return out.toOwnedSlice(a);
-    }
-
-    /// The `stop_reason` of the `run_end` line.
-    fn runEndStop(self: *const Lines, a: std.mem.Allocator) ![]u8 {
-        var it = std.mem.tokenizeScalar(u8, self.bytes.items, '\n');
-        while (it.next()) |line| {
-            const parsed = try std.json.parseFromSlice(std.json.Value, a, line, .{});
-            defer parsed.deinit();
-            const obj = parsed.value.object;
-            if (std.mem.eql(u8, obj.get("type").?.string, "run_end")) return a.dupe(u8, obj.get("stop_reason").?.string);
-        }
-        return error.NoRunEnd;
+    fn poll(_: *anyopaque, _: cc.ui_backend.SessionId) ?cc.ui_backend.UiEvent {
+        return null;
     }
 };
 
 const Outcome = struct {
     result: agent_loop.RunResult,
     requests: usize,
-    /// Assistant text committed to the Conversation, in order (owned).
     committed: []u8,
-    /// Output-segment dispositions from the `--stream-json` timeline (owned).
     timeline: []Disposition,
-    /// `run_end.stop_reason` from the timeline (owned).
-    run_end_stop: []u8,
-    /// The headless `--json` result line, parsed.
-    result_line: std.json.Parsed(std.json.Value),
-    exit_code: u8,
+    run_end_stop: agent_loop.StopReason,
+    text: []u8,
+    text_kind: enum { final, partial, absent },
 
     fn deinit(self: *Outcome, a: std.mem.Allocator) void {
         a.free(self.committed);
         a.free(self.timeline);
-        a.free(self.run_end_stop);
-        self.result_line.deinit();
-    }
-
-    fn field(self: *const Outcome, name: []const u8) std.json.Value {
-        return self.result_line.value.object.get(name).?;
+        a.free(self.text);
     }
 };
 
@@ -219,10 +190,9 @@ fn runWireTurns(a: std.mem.Allocator, wire: Wire, bodies: []const []const u8, ma
     defer conv.deinit();
     try conv.appendText(.user, "write the report");
 
-    var lines = Lines{ .allocator = a };
-    defer lines.bytes.deinit(a);
-    var stream = cc.repl_stream_json.StreamJsonBackend.init(a, .{ .ctx = @ptrCast(&lines), .writeFn = Lines.write });
-    const be = stream.backend();
+    var capture: Capture = .{ .allocator = a };
+    defer capture.timeline.deinit(a);
+    const be: cc.ui_backend.UiBackend = .{ .ctx = @ptrCast(&capture), .emit = Capture.emit, .poll = Capture.poll };
     var ledger = cc.output_semantics.Ledger.init(a);
     defer ledger.deinit();
 
@@ -244,7 +214,7 @@ fn runWireTurns(a: std.mem.Allocator, wire: Wire, bodies: []const []const u8, ma
             break :blk try runLoop(a, &conv, client.provider(), &be, &ledger, max_turns);
         },
     };
-    stream.flush();
+    if (capture.oom) return error.OutOfMemory;
 
     var committed: std.ArrayList(u8) = .empty;
     errdefer committed.deinit(a);
@@ -256,17 +226,13 @@ fn runWireTurns(a: std.mem.Allocator, wire: Wire, bodies: []const []const u8, ma
         };
     }
 
-    const timeline = try lines.dispositions(a);
+    const run_end_stop = capture.stop orelse return error.NoRunEnd;
+    const timeline = try capture.timeline.toOwnedSlice(a);
     errdefer a.free(timeline);
-    const run_end_stop = try lines.runEndStop(a);
-    errdefer a.free(run_end_stop);
-
-    // The tail of headless `run`: the ledger decides text and text_kind.
-    const projected = headless.projectRunText(&ledger);
-    const usage = cc.app_module.UsageTotals{};
-    const line = try headless.buildResultLine(a, projected.text orelse "", projected.kind, null, null, result, &usage, "model");
-    defer a.free(line);
-    const result_line = try std.json.parseFromSlice(std.json.Value, a, std.mem.trimEnd(u8, line, "\n"), .{});
+    const final = ledger.finalText();
+    const partial = ledger.partialText();
+    const text = try a.dupe(u8, final orelse partial orelse "");
+    errdefer a.free(text);
 
     return .{
         .result = result,
@@ -274,8 +240,8 @@ fn runWireTurns(a: std.mem.Allocator, wire: Wire, bodies: []const []const u8, ma
         .committed = try committed.toOwnedSlice(a),
         .timeline = timeline,
         .run_end_stop = run_end_stop,
-        .result_line = result_line,
-        .exit_code = headless.exitCodeFor(result.stop_reason),
+        .text = text,
+        .text_kind = if (final != null) .final else if (partial != null) .partial else .absent,
     };
 }
 
@@ -325,14 +291,10 @@ fn expectExhausted(wire: Wire) !void {
         try std.testing.expectEqual(@as(u32, 3), out.result.continuations);
         // The timeline closes the cut group as partial, never final.
         try std.testing.expectEqualSlices(Disposition, &.{ .continued, .continued, .continued, .partial }, out.timeline);
-        try std.testing.expectEqualStrings("max_tokens_exhausted", out.run_end_stop);
-        // The result line: an explicit failure, with the visible text
-        // delivered and marked partial rather than dropped.
-        try std.testing.expectEqualStrings("max_tokens_exhausted", out.field("stop_reason").string);
-        try std.testing.expectEqualStrings("partial", out.field("text_kind").string);
-        try std.testing.expectEqualStrings(expected, out.field("text").string);
-        try std.testing.expectEqual(@as(i64, 3), out.field("continuations").integer);
-        try std.testing.expectEqual(@as(u8, 1), out.exit_code);
+        try std.testing.expectEqual(agent_loop.StopReason.max_tokens_exhausted, out.run_end_stop);
+        // The host can still consume the partial answer.
+        try std.testing.expectEqual(.partial, out.text_kind);
+        try std.testing.expectEqualStrings(expected, out.text);
         try std.testing.expectEqualStrings(expected, out.committed);
     }
 }
@@ -370,11 +332,9 @@ test "issue #394 control: a continuation that ends cleanly is still one final an
         try std.testing.expectEqual(agent_loop.StopReason.end_turn, out.result.stop_reason);
         try std.testing.expectEqual(@as(u32, 3), out.result.continuations);
         try std.testing.expectEqualSlices(Disposition, &.{ .continued, .continued, .continued, .final }, out.timeline);
-        try std.testing.expectEqualStrings("end_turn", out.run_end_stop);
-        try std.testing.expectEqualStrings("end_turn", out.field("stop_reason").string);
-        try std.testing.expectEqualStrings("final", out.field("text_kind").string);
-        try std.testing.expectEqualStrings("alpha-visible beta gamma delta-still-truncated", out.field("text").string);
-        try std.testing.expectEqual(@as(u8, 0), out.exit_code);
+        try std.testing.expectEqual(agent_loop.StopReason.end_turn, out.run_end_stop);
+        try std.testing.expectEqual(.final, out.text_kind);
+        try std.testing.expectEqualStrings("alpha-visible beta gamma delta-still-truncated", out.text);
     }
 }
 
@@ -398,8 +358,7 @@ test "issue #394 control: a complete tool_use on the last cut turn still runs in
         try std.testing.expectEqual(@as(u32, 1), out.result.tool_calls);
         try std.testing.expectEqual(@as(u32, 3), out.result.continuations);
         try std.testing.expectEqualSlices(Disposition, &.{ .continued, .continued, .continued, .commentary }, out.timeline);
-        try std.testing.expectEqualStrings("max_turns", out.field("stop_reason").string);
-        try std.testing.expectEqual(@as(u8, 0), out.exit_code);
+        try std.testing.expectEqual(agent_loop.StopReason.max_turns, out.run_end_stop);
     }
 }
 
@@ -440,11 +399,9 @@ test "continuation allowance resets after the model recovers with a tool call, o
             try std.testing.expectEqual(@as(u32, 1), out.result.tool_calls);
             // The run total still counts every continuation (#269).
             try std.testing.expectEqual(@as(u32, 6), out.result.continuations);
-            try std.testing.expectEqual(@as(i64, 6), out.field("continuations").integer);
-            try std.testing.expectEqualStrings("end_turn", out.run_end_stop);
-            try std.testing.expectEqualStrings("final", out.field("text_kind").string);
-            try std.testing.expectEqualStrings("four five six done", out.field("text").string);
-            try std.testing.expectEqual(@as(u8, 0), out.exit_code);
+            try std.testing.expectEqual(agent_loop.StopReason.end_turn, out.run_end_stop);
+            try std.testing.expectEqual(.final, out.text_kind);
+            try std.testing.expectEqualStrings("four five six done", out.text);
         }
     }
 }
@@ -472,9 +429,8 @@ test "four consecutive cuts after a recovery still exhaust the allowance, on eve
         try std.testing.expectEqual(agent_loop.StopReason.max_tokens_exhausted, out.result.stop_reason);
         try std.testing.expectEqual(@as(u32, 1), out.result.tool_calls);
         try std.testing.expectEqual(@as(u32, 4), out.result.continuations);
-        try std.testing.expectEqualStrings("max_tokens_exhausted", out.run_end_stop);
-        try std.testing.expectEqualStrings("partial", out.field("text_kind").string);
-        try std.testing.expectEqualStrings("a b c d", out.field("text").string);
-        try std.testing.expectEqual(@as(u8, 1), out.exit_code);
+        try std.testing.expectEqual(agent_loop.StopReason.max_tokens_exhausted, out.run_end_stop);
+        try std.testing.expectEqual(.partial, out.text_kind);
+        try std.testing.expectEqualStrings("a b c d", out.text);
     }
 }

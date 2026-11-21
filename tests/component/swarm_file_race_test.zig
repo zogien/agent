@@ -1,7 +1,7 @@
 //! Regression coverage for the swarm config/mailbox replace/read race.
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const team = cc.swarm_team;
 

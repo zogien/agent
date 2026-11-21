@@ -7,7 +7,7 @@
 //!   askText → answer_queue.pop`,无 socket(权限 prompt 是本地决策)。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 // 贯通:load 队列 → promptUser 按 pop 的 y/n 返 true/false。
 test "L2 Stage3: promptUser 从 answer_queue 按序弹 y/n" {

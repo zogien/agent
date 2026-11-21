@@ -8,7 +8,7 @@
 //! fatal is the commit boundary, and everything before it discards.
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const harness = @import("harness");
 const pfs = @import("platform").fs;
 const pdir = @import("platform").dir;

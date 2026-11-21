@@ -106,7 +106,17 @@ P/Invoke) use the bundle's shared library (`lib/libmetask_agentcore.so`,
 `.dylib`, or `metask_agentcore.dll`) and resolve `metask_agentcore_get_api`;
 `shared_library` in `manifest.json` records its digest-pinned path, load name
 and needed system libraries.
-Build and exercise a native bundle with:
+Build the SDK for your host with `zig build`. The bundle is staged under
+`zig-out/agentcore/`. On Windows the default SDK uses MSVC.
+
+For local shared-library development, `zig build dev` stages the Debug
+library under `zig-out/agentcore-dev/`. `zig build dev:full` also stages
+the pinned TinyKG tools under `zig-out/vendor/tinykg/`.
+
+`zig build archive -Dtarget=<target> -Doptimize=ReleaseSafe` writes a
+redistributable archive and its SHA-256 sidecar to `zig-out/agentcore-archives/`.
+
+Run the native host acceptance checks with the following command.
 
 ```sh
 zig build agentcore:gate -Dtarget=<native-target> -Doptimize=ReleaseSafe

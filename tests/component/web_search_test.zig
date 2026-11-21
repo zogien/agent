@@ -9,7 +9,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 // 两阶段 web_search SSE:server_tool_use(query)→ web_search_tool_result(含 title/url)
 // → text_delta(模型摘要)→ end_turn。

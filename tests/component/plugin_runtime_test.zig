@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs;
 const ppaths = @import("platform").paths;
 
@@ -191,127 +191,6 @@ const EnvGuard = struct {
         self.* = undefined;
     }
 };
-
-test "L2 repeatable --plugin-dir is a fail-closed external configuration contract" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const argv = [_][*:0]const u8{
-        "metacodes",
-        "--plugin-dir",
-        "plugins/one",
-        "--plugin-dir",
-        "plugins/two",
-        "--dump-plugins",
-    };
-    const config = cc.parseArgsForTest(&argv, arena.allocator());
-    try std.testing.expect(config.parse_error == null);
-    try std.testing.expectEqualStrings("plugins/one\x00plugins/two", config.plugin_dirs.?);
-    try std.testing.expect(config.dump_plugins);
-
-    const missing = [_][*:0]const u8{ "metacodes", "--plugin-dir" };
-    const invalid = cc.parseArgsForTest(&missing, arena.allocator());
-    try std.testing.expect(invalid.parse_error != null);
-    try std.testing.expect(std.mem.indexOf(u8, invalid.parse_error.?, "missing value for --plugin-dir") != null);
-}
-
-test "L2 CLI plugin package reaches App canonical Skill Agent and provider request" {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
-    const root = try realRoot(&tmp, &root_buffer);
-    try createPackage(
-        root,
-        "{\"schema_version\":1,\"id\":\"acme.review\",\"version\":\"1.2.0\",\"capabilities\":[\"skill_bundle\",\"agent_bundle\"]}",
-        "---\nname: review\ndescription: APP_PLUGIN_SKILL_DESCRIPTION\nmodel-activation: required-first\n---\nAPP_PLUGIN_SKILL_BODY\n",
-    );
-    try createAgent(
-        root,
-        "---\nname: reviewer\ndescription: APP_PLUGIN_AGENT_DESCRIPTION\nskills: review\n---\nAPP_PLUGIN_AGENT_PROMPT\n",
-    );
-
-    var server = try harness.MockServer.start(END_TURN_SSE, 0);
-    defer server.stop();
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-    const url = try server.urlOwned(allocator);
-    const root_z = try allocator.dupeZ(u8, root);
-    const url_z = try allocator.dupeZ(u8, url);
-    const argv = [_][*:0]const u8{
-        "metacodes",
-        "--plugin-dir",
-        root_z.ptr,
-        "--base-url",
-        url_z.ptr,
-        "--model",
-        "glm-5.2",
-        "--permission",
-        "bypassPermissions",
-    };
-    var config = cc.parseArgsForTest(&argv, allocator);
-    try std.testing.expect(config.parse_error == null);
-    config.long_horizon_arm = .codex_style;
-
-    const home_z = try std.fmt.allocPrintSentinel(std.testing.allocator, "{s}", .{root}, 0);
-    defer std.testing.allocator.free(home_z);
-    var home_guard = try EnvGuard.set(std.testing.allocator, "HOME", home_z.ptr);
-    defer home_guard.restore();
-    var probe_guard = try EnvGuard.set(std.testing.allocator, "METACODES_NO_PROBE", "1");
-    defer probe_guard.restore();
-
-    var io_runtime = @import("platform").signal.threadedIo(allocator, .{});
-    defer io_runtime.deinit();
-    const app = try cc.app_module.App.init(allocator, io_runtime.io(), config, "test-key");
-    defer app.deinit();
-
-    try std.testing.expect(app.plugin_snapshot != null);
-    const inventory_json = try app.describePlugins(allocator);
-    defer allocator.free(inventory_json);
-    var inventory = try std.json.parseFromSlice(std.json.Value, allocator, inventory_json, .{});
-    defer inventory.deinit();
-    try std.testing.expectEqualStrings(
-        "metacodes.plugin-inventory/v1",
-        inventory.value.object.get("schema").?.string,
-    );
-    try std.testing.expectEqualStrings(
-        "acme.review",
-        inventory.value.object.get("plugins").?.array.items[0].object.get("id").?.string,
-    );
-    try std.testing.expectEqualStrings(
-        "1.2.0",
-        inventory.value.object.get("plugins").?.array.items[0].object.get("version").?.string,
-    );
-    try std.testing.expect(app.skill_runtime.findRecord("acme_dreview:review") != null);
-    const plugin_agent = app.agents.find("acme_dreview:reviewer") orelse return error.PluginAgentMissing;
-    try std.testing.expectEqual(cc.agents_def.Origin.plugin, plugin_agent.origin);
-    try std.testing.expectEqualStrings("acme_dreview:review", plugin_agent.preload_skills[0]);
-    try std.testing.expect(std.mem.indexOf(u8, app.system_prompt orelse "", "APP_PLUGIN_AGENT_DESCRIPTION") != null);
-
-    try app.conversation.appendText(.user, "inspect using the configured plugin");
-    var writer = cc.writer_backend.WriterBackend.initNull();
-    const backend = writer.backend();
-    _ = try cc.agent_loop.run(
-        &app.conversation,
-        app.provider(),
-        app.tool_defs,
-        &app.permission_ctx,
-        .{ .max_turns = 1, .system_prompt = app.system_prompt },
-        &backend,
-        allocator,
-    );
-
-    const body = (server.lastRequest() orelse return error.NoRequestCaptured).body();
-    try std.testing.expect(std.mem.indexOf(u8, body, "acme_dreview:review") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "APP_PLUGIN_SKILL_DESCRIPTION") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "`acme_dreview:review`") != null);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        body,
-        "\"tool_choice\":{\"type\":\"tool\",\"name\":\"Skill\"}",
-    ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "acme_dreview:reviewer") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "APP_PLUGIN_AGENT_DESCRIPTION") != null);
-}
 
 test "L2 external plugin manifest changes canonical Skill schema sent to provider" {
     const allocator = std.testing.allocator;

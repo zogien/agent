@@ -7,7 +7,7 @@
 const std = @import("std");
 const pfs = @import("platform").fs;
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 fn ensureDir(path: []const u8) !void {
     var buf: [std.fs.max_path_bytes + 1]u8 = undefined;

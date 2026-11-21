@@ -220,9 +220,10 @@ argued). Only then do the two independent gates apply:
 
 ## Build and verify
 
-Use the repository-pinned Zig toolchain and an explicit target. A cross-target
-bundle build compiles and link-checks source-free Zig, C, and C++17 consumers
-without trying to execute foreign binaries:
+Use the repository-pinned Zig toolchain. `zig build` stages the AgentCore SDK
+under `zig-out/agentcore/` for the host, using MSVC on Windows. Pass `-Dtarget`
+to select another target. Bundle builds link-check source-free Zig, C, and C++17
+consumers.
 
 ```sh
 zig build agentcore:bundle \
@@ -355,7 +356,8 @@ and system-link values.
 The checked-in raw Rust declarations are regenerated with bindgen 0.72.1 using
 the fixed `x86_64-unknown-linux-gnu` Clang layout target and hermetic minimal
 standard-type headers, so regeneration does not inherit the build host target.
-`agentcore:archive` creates a coordinate-rooted Windows zip or Unix tar.gz from
+`archive` takes an explicit target and creates a coordinate-rooted Windows zip
+or Unix tar.gz from
 only the manifest whitelist plus `manifest.json`, and writes an adjacent
 SHA-256 file; it rejects an existing coordinate instead of overwriting it.
 

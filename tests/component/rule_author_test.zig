@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const rule_author = cc.rule_author;
 const observation = cc.tools.tool_observation;

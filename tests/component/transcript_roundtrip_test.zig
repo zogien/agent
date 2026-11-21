@@ -5,7 +5,7 @@
 //! parseMessageLine 全链路。纯文件 IO,无网络/模型。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs;
 
 const Conversation = cc.conversation.Conversation;

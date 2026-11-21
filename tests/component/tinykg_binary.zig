@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const pfs = @import("platform").fs;
 
 pub fn find(allocator: std.mem.Allocator) ?[]u8 {
     const names = [_][:0]const u8{
@@ -27,8 +28,9 @@ fn isExecutable(path: []const u8) bool {
     if (path.len >= buffer.len) return false;
     @memcpy(buffer[0..path.len], path);
     buffer[path.len] = 0;
-    const mode: c_uint = if (builtin.os.tag == .windows) std.c.F_OK else std.c.X_OK;
-    return std.c.access(buffer[0..path.len :0].ptr, mode) == 0;
+    const path_z = buffer[0..path.len :0].ptr;
+    if (builtin.os.tag == .windows) return pfs.isExistingNonDir(path_z);
+    return std.c.access(path_z, std.c.X_OK) == 0;
 }
 
 test "missing staged TinyKG test input is absent" {

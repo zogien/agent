@@ -1,5 +1,5 @@
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs;
 
 test "TinyKgD resolution uses env precedence and explicit missing is terminal" {

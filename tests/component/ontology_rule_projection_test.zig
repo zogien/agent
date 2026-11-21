@@ -4,7 +4,7 @@
 //! TinyKG store is opened, and no provider request is made in this file.
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const projection = cc.ontology_rule_projection;
 const observation = cc.tools.tool_observation;

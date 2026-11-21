@@ -12,17 +12,17 @@
 //! 跨 ≥3 模块,符合 tests/README.md 的 L2 必要条件。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 test "L2: --allowedTools 'Bash(git *)' → Bash(git status) 在 default 模式 allow" {
     const a = std.testing.allocator;
 
     // 模拟 parseArgs 的产物:--allowedTools 累加到 Config.allowed_tools
     // 然后 loader 把这 CSV 串包装成 CLI 层 allow rules
-    const settings_mod = @import("cc").permission.MergedSettings;
+    const settings_mod = @import("metacodes-core").test_support.permission.MergedSettings;
     _ = settings_mod;
 
-    const builder = @import("cc").permission_settings;
+    const builder = @import("metacodes-core").test_support.permission_settings;
     const cli_layer = try builder.buildInlineLayer(
         a,
         .cli,
@@ -70,7 +70,7 @@ test "L2: --allowedTools 'Bash(git *)' → Bash(git status) 在 default 模式 a
 test "L2: --disallowedTools 'Bash(rm *)' → Bash(rm foo) deny" {
     const a = std.testing.allocator;
 
-    const builder = @import("cc").permission_settings;
+    const builder = @import("metacodes-core").test_support.permission_settings;
     const cli_layer = try builder.buildInlineLayer(
         a,
         .cli,
@@ -117,7 +117,7 @@ test "L2: --disallowedTools 'Bash(rm *)' → Bash(rm foo) deny" {
 test "L2: --allowedTools + --disallowedTools 同时 → deny 优先" {
     const a = std.testing.allocator;
 
-    const builder = @import("cc").permission_settings;
+    const builder = @import("metacodes-core").test_support.permission_settings;
     const cli_layer = try builder.buildInlineLayer(
         a,
         .cli,

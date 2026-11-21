@@ -4,7 +4,7 @@
 //! finished job by polling BashOutput once per API round trip).
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 /// One scripted provider response: a single tool_use, or a text end_turn.
 const Step = union(enum) {

@@ -5,7 +5,7 @@
 //! 在带 live MockServer 线程的组件测试里 fork() 多线程进程不安全,须用干净的进程 harness。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const pfs = @import("platform").fs; // 可移植文件 IO(std.c.open 的 O 在 Windows 是 void)
 
 const tp = cc.swarm_teammate_process;
@@ -119,30 +119,6 @@ test "L2 SW6: process teammate rejects a parent session different from swarm rou
     try std.testing.expect(after.findMember("worker") == null);
 }
 
-test "L2 SW6 A: --teammate 身份 args 解析进 config" {
-    const a = std.testing.allocator;
-    const argv = [_][*:0]const u8{
-        "metacodes",           "--teammate", "--agent-name",        "bob",    "--team-name",    "proj",
-        "--parent-session-id", "sess9",      "--teammate-lease-id", "lease9", "--teammate-cwd", "/tmp/wt7",
-    };
-    const cfg = cc.parseArgsForTest(&argv, a);
-    // 注:parseArgsForTest 用 arena/allocator dupe;这里 testing.allocator 会报泄漏若 dupe 未 free。
-    // config 字符串归调用方——测试结束前 free。
-    defer {
-        if (cfg.teammate_name.len > 0) a.free(cfg.teammate_name);
-        if (cfg.teammate_team.len > 0) a.free(cfg.teammate_team);
-        if (cfg.teammate_parent_session.len > 0) a.free(cfg.teammate_parent_session);
-        if (cfg.teammate_lease_id.len > 0) a.free(cfg.teammate_lease_id);
-        if (cfg.teammate_cwd.len > 0) a.free(cfg.teammate_cwd);
-    }
-    try std.testing.expectEqualStrings("bob", cfg.teammate_name);
-    try std.testing.expectEqualStrings("proj", cfg.teammate_team);
-    try std.testing.expectEqualStrings("sess9", cfg.teammate_parent_session);
-    try std.testing.expectEqualStrings("lease9", cfg.teammate_lease_id);
-    try std.testing.expectEqualStrings("/tmp/wt7", cfg.teammate_cwd);
-    try std.testing.expect(cfg.agent_teams); // --teammate 隐含开 teams
-}
-
 test "L2 SW6 B: worktree 隔离 create + remove(真 git)" {
     const a = std.testing.allocator;
     // 临时 git repo。
@@ -174,7 +150,7 @@ test "L2 SW6 B: worktree 隔离 create + remove(真 git)" {
     @memcpy(cwd_z[0..root.len], root);
     cwd_z[root.len] = 0;
     const saved = savedCwd();
-    _ = std.c.chdir(&cwd_z);
+    _ = pfs.chdir(&cwd_z);
     defer restoreCwd(saved);
 
     tp.createWorktree(a, wt, "teammate-bob", "HEAD", root, null) catch return error.SkipZigTest;
@@ -197,8 +173,7 @@ test "L2 SW6 B: worktree 隔离 create + remove(真 git)" {
 
 var cwd_save_buf: [std.fs.max_path_bytes]u8 = undefined;
 fn savedCwd() []const u8 {
-    const p = std.c.getcwd(&cwd_save_buf, cwd_save_buf.len) orelse return "";
-    return std.mem.span(@as([*:0]const u8, @ptrCast(p)));
+    return pfs.getCwd(&cwd_save_buf) orelse "";
 }
 fn restoreCwd(saved: []const u8) void {
     if (saved.len == 0) return;
@@ -206,7 +181,7 @@ fn restoreCwd(saved: []const u8) void {
     if (saved.len >= z.len) return;
     @memcpy(z[0..saved.len], saved);
     z[saved.len] = 0;
-    _ = std.c.chdir(&z);
+    _ = pfs.chdir(&z);
 }
 
 fn runGit(a: std.mem.Allocator, cwd: []const u8, args: []const []const u8) bool {
@@ -297,39 +272,4 @@ test "L2: lead 的 --no-lsp 跟着进程外 teammate 过进程边界" {
         // 两侧都断言:开着时不得平白多塞 flag,关着时必须带上。
         try std.testing.expectEqual(!lead_lsp_on, mockSawFlag("--no-lsp"));
     }
-}
-
-test "L2: buildTeammateArgv 写出的 argv,teammate 自己的解析器真的认 --no-lsp" {
-    // 两段闭环:① flag 进了 argv;② 把**同一条 argv** 喂回 parseArgs,lsp 真的被关掉。
-    // 只验 ① 的话,一个位置放错/被后面的 flag 覆盖的 argv 也能"通过"。
-    const a = std.testing.allocator;
-    const argv = try tp.buildTeammateArgv(a, "/usr/local/bin/metacodes", .{
-        .name = "bob",
-        .team = "proj",
-        .cwd = "/tmp/wt",
-        .state_root = "/srv/lead-state",
-        .extra_flags = &.{"--no-lsp"},
-    });
-    defer tp.freeArgv(a, argv);
-
-    var seen = false;
-    var parse_argv: std.ArrayList([*:0]const u8) = .empty;
-    defer parse_argv.deinit(a);
-    for (argv) |item| {
-        const z = item orelse continue; // 末尾的 execve null 终止符
-        if (std.mem.eql(u8, std.mem.span(z), "--no-lsp")) seen = true;
-        try parse_argv.append(a, z);
-    }
-    try std.testing.expect(seen);
-
-    // parseArgs 会 dupe 值型 flag 的字符串(--agent-name/--team-name/--teammate-cwd 都是),
-    // 用 arena 一把回收,省得逐字段 free 还漏。
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const config = cc.parseArgsForTest(parse_argv.items, arena.allocator());
-    try std.testing.expect(config.parse_error == null); // 整条命令行合法
-    try std.testing.expect(!config.lsp_enabled); // 且真的关掉了
-    try std.testing.expectEqualStrings("bob", config.teammate_name); // 身份没被挤掉
-    // The child resolves the lead's state root, not its own default.
-    try std.testing.expectEqualStrings("/srv/lead-state", config.state_dir.?);
 }

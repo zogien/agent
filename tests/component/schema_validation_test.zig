@@ -4,7 +4,7 @@
 //! (→ invalid_args 给模型现场)。这是工具自身 MissingX 之外的统一前置层。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const tools = cc.tools;
 

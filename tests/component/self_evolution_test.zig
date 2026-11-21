@@ -6,7 +6,7 @@
 //! 临时规则落库 → 下一 Run 装载。这是审查 P2-2 点名缺失的组件测试。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const harness = @import("harness");
 const observation = cc.tools.tool_observation;
 const self_evolution = cc.self_evolution;

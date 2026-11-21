@@ -259,6 +259,9 @@ pub const util_json = @import("util/json.zig");
 pub const util_toolchain = @import("util/toolchain.zig"); // ripgrep 解析/可用性探测(Glob/Grep 依赖)
 pub const util_state_root = @import("util/state_root.zig"); // per-install state root (--state-dir / METACODES_HOME / install.json / ~/.metacodes)
 
+/// Internal fixtures available only during Zig test compilation.
+pub const test_support = if (@import("builtin").is_test) @import("agent_test_support.zig") else struct {};
+
 test {
     // 引用所有 re-export → 编译每个库模块的公开声明及其测试。这证明库能单独编译,
     // **不**证明它与 UI 隔离:refAllDecls 不递归,惰性分析也跳过没人调用的 import;

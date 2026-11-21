@@ -20,11 +20,9 @@ and the build tools under ``scripts``), outside test blocks and comments:
    ``false``, and no production line assigns ``true`` to anything named
    ``*builtin_default``.
 
-Test blocks are skipped, and so is any file named ``*_test.zig``: their
-fixtures name hosts that never see traffic. The behavioural side of the same
-promise is in ``tests/component/jev_default_test.zig`` (``metacodes doctor`` of
-the real CLI reports the advisor off, and a Run with memories and no advisor
-consults nothing).
+Test blocks and files named ``*_test.zig`` are skipped. Their fixtures name
+hosts that never see traffic. The SDK wiring check keeps the built-in
+advisor an explicit opt-in for hosts.
 """
 from __future__ import annotations
 
@@ -229,13 +227,16 @@ class BuiltinEgressDisciplineTest(unittest.TestCase):
     def test_no_default_on_destination_is_cleartext_to_a_public_host(self):
         self.assertEqual(problems(ROOT), [])
 
-    def test_the_cli_decision_is_off_and_is_what_main_and_doctor_read(self):
+    def test_agentcore_session_leaves_the_builtin_advisor_off(self):
         runtime = (ROOT / "src" / "jev" / "runtime.zig").read_text(encoding="utf-8")
-        main = (ROOT / "src" / "main.zig").read_text(encoding="utf-8")
         self.assertRegex(runtime, r"pub const CLI_USES_BUILTIN_DEFAULT = false;")
-        # The session and doctor both take it from the constant, so they cannot disagree.
-        self.assertIn("config.jev_builtin_default = @import(\"jev/runtime.zig\").CLI_USES_BUILTIN_DEFAULT;", main)
-        self.assertIn("jev.resolve(arena, io, state_root, jev.CLI_USES_BUILTIN_DEFAULT, jev.rawFromEnv())", main)
+        loop = (ROOT / "src" / "core" / "agent_loop.zig").read_text(encoding="utf-8")
+        self.assertRegex(loop, r"\bjev: \?[^=\n]+ = null,")
+        for relative in ("src/agentcore/abi_v1.zig", "src/core/agent_session.zig"):
+            with self.subTest(source=relative):
+                source = (ROOT / relative).read_text(encoding="utf-8")
+                production = "\n".join(code for _, code in production_lines(source))
+                self.assertNotRegex(production, r"\b(?:jev_runtime|BUILTIN_DEFAULT|jev_builtin_default)\b")
 
     def test_scanner_reads_literals_not_comments_tests_or_placeholders(self):
         with tempfile.TemporaryDirectory() as directory:

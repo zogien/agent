@@ -1,7 +1,7 @@
 //! L2 组件测试:prompt cache 击穿检测 + 工具 name 排序(批3,对齐 cc)。
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const Detector = cc.cache_break.CacheBreakDetector;
 

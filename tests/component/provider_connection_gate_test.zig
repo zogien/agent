@@ -1,7 +1,7 @@
 //! L2: a credential rotated while a request waits at the internal provider connection gate.
 const std = @import("std");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const fixture = @import("../_harness/agent_session_fixture.zig");
 
 const CredentialRun = fixture.CredentialRun(cc, cc.ui_event);

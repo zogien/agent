@@ -1,5 +1,9 @@
 # Release automation design: version bumping, cutting, tagging, publishing
 
+> This design records the upstream Metacodes release process. The fork's
+> [release workflow](../.github/workflows/release.yml) builds and publishes
+> AgentCore packages from tags.
+
 Status: implemented 2026-09-22 (§8 lists the files). Builds on the mechanism that already exists
 (`release:stage` → `release:manifest` → `release:check` / `release:verify` →
 `release:archive` → `release:sums`, `.github/workflows/release.yml`,

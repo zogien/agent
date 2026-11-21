@@ -989,8 +989,8 @@ test "spawn: cwd 已消失 → 子进程的报告原样上抛,不登记一个 ex
     defer r.deinit();
     var dir_buf: [512]u8 = undefined;
     const dir = @import("../tools/test_tmp.zig").path(&dir_buf, "job-vanished-cwd");
-    _ = std.c.mkdir(dir.ptr, 0o700);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.rmdir(dir.ptr));
+    _ = pfs.mkdir(dir.ptr, 0o700);
+    try std.testing.expectEqual(@as(c_int, 0), pfs.rmdir(dir.ptr));
     try std.testing.expectError(error.ChildChdirFailed, r.spawnSynchronous("echo hello", dir));
     try std.testing.expectEqual(@as(usize, 0), r.jobs.items.len);
 }

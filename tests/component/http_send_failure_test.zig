@@ -17,7 +17,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const http_connection = cc.api_http_connection;
 

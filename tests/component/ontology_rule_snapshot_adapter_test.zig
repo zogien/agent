@@ -7,7 +7,7 @@
 const std = @import("std");
 const pfs = @import("platform").fs;
 const builtin = @import("builtin");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const tinykg_binary = @import("tinykg_binary.zig");
 
 const adapter = cc.kg_ontology_rule_snapshot_adapter;

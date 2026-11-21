@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const pfs = @import("platform").fs;
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const tools = cc.tools;
 const ToolContext = cc.tool_context.ToolContext;

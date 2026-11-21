@@ -9,7 +9,7 @@
 const std = @import("std");
 const pfs = @import("platform").fs;
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const agent_loop = cc.agent_loop;
 const ui_request = cc.ui_request;

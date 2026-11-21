@@ -2,7 +2,7 @@
 //! without leaking the internal compact prompt/marker text.
 
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 const Conversation = cc.conversation.Conversation;
 const msg = cc.core_message;

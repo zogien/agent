@@ -5,7 +5,7 @@
 const std = @import("std");
 const pfs = @import("platform").fs;
 const harness = @import("harness");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 
 /// 让 fixture 脚本可执行。
 ///
@@ -70,14 +70,6 @@ fn successfulTestCommand(
     defer allocator.free(path_z);
     try makeExecutable(path_z);
     return allocator.dupe(u8, path);
-}
-
-test "CLI verification checkpoint flag is explicit and defaults off" {
-    const a = std.testing.allocator;
-    const disabled_argv = [_][*:0]const u8{"metacodes"};
-    try std.testing.expect(!cc.parseArgsForTest(&disabled_argv, a).verification_checkpoint);
-    const enabled_argv = [_][*:0]const u8{ "metacodes", "--verification-checkpoint" };
-    try std.testing.expect(cc.parseArgsForTest(&enabled_argv, a).verification_checkpoint);
 }
 
 fn runScenario(

@@ -1,5 +1,5 @@
 const std = @import("std");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const harness = @import("harness");
 
 const candidate_id = [_]u8{'a'} ** 64;

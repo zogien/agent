@@ -13,7 +13,7 @@
 //! 用正斜杠,GetFinalPathNameByHandle 给反斜杠,两者指同一个文件。
 const std = @import("std");
 const builtin = @import("builtin");
-const cc = @import("cc");
+const cc = @import("metacodes-core").test_support;
 const harness = @import("harness");
 
 const is_windows = builtin.os.tag == .windows;

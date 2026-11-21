@@ -766,7 +766,7 @@ def _check_main_units(assets: Sequence[Path], main_version: str, entry: contract
 def rehearse(root: Path, target: str, work: Path, zig: str = "zig", optimize: str = "ReleaseSafe") -> str:
     """Prove the formal path on the real build without releasing anything: in a
     scratch worktree, finalize AgentCore as a cut would, commit and tag locally,
-    build the stable archive through the real `agentcore:archive`, package the
+    build the stable archive through the real `archive`, package the
     languages, and pass the door. Nothing leaves the scratch directory, and the
     worktree and the local tag are removed. Returns what happened: a tree that is
     already a release, or would reuse one, has nothing to build."""
@@ -787,7 +787,7 @@ def rehearse(root: Path, target: str, work: Path, zig: str = "zig", optimize: st
         tagged = True
         prefix = work / "sdk"
         subprocess.run(
-            [zig, "build", "agentcore:archive", f"-Dtarget={target}", f"-Doptimize={optimize}", "--prefix", str(prefix), f"-Dagentcore-archive-dir={dist}"],
+            [zig, "build", "archive", f"-Dtarget={target}", f"-Doptimize={optimize}", "--prefix", str(prefix), f"-Dagentcore-archive-dir={dist}"],
             cwd=str(tree),
             check=True,
         )
