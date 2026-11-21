@@ -1,5 +1,9 @@
 # Terminal setup: Shift+Enter for a newline
 
+> The current CLI supports `metacodes terminal-setup --restore`. The setup and
+> editor instructions below describe older builds and the installations that
+> this command can undo.
+
 In the metacodes prompt, Enter submits and Shift+Enter starts a new line. A
 terminal can only report Shift+Enter when it tells it apart from Enter, and
 not every terminal does. When the footer says `\ + ⏎ for newline`, Shift+Enter

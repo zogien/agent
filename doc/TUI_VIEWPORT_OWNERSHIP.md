@@ -1,5 +1,7 @@
 # TUI viewport ownership (ADR)
 
+> Historical design for the interactive renderer, which was removed from this fork.
+
 Who may put bytes on the terminal while the interactive REPL runs, and what
 they may do with them.
 
@@ -78,7 +80,7 @@ climbs from the wrong row: part of the region spills into the scrollback.
 **2. Erase, print and redraw come in pairs, in one frame.** `emitToScroll`
 prints only after `eraseRegion` has taken the region off the screen
 (`region_drawn` false), and draws it again if it was there. When it was, the
-three steps are composed into one buffer between `ESC[?2026h` and
+three steps are composed into one buffer between `ESC`?2026h` and
 `ESC[?2026l` (DEC 2026 synchronized output) and flushed once, so a terminal
 that supports it never shows the erased state; `redrawFrameLocked` (erase +
 draw) and `renderFrameInner` (climb + ED 0 + draw) are framed the same way.
@@ -190,7 +192,7 @@ A change under `src/repl/` that writes to the terminal:
 ### Enforcement
 
 `zig build test:scrollback` runs
-[`scripts/tests/test_scrollback_discipline.py`](../scripts/tests/test_scrollback_discipline.py)
+[`scripts/tests/test_scrollback_discipline.py``
 over `src/repl/` (comments and `test` blocks excluded; string literals decoded
 as Zig reads them) and fails the build on:
 

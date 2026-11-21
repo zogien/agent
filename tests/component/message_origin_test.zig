@@ -36,7 +36,7 @@ const Silent = struct {
     }
 };
 
-test "L2 message origin: a max-token continuation request is the host's, reaches the model, persists, and is not replayed" {
+test "L2 message origin: a max-token continuation request is the host's, reaches the model, persists" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -97,13 +97,4 @@ test "L2 message origin: a max-token continuation request is the host's, reaches
     try cc.transcript.loadTranscript(&resumed, writer.dir, a);
     try std.testing.expectEqual(@as(usize, 4), resumed.len());
     try std.testing.expectEqual(Origin.host, resumed.messages.items[2].origin);
-
-    // ...and the resumed session's replay shows the prompt and both halves
-    // of the answer, never the host's request in the user's voice.
-    const steps = try cc.repl_replay.plan(a, resumed.messages.items);
-    defer a.free(steps);
-    try std.testing.expectEqual(@as(usize, 3), steps.len);
-    try std.testing.expectEqualStrings("do the work", steps[0].prompt[0].text);
-    try std.testing.expectEqualStrings("first half ", steps[1].stream[0].text);
-    try std.testing.expectEqualStrings("second half", steps[2].stream[0].text);
 }

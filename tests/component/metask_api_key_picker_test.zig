@@ -18,7 +18,6 @@ const harness = @import("harness");
 const cc = @import("cc");
 const ppaths = @import("platform").paths;
 
-const picker_mod = cc.repl_model_picker;
 const App = cc.app_module.App;
 
 const SESSION_KEY = "stored-session-key";
@@ -142,14 +141,9 @@ fn headerValue(captured: harness.CapturedRequest, name: []const u8) ?[]const u8 
 
 /// The Metask offers a freshly refreshed picker snapshot holds, by wire model id.
 fn metaskOffers(app: *App, buffer: [][]const u8) ![][]const u8 {
-    try app.refreshModelPicker();
-    return snapshotMetaskOffers(app, buffer);
-}
-
-/// The Metask offers the picker snapshot holds right now, without refreshing it.
-fn snapshotMetaskOffers(app: *App, buffer: [][]const u8) [][]const u8 {
+    const host = try app.providerHost();
     var len: usize = 0;
-    for (app.model_picker.offers.items) |offer| {
+    for (host.kernel.catalogSnapshot().items()) |offer| {
         if (!offer.provider_id.eqlText("metask")) continue;
         buffer[len] = offer.request_model_id;
         len += 1;
@@ -162,13 +156,11 @@ fn containsModel(models: []const []const u8, wanted: []const u8) bool {
     return false;
 }
 
-/// The wire model id of the offer the picker marks current, if any.
 fn currentModel(app: *App) ?[]const u8 {
-    const current = app.model_picker.current_offer orelse return null;
-    for (app.model_picker.offers.items) |offer| {
-        if (offer.offer_id.eql(current)) return offer.request_model_id;
-    }
-    return null;
+    const host = app.providerHost() catch return null;
+    const current = host.kernel.currentOfferId() orelse return null;
+    const offer = host.kernel.catalogSnapshot().find(current) orelse return null;
+    return offer.request_model_id;
 }
 
 /// Send one turn on whatever route the session is on and return what reached
@@ -189,7 +181,7 @@ fn sendOneTurn(app: *App, server: *harness.MockServer) !harness.CapturedRequest 
     return server.lastRequest() orelse error.NoRequestCaptured;
 }
 
-test "L2 metask api-key route: the picker offers the gateway's models at the session's endpoint and marks the one in use" {
+test "L2 metask api-key route: the catalog offers the gateway's models at the session's endpoint and marks the one in use" {
     var case: Case = undefined;
     try case.init();
     defer case.deinit();
@@ -217,7 +209,8 @@ test "L2 metask api-key route: the picker offers the gateway's models at the ses
     try std.testing.expectEqual(@as(usize, 2), models.len);
     try std.testing.expect(containsModel(models, "glm-5.3-flash"));
     try std.testing.expect(containsModel(models, "kimi-k3"));
-    for (app.model_picker.offers.items) |offer| {
+    const host = try app.providerHost();
+    for (host.kernel.catalogSnapshot().items()) |offer| {
         if (!offer.provider_id.eqlText("metask")) continue;
         // The endpoint the session already talks to, on its one wire.
         try std.testing.expectEqualStrings(messages_url, offer.endpoint_ref);
@@ -226,15 +219,15 @@ test "L2 metask api-key route: the picker offers the gateway's models at the ses
     // The model the session runs is the marked one.
     try std.testing.expectEqualStrings("glm-5.3-flash", currentModel(app).?);
 
-    // Drive the picker the way the keyboard does: type the model, Enter.
-    const picker = &app.model_picker;
-    for ("kimi") |byte| _ = picker.onKey(.{ .char = byte });
-    try std.testing.expectEqual(picker_mod.Stage.list, picker.stage);
-    const outcome = picker.onKey(.enter);
-    // One wire per model: Enter on the model commits it.
-    try std.testing.expect(outcome == .commit);
-    const committed = try app.commitModelSelection(outcome.commit);
-    try std.testing.expect(committed == .committed);
+    const kimi = for (host.kernel.catalogSnapshot().items()) |offer| {
+        if (offer.provider_id.eqlText("metask") and std.mem.eql(u8, offer.request_model_id, "kimi-k3")) break offer;
+    } else return error.OfferMissing;
+    try std.testing.expect(try app.commitModelSelection(.{
+        .offer_id = kimi.offer_id,
+        .offer_revision = kimi.offer_revision,
+        .scope = .session,
+        .controls = .{},
+    }) == .committed);
     try std.testing.expectEqualStrings("kimi-k3", app.activeModel());
 
     const captured = try sendOneTurn(app, server);
@@ -242,16 +235,6 @@ test "L2 metask api-key route: the picker offers the gateway's models at the ses
     // The stored login key, which no environment variable or flag carries.
     try std.testing.expectEqualStrings("Bearer " ++ SESSION_KEY, headerValue(captured, "authorization").?);
     try std.testing.expectEqualStrings("\"kimi-k3\"", captured.jsonField("model").?);
-
-    // `/model use` resolves the same catalog. Z.AI lists glm-5.3-flash too
-    // (four channels); the name means the provider the session is on.
-    try std.testing.expect(cc.repl_picker_host.useSelector(app, "glm-5.3-flash") == .switched);
-    try std.testing.expectEqualStrings("glm-5.3-flash", app.activeModel());
-    // A name only another provider serves, on several channels, is still a
-    // question rather than a guess.
-    const elsewhere = cc.repl_picker_host.useSelector(app, "glm-5.3");
-    try std.testing.expect(elsewhere == .ambiguous);
-    try std.testing.expectEqual(@as(usize, 4), elsewhere.ambiguous.total);
 }
 
 test "L2 metask api-key route: every page of a paginated /v1/models becomes the inventory" {
@@ -333,12 +316,12 @@ test "L2 metask api-key route: a /models key switch replaces the inventory and i
     try std.testing.expectEqualStrings("GET /v1/models HTTP/1.1", requestLine(server.requestAt(2).?));
     try std.testing.expectEqualStrings("Bearer " ++ KEY_DEV, headerValue(server.requestAt(2).?, "authorization").?);
 
-    // A picker left open sees the new list without being reopened.
-    const models = snapshotMetaskOffers(app, &buffer);
+    // The existing host sees the new catalog.
+    const models = try metaskOffers(app, &buffer);
     try std.testing.expectEqual(@as(usize, 1), models.len);
     try std.testing.expectEqualStrings("dev-model", models[0]);
 
-    try std.testing.expect(cc.repl_picker_host.useSelector(app, "dev-model") == .switched);
+    try std.testing.expect(@import("offer_fixture.zig").useSelector(app, "dev-model") == .switched);
     const captured = try sendOneTurn(app, server);
     try std.testing.expectEqualStrings("Bearer " ++ KEY_DEV, headerValue(captured, "authorization").?);
     try std.testing.expectEqualStrings("\"dev-model\"", captured.jsonField("model").?);
@@ -416,7 +399,7 @@ test "L2 metask api-key route: a warm start offers the cached gateway models, an
 
     // Adopted at the REPL's idle point, it reaches a picker left open.
     app.adoptModelCatalogRefresh();
-    const refreshed = snapshotMetaskOffers(app, &buffer);
+    const refreshed = try metaskOffers(app, &buffer);
     try std.testing.expectEqual(@as(usize, 1), refreshed.len);
     try std.testing.expectEqualStrings("dev-model", refreshed[0]);
 }

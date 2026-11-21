@@ -47,16 +47,12 @@ to embed sessions in an application.
   `gateway_url`, `models_url`, and `client_name` in
   `$HOME/.metacodes/oauth/metask.json` (or `METACODES_OAUTH_DIR`).
 
-Every Metask sign-in that replaces a stored session (this one, `metacodes
-login`, `/login`, `/login metask`) revokes the replaced one at
-`$METASK_SITE_URL/api/oauth/revoke`, as `metacodes logout` revokes the current
-one (#560): only once the new session is stored (and, in the TUI, bound), so a
-sign-in that fails, cannot bind or is cancelled revokes nothing; bounded (3 s
-in the TUI, 5 s on the command line), and a refusal or no answer is reported
-in one line without failing the sign-in. The same session stored again is not
-revoked, and a replaced session whose `gateway_url` is not the origin of
-`$METASK_SITE_URL` is not sent there: it stays valid until it expires, and the
-sign-in says so.
+When Metask sign-in replaces a stored session, the CLI stores the new one
+before revoking the old one at `$METASK_SITE_URL/api/oauth/revoke` (#560).
+Revocation has a 5-second timeout. A refusal or timeout produces a notice
+and the sign-in still succeeds. The CLI skips revocation when the session is
+stored again or when the old gateway URL has a different origin from
+`$METASK_SITE_URL`.
 
 The refresh grant sends only `grant_type=refresh_token` and the stored refresh
 token. Metask rotates refresh tokens; persistence happens before the new access
@@ -92,87 +88,22 @@ normative model; the entry points are:
 |---|---|
 | `--provider <id\|alias>` / `METACODES_PROVIDER` | resolve the route through the provider registry instead of inferring a transport from the model name |
 | `METACODES_MODEL` | the model, as `--model` gives it (the flag wins) |
-| `--preset <name>` / `METACODES_PRESET` | a named setup from `config.json` `presets` (#489; [LOCAL_CONFIG.md](LOCAL_CONFIG.md#presets)), applied as the flags naming its route would: `--model`, `--channel` and `--reasoning-effort` replace one field for that run, `--provider`/`--offer` set it aside, nothing is written back. Below a preset named at start comes the one `directory_presets` remembers for the working directory (its git worktree root, else the directory), then the `/model` default. A name `config.json` does not define stops `-p` with exit 2, listing the presets; the TUI starts without it and says so under its banner |
+| `--preset <name>` / `METACODES_PRESET` | a named setup from `config.json` `presets` (#489; [LOCAL_CONFIG.md](LOCAL_CONFIG.md#presets)), applied as the flags naming its route would: `--model`, `--channel` and `--reasoning-effort` replace one field for that run, `--provider`/`--offer` set it aside, nothing is written back. Below a preset named at start comes the one `directory_presets` remembers for the working directory (its git worktree root, else the directory), then the stored global default. A name `config.json` does not define stops the CLI with exit 2 and lists the presets |
 | `<state root>/.env` | the install's local configuration ([LOCAL_CONFIG.md](LOCAL_CONFIG.md)), read once at start and never `setenv`: a layer below the process environment for the names it may set — every registered profile's `env_aliases`, the variables `config.json` names (`providers.<id>.credentials[].env`, `provider_catalogs.<id>.credential_env`), `METACODES_PROVIDER`, `METACODES_MODEL`, `METACODES_PRESET`; a provider's aliases are read from it only when the environment sets none of them. Request addresses (`METACODES_BASE_URL`, `METASK_GATEWAY_URL`, `METASK_SITE_URL`, `METACODES_KEY_CHECK_URL`, `METACODES_KG_URL`, any `*_URL`) are refused; other names are ignored with one warning listing them. Its `METACODES_PRESET`, else its `METACODES_PROVIDER` (else the one provider whose key it holds), applies only when no flag or environment variable names a provider or a preset, the working directory remembers no preset, no `global_selection` is stored and no Metask sign-in exists (`--api-key`, `METASK_API_KEY`, a key or older sign-in in `auth.json`, the Metask session `oauth/metask.json`); keys of several providers and no name choose none, and the run lists them. A `.env` anywhere else, the working directory included, is never read. `metacodes install` writes `<state root>/.env.example` on every install and upgrade and never touches `.env` |
-| no credential at all | the interactive TUI opens without a model (#484): its banner reads `not set — /login, or configure .env`; a prompt, `/retry`, `/edit <n>`, `/init`, `/commit`, `/review`, `/btw`, `/recap` and a Skill are refused with a note before any request is assembled; nothing is probed; no session directory is made until a route binds (`/model`, `/login`). A Metask sign-in in `auth.json` older than #527 with no key and model chosen opens it the same way, and so does a provider named by `--provider`, `--offer`, `METACODES_PROVIDER`, a preset or `.env` that has no credential: the note names that provider's variables, and no other provider is used in its place (#485). `-p`, `-` and a REPL whose input is a pipe exit non-zero with the sign-in hint (or the named provider's help) instead. The banner names where a bound route's credential came from (`· Metask`, `· from .env`, `· from shell`, `· saved key`, `· signed in`, `· --api-key`) |
-| stored default without a credential | a `global_selection` whose provider has no credential (a Metask one: no Metask session, no Metask key and no key in `auth.json`; a stored Metask route the session authenticates runs at the session's gateway, never at the compiled endpoint with the session's token, #527) is passed over for the levels below it, with one notice: `The default model, <provider> · <model>, has no key or sign-in; this session uses <model> · <origin>.` (under the TUI's banner, else on stderr) (#485) |
+| no usable credential | the headless command exits non-zero before making a model request. It prints the sign-in hint or the named provider's credential help. An incomplete Metask sign-in also exits before making a request. |
+| stored default without a credential | a `global_selection` whose provider has no credential (a Metask one: no Metask session, no Metask key and no key in `auth.json`; a stored Metask route the session authenticates runs at the session's gateway, never at the compiled endpoint with the session's token, #527) is passed over for the levels below it, with one notice: `The default model, <provider> · <model>, has no key or sign-in; this session uses <model> · <origin>.` (on stderr) (#485) |
 | `metacodes logout` | revokes the Metask session at `$METASK_SITE_URL/api/oauth/revoke` (bounded; a failure is reported and the local sign-out goes on), removes both Metask sign-ins (`auth.json`, `oauth/metask.json` with its refresh token) and a key stored with `login --provider metask`, forgets a stored default that resolves to Metask, and says which it removed; `METASK_API_KEY` left in the shell or `.env` is named, never removed. `logout --provider metask` is the same (#499) |
 | `--channel <id>` | narrow to one endpoint/region/plan/account binding |
 | `--offer <offer-id>` | pin one exact reproducible route |
 | `--base-url <url>` | validated against the selected profile and route policy before any request URL is built |
 | `--check-providers` | validate the configuration and print every route it produces, then exit; no credential is resolved and no request URL is built |
 | `METACODES_STREAM_IDLE_TIMEOUT_MS` | stream liveness, **head phase**: a request whose connection stays open but delivers no byte before the response head for this long (default 120000; 0 disables liveness monitoring entirely) is shut down by the client's monitor and retried as a transient network error. Nothing in a blocked socket read notices an abort flag; this is what turns a silent gateway or proxy into a bounded failure instead of a frozen session. Progress is measured per SSE line, not per parsed event: a tool call's `input_json_delta` frames and unknown events keep the request alive, but keepalive lines (`event: ping`, `data: {"type":"ping"}`, `:` comments) do not — they prove the gateway connection is up, not that the model is producing (2026-09-23: a gateway pinged every 15 s for 55 minutes over an upstream that produced nothing) |
-| `METACODES_STREAM_BODY_IDLE_TIMEOUT_MS` | stream liveness, **body phase** (response head accepted): unset = automatic, `clamp(max_tokens × 100 ms, 600000, 1800000)` — a gateway may generate an entire tool call before writing a byte of it, so the tolerated silence scales with the response the request allows; an explicit value is a flat limit in ms; 0 disables body-phase monitoring. Past the limit the client shuts the connection down, the turn ends with `StreamStalled` and the TUI reports `正文空闲超时: <idle> ms 内无任何字节(上限 <limit> ms)` when the connection itself went silent, or `<idle> ms 内无模型输出,但网关 keepalive 仍在到达(最近字节 <n> ms 前)…` when a gateway kept the connection alive over a dead upstream — instead of the generic failure text. A user cancel (Ctrl+C/Esc) that wakes the blocked read is reported as an abort, never as an API error, and the streamed prefix is kept as partial text. A body-phase stall after visible output (text, thinking or a tool call) is not retried automatically in the TUI (the streamed prefix cannot be pretended away); a stall, a stream that ended without a stop report, or a dropped connection before any visible output is re-sent once (an in-stream server error, reported as `API 错误帧: …` on every wire, is not). Independently of this limit, once an endpoint has been seen to send keepalives mid-stream (three pings or SSE comments, each ending a silence of at least 2 s), a streamed body with no byte at all, keepalives included, for max(4 × the longest such interval, 2 minutes) is judged a dead connection and reported as `连接已断: <n> ms 内无任何字节,连 keepalive 也没有…`; 0 here disables that rule as well |
+| `METACODES_STREAM_BODY_IDLE_TIMEOUT_MS` | stream liveness, **body phase** (response head accepted): unset = automatic, `clamp(max_tokens × 100 ms, 600000, 1800000)` — a gateway may generate an entire tool call before writing a byte of it, so the tolerated silence scales with the response the request allows; an explicit value is a flat limit in ms; 0 disables body-phase monitoring. Past the limit the client shuts down the connection and the turn ends with `StreamStalled`. The headless CLI reports an unsuccessful run. A stall, a stream that ended without a stop report, or a dropped connection before any visible output can be retried once. Independently of this limit, once an endpoint has been seen to send keepalives mid-stream (three pings or SSE comments, each ending a silence of at least 2 s), a streamed body with no byte at all, keepalives included, for max(4 × the longest such interval, 2 minutes) is judged a dead connection and reported as `连接已断: <n> ms 内无任何字节,连 keepalive 也没有…`; 0 here disables that rule as well |
 | `metacodes login --provider <id> --oauth-token-json <file>` | import an OAuth token into that provider's own store; refresh, single flight, and rotated-refresh persistence then run themselves |
-| `metacodes login --provider <id> [--key-page <page>] [--api-key-stdin] [--no-check]` | for a provider that declares key pages and no sign-in it can run — every built-in vendor but Metask: `openai`, `gemini`, `qwen`, `minimax`, `kimi`, `deepseek`, `zai-coding-plan`, `kimi-code`, `bedrock` (OpenAI's OAuth sign-in runs instead once an OAuth client is configured for it, or with `--client-id`): open the key page (the one for the default channel's region; `--key-page` picks another), read the pasted key with echo off (or from stdin, or `--api-key <key>`), check it with a GET the provider does not bill, the key placed where the provider's requests carry it (Gemini's `x-goog-api-key`), and store it in `<state root>/keys/<id>.json` (0600). A 401/403, or what the provider words as a wrong key (Gemini's 400 `API_KEY_INVALID`), refuses it; nothing is stored then. Only that provider's resolution reads the file, after its environment aliases: when one of them is set in the shell or in `.env`, the login says so by the variable's name (`warning: DASHSCOPE_API_KEY is set in your shell and is used before the stored key: …`; `/login` prints the same line); `metacodes logout --provider <id>` removes it. `METACODES_KEY_CHECK_URL` (https, or http to a loopback host) replaces the check URL for a local mock |
-| `~/.metacodes/config.json` | `schema_version`, `config_revision`, `providers` (with per-provider `credentials` by environment-variable reference), `custom_providers`, `provider_catalogs`, `aliases`, `global_selection`, `presets` and `directory_presets` (#489), `recent_operation_ids`; written atomically, other keys preserved. The same file declares MCP servers under `"mcpServers"` (Claude Code's schema; the legacy `"mcp_servers":[{"name":"<id>","command":[...]}]` array still works), and Claude Code's `~/.claude.json` / `.mcp.json` and Codex's `config.toml` servers are read too — see [Skills and MCP servers](SKILLS_AND_MCP.md). Each connected server's tools register as deferred `mcp__<id>__<tool>` (listed under the prompt's `# Deferred tools`, activated with `ToolSearch select:mcp__<id>__<tool>`), `/mcp` shows every configured server and why any failed, and `ListMcpResourcesTool` fails with `capability_unsupported` when nothing is |
+| `metacodes login --provider <id> [--key-page <page>] [--api-key-stdin] [--no-check]` | for a provider that declares key pages and no sign-in it can run — every built-in vendor but Metask: `openai`, `gemini`, `qwen`, `minimax`, `kimi`, `deepseek`, `zai-coding-plan`, `kimi-code`, `bedrock` (OpenAI's OAuth sign-in runs instead once an OAuth client is configured for it, or with `--client-id`): open the key page (the one for the default channel's region; `--key-page` picks another), read the pasted key with echo off (or from stdin, or `--api-key <key>`), check it with a GET the provider does not bill, the key placed where the provider's requests carry it (Gemini's `x-goog-api-key`), and store it in `<state root>/keys/<id>.json` (0600). A 401/403, or what the provider words as a wrong key (Gemini's 400 `API_KEY_INVALID`), refuses it; nothing is stored then. Only that provider's resolution reads the file, after its environment aliases: when one of them is set in the shell or in `.env`, the login says so by the variable's name (`warning: DASHSCOPE_API_KEY is set in your shell and is used before the stored key: …`); `metacodes logout --provider <id>` removes it. `METACODES_KEY_CHECK_URL` (https, or http to a loopback host) replaces the check URL for a local mock |
+| `~/.metacodes/config.json` | `schema_version`, `config_revision`, `providers` (with per-provider `credentials` by environment-variable reference), `custom_providers`, `provider_catalogs`, `aliases`, `global_selection`, `presets` and `directory_presets` (#489), `recent_operation_ids`; written atomically, other keys preserved. The same file declares MCP servers under `"mcpServers"` (Claude Code's schema; the legacy `"mcp_servers":[{"name":"<id>","command":[...]}]` array still works), and Claude Code's `~/.claude.json` / `.mcp.json` and Codex's `config.toml` servers are read too — see [Skills and MCP servers](SKILLS_AND_MCP.md). Each connected server's tools register as deferred `mcp__<id>__<tool>` (listed under the prompt's `# Deferred tools`, activated with `ToolSearch select:mcp__<id>__<tool>`), `ListMcpResourcesTool` fails with `capability_unsupported` when nothing is |
 | `<session_dir>/runtime-selection.json` | `session_selection`; a session-scoped choice never reaches `config.json` |
 | `src/provider/control_plane.zig` | `model.list`, `model.describe`, `selection.validate`, `selection.resolve`, `selection.commit`, `quote.estimate`, replayable event journal |
-
-Interactive surfaces: `Ctrl+O` and `/model` open the route picker, one screen
-of models under a heading per provider (where its key comes from, who bills
-it), the cursor on the model in use; a model served on several routes lists
-them under it while the cursor is on it, the reasoning level is a line under
-the list changed with ←/→, the three scopes are named in the header (`Tab`
-cycles them), typing filters across every provider, and closing without a
-choice prints `kept <model>` (transcript
-viewing moved to `Ctrl+X Ctrl+O`, also `/transcript`); `/providers` lists routes
-and takes `refresh`, `enable <id>`, `disable <id>`, `remove <id>`; `/alias`
-names a route (`pin`, `float`, `use`, `remove`); `/models` still selects the
-account key of a key route; `/login` alone runs the Metask browser sign-in
-`metacodes login` runs (authorization code + PKCE at
-`https://www.metask-ai.com` as the client `metacodes`, scope
-`read model:invoke`, on a loopback `/auth/metask/callback`; `--no-browser`
-prints the URL without opening it) on a worker thread, then asks for the
-model and reasoning level in the pane, from the `/v1/models` of the gateway
-the token response names (models that gateway does not serve on
-`/v1/messages` are left out); `Esc` at any step stores and changes nothing.
-Once both are chosen it stores the token response as the Metask session
-(`oauth/metask.json`) and the choice in `auth.json`, as `metacodes login`
-does, moves the session onto that gateway with the session's token at once,
-and forgets a stored `global_selection`, so the next start is on the sign-in
-too (#485, #527); a Metask session it replaced is then revoked at Metask
-(#560, see [Metask device OAuth and gateway](#metask-device-oauth-and-gateway)).
-`/logout` revokes the Metask session at Metask, removes
-both Metask sign-ins (`auth.json` and the session `oauth/metask.json`) and a
-Metask key
-stored with `login --provider metask`, forgets a stored default that resolves
-to Metask, drops every Metask credential the process holds (nothing is sent
-with one again), and moves a session on Metask to the provider `.env`
-configures (`Switched to <provider> (from .env)`) or leaves it unbound;
-`/logout <id>` removes `keys/<id>.json`, and a session that ran on that key
-holds no credential afterwards. Neither runs in the middle of a turn: a
-command typed then waits in the queue until the turn ends.
-`/login metask` is Metask's device grant in the pane `/login` uses: the code
-is confirmed on any device, then the model and reasoning level are chosen,
-and the sign-in is stored and used as `/login`'s (#527).
-`/login <id> [--device-code] [--no-browser] [--client-id <client>]` starts
-another provider's sign-in directly; it
-runs the kernel OAuth flow on a worker thread (`Esc` cancels it) and stores
-the login where `metacodes login --provider <id>` does (issue #33); `--client-id` is needed
-only when neither the profile nor `providers.<id>.oauth_client_id` in
-`~/.metacodes/config.json` names the installation's registered client (#87). A
-provider that takes a pasted key instead (`zai-coding-plan`, `kimi-code`) is
-listed in `/login` as "API key": ↑/↓ picks the plan, its page opens, the key is
-typed masked, and Enter checks and stores it.
-
-The picker lists only routes a commit can apply as they are (#488): a route is
-listed when a credential resolves for it now, by the same resolution a commit
-binds with, without a request: the environment, `<state root>/.env`, a key
-`/login <id>` stored, a provider's stored OAuth login, a credential-pool
-member, `--api-key` for the provider it was given for, and for Metask the
-session's own key or, in a session started on another provider, the key
-`metacodes login` stored in `auth.json`. Only a missing credential takes a
-route off the list: a route refused for another reason (two names of its key
-that disagree, say) stays listed, and a commit reports why. A
-provider none of whose routes has one is listed dimmed under "Not
-configured", below the others; choosing it shows the variable its key is read
-from, this install's `<state root>/.env` and `doc/LOCAL_CONFIG.md` (for
-Metask, `/login` first), and nothing else: the picker starts no sign-in, takes
-no key and sends no request. A commit that still finds no credential shows the
-same. `/login <id>` is where a key is pasted or a provider signed in to; the
-in-picker sign-in and key stage of #67 are gone. When a commit moves the
-session to another provider, its confirmation says who bills it from then on.
 
 A committed route is broadcast on the UI event stream as `config_changed` →
 `route`, carrying provider, channel, protocol, wire model id, offer id,
@@ -185,56 +116,26 @@ A newer `config.json` `schema_version` is rejected rather than merged. Sessions
 that name no provider keep the historical Metask credential and model-inference
 path unchanged.
 
-## Session command surface (UI-neutral)
+## Edit and rerun
 
-The terminal REPL uses the session command pipeline in
-`src/session_intent.zig` and `src/session_service.zig`:
-
-    raw input → session_intent.parse → InputIntent
-      → SessionService.dispatch (validate → mutate → optional RunPlan)
-      → host submits the run via session_service.buildRunOptions
-
-- **Intent classes.** `!cmd` is the shell lane; `/verb …` resolves against the
-  built-in verb table (`session_intent.BUILTIN_VERBS`, built-ins win over
-  same-named skills); an unknown `/head` is a skill candidate; anything else is
-  a prompt. The verb table is the single registry — hosts do not parse slash
-  commands themselves.
-- **Service verbs**: `/model use <id>`, `/mode [name]`, `/effort <level>`,
-  `/compact`, `/add-dir <path>`, `/theme <v>`, `/vim`, `/retry`, `/edit <n> <text>`,
-  `/commit`, `/review`, `/init`, prompt submission and `!cmd`. The terminal
-  handles display-only verbs such as `/help` and `/tools`.
-- **Run assembly.** `session_service.buildRunOptions` is the only place App
-  state is projected into `agent_loop.Options`; hosts add only host-specific
-  fields (UI requester, run-control observers, budgets).
-- `tests/component/session_api_parity_test.zig` exercises the command service.
-
-### Edit and rerun
-
-`/edit <n> <text>` edits message `n` of the conversation, one the user wrote,
-and reruns from it (#432). Messages are numbered from 1 over the whole
-history, compacted ones included. The conversation becomes messages
-`1..n-1` followed by `text`, and a run answers it. The original message `n`
-and everything after it are dropped: later prompts, replies, tool calls and
-tool results. They are discarded, not kept as a branch. In the terminal,
-`/edit` alone lists the messages that can be edited with their numbers.
+A host can replace a user message and rerun from that position (#432).
+Messages are numbered from 1 across the whole history, including compacted
+messages. The conversation becomes `1..n-1` followed by the replacement
+text. Rewinding drops the original message and all subsequent messages.
 
 - **Persistence.** Dropping messages rewrites the transcript from the live
-  conversation at its next flush (the rewrite `/retry` uses), so a resumed
-  session has the edited history, never the dropped one.
+  conversation at its next flush so a resumed session has the edited history.
 - **Refusals** change nothing and run nothing. Each names its reason
   (`conversation.RewindError`): `PositionOutOfRange` (no message `n`),
   `NotUserMessage` (a reply, a tool result, or text the runtime wrote),
   and `PositionCompacted` (the message is behind the compact boundary, so the
   context before it exists only as a summary and cannot be rerun). A message
   at or after the boundary can be edited; the summary stays its preceding
-  context, as in every request since the compaction. The command line also
-  refuses a number that is not a positive integer (`InvalidPosition`) and a
-  missing text.
+  context, as in every request since the compaction.
 - **Context only.** Files written, commands run and other effects of the
-  dropped turns stay. The must-read-first record is cleared (as by `/clear`),
-  since the rerun's context no longer shows what was read.
-- **Hosts.** `POST /command` takes the same line; the Run's `user_message`
-  line carries the text and `"replaces":n`
+  dropped turns stay. Rewinding clears the must-read-first record because
+  the rerun's context no longer shows what was read.
+- **Hosts.** The Run's `user_message` line carries the text and `"replaces":n`
   ([Wire lines](#wire-lines-for-out-of-process-hosts)). A Zig Host calls
   `AgentSession.rewindToUserMessage(position)` while idle and then runs the
   edited text; `SessionHost` does both for a submission with `.replaces`
@@ -246,9 +147,6 @@ tool results. They are discarded, not kept as a branch. In the terminal,
   `MESSAGE_POSITION_COMPACTED` (33), and a checkpoint exported afterwards
   holds the edited Conversation, so a restored Session continues from it
   (see [Edit and rerun](AGENTCORE_BINARY_ABI.md#edit-and-rerun)).
-
-This is an internal-consistency contract, not yet a wire-protocol stability
-promise: the HTTP endpoint shapes remain pre-1.0.
 
 ## CLI surface
 
@@ -289,12 +187,11 @@ session reads from it and the names it ignores, never a value; `state` one of
 a `local_config` line, and neither affects `--strict`. `--strict` exits 1 when a binary is unresolved or mismatched, when a
 resolved kernel's `provenance` is not `true`, or when an environment override
 was present but resolved nothing (`source: "env"` with a null `resolved_path`);
-an unpinned kernel or daemon may be absent. `metacodes terminal-setup
-[--dry-run | --restore] [--terminal <name>] [--keybindings <file>]` (also
-`/terminal-setup` in the TUI) binds Shift+Enter to a newline in Apple Terminal
-or a VS Code build's `keybindings.json` after a backup, and `--restore` undoes
-it; it exits 0 when the terminal is set up or needs nothing, 1 when it left the
-terminal alone or the change failed ([TERMINAL_SETUP.md](TERMINAL_SETUP.md)).
+an unpinned kernel or daemon may be absent. `metacodes terminal-setup --restore
+[--terminal <name>] [--keybindings <file>]` undoes key bindings installed by a
+previous version. It exits 0 when restoration succeeds or nothing is recorded,
+1 on a restore failure, and 2 for a usage error
+([TERMINAL_SETUP.md](TERMINAL_SETUP.md)).
 `metacodes mcp login <server> [--no-browser]` runs the MCP OAuth flow for a
 configured HTTP or SSE server and stores the token that later sessions send and
 refresh; `metacodes mcp logout <server>` forgets it and `metacodes mcp list`
@@ -321,24 +218,10 @@ the executable belongs to up to date from the source its install record names
     `repair` or `rebuild`.
   - `source` is `release` or `checkout`.
   - A failure prints `{action: "refused", error}` instead.
-`metacodes --resume <id>` starts the interactive REPL as a stored session of
-the working directory (an id or id prefix, the rule `/resume <id>` uses) with
-its conversation, goal and model route restored, and appends to the same
-transcript. Under the banner, the REPL writes the conversation back as its
-turns were shown live (`src/repl/replay.zig`: prompts, replies and tool cards
-through the live rendering paths; at most the last 200 messages, opening at a
-typed prompt, after a dim count of the rest; Ctrl+O shows all of it). What the
-live view never showed stays out: messages the runtime wrote itself
-(`Message.origin = host`, recorded as `"origin":"host"` in `transcript.jsonl`;
-a record without the key is the user's or the model's) and text blocks that
-ride along with tool results. `/resume <id>` clears the screen and does the
-same, then shows the command and what it restored. An id that names no session exits 1 before the REPL starts;
-`--resume` beside `-p`/`-`, `--resume-response`, `--session`,
-`--teammate` or `--dump-*` is a usage error. When an interactive session whose
-transcript is on disk exits (`/exit`, Ctrl+C or Ctrl+D twice, EOF), the REPL
-prints, dim, `Resume this session with:` and `metacodes --resume <id>` (with
-`--state-dir <dir>` when that flag chose the state root); a session that never
-persisted a turn, and a run whose stdin is not a terminal, print nothing. Every
+Invoking `metacodes` without arguments prints help. A process that suspends
+with `--suspendable` writes its session ID and can be continued by a new process
+using `--session <id> --resume-response <json>` with the same state directory.
+The response may also be supplied as `@file`. Every
 NDJSON line is valid UTF-8: string fields go through the repository's JSON
 encoder, which replaces bytes that are not valid UTF-8 (binary tool output,
 such as a PDF read with `Read`) with U+FFFD while `content_bytes` and
@@ -400,7 +283,7 @@ during a consultation surfaces as `Aborted`, never as a fallback.
 
 ### Model tiers
 
-Subagent/skill model pins and `/model` accept tier names — `low`, `mid`,
+Subagent and skill model pins accept tier names — `low`, `mid`,
 `high` (legacy aliases `haiku`/`sonnet`/`opus` map to the same tiers) — which
 resolve against the current provider's tier table in
 `~/.metacodes/config.json`:
@@ -428,10 +311,8 @@ K2.6/K3 three levels; DeepSeek two levels; MiniMax M3 three states
 `disabled|adaptive|enabled` with M2.x always-on; Anthropic adaptive thinking
 plus `output_config.effort`, whose vocabulary is `low|medium|high|max` — the
 canonical top level `xhigh` is sent as `max` on every Anthropic-compatible
-route, including GLM behind the Metask gateway). The picker and the `/model`
-status line label that top level with the route's own word: a catalog whose
-`capabilities.effort` declares `max` shows `max`, one that declares `xhigh`
-(or nothing) shows `xhigh`; `--reasoning-effort max` is accepted as an alias.
+route, including GLM behind the Metask gateway). `--reasoning-effort max`
+is accepted as an alias for `xhigh`.
 Explicit `effort:` in an agent definition wins over the tier's effort. The
 built-in `Explore` agent pins the `low` tier.
 
@@ -812,12 +693,10 @@ AgentCore revision 28 does not carry them.
 ### Permission modes the settings disable
 
 `disableBypassPermissionsMode` and `disableAutoMode`, in any settings layer,
-are hard constraints on the mode work runs under, not only on what `/mode`
-accepts:
+constrain permission modes at startup and during mode changes.
 
 - **Mode switches are refused.** A session that starts in such a mode is
-  downgraded to `default` when the settings load. The REPL `/mode` command
-  refuses a disabled mode.
+  downgraded to `default` when the settings load.
   `AgentSession.setPermissionMode` returns `error.PermissionModeDisabled` and
   AgentCore `update_permission_mode` returns `INVALID_ARGUMENT` (diagnostic
   `PermissionModeDisabled`); the mode, policy generation and grants stay as
@@ -887,7 +766,7 @@ request rather than that the user refused it. A Zig Host that switches over
 `RequestOutcome` handles the fourth value. A frame of another version, or a malformed one,
 is answered `{"v":1,"type":"capabilities_refused","reason":"<RefusalError>"}`
 and changes nothing. A frontend that never declares receives every request,
-as before; in-process backends (TUI, headless, the C ABI) never declare.
+as before; in-process backends (headless and the C ABI) never declare.
 `frontend_capabilities.route` is the routing rule and `Slot` the per-Session
 holder a Host keeps.
 
@@ -1009,8 +888,7 @@ leaving every Host to rebuild them:
   The permission mode is journaled by a config sink on the Session's
   permission context, so a mode set any other way is journaled too.
 - `command(.{ .set_route = route })` (issue #16, #445) moves the Session
-  onto a route the Host's provider control plane bound, as the CLI's
-  `/model` commit does (`App.bindCommittedSelection`). `Route.binding` is
+  onto a route the Host's provider control plane bound. `Route.binding` is
   what the Session sends with (`AgentSession.Route`: provider kind, OpenAI
   protocol, auth scheme, dialect, credential, model, base URL); the rest
   says who the route is (`provider_id`, `channel_id`, `protocol`,
@@ -1383,10 +1261,7 @@ up; the Run is not cut off. `AgentSession` owns a goal (`setGoal`,
 is the same core `swarm` seam: with `RuntimeConfigV1.enable_teams` the lead and
 member Sessions carry a `SessionHostConfigV1.team`, delegation records a spawn
 request the Host fulfils, and the `team` table's `describe` and `poll` read the
-roster and take a teammate's reply. The CLI's `/goal` and `/loop` use the
-same rules, and every CLI entry point - REPL, web, daemon, forked Skills,
-headless - charges the App's goal through `session_service.buildRunOptions` and
-writes goal.json when it changes.
+roster and take a teammate's reply.
 
 ## Errors and ownership
 

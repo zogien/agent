@@ -168,7 +168,7 @@ const Fixture = struct {
         try self.app.conversation.appendText(.user, prompt);
         var jobs = try cc.job_registry.JobRegistry.init(std.testing.allocator);
         defer jobs.deinit();
-        var options = cc.session_service.buildRunOptions(self.app, null);
+        var options = cc.repl_headless.buildOptions(self.app, null, null, null, false, null, null, null);
         options.max_turns = 4;
         options.jobs = &jobs;
         var sink = cc.writer_backend.WriterBackend.initNull();
@@ -296,16 +296,6 @@ test "L2 skillOverrides: listing, admission, and a /skills change reach the requ
         const entries = parsed.value.object.get("skillOverrides").?.object;
         try std.testing.expectEqualStrings("off", entries.get("alpha").?.string);
         try std.testing.expect(entries.get("gamma") == null);
-    }
-
-    {
-        // The plain `/skills` report names every non-default state.
-        var out: std.Io.Writer.Allocating = .init(a);
-        defer out.deinit();
-        try cc.repl_loop.writeSkillsReport(&out.writer, app);
-        try expectContains(out.written(), "/alpha\x1b[0m \x1b[2m(user · off)");
-        try expectContains(out.written(), "/beta\x1b[0m \x1b[2m(user · name-only)");
-        try expectContains(out.written(), "/gamma\x1b[0m \x1b[2m(user)");
     }
 
     try fx.run("use it again");

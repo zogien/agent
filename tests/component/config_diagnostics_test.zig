@@ -137,34 +137,12 @@ const Fixture = struct {
     fn path(self: *Fixture, base: []const u8, rel: []const u8) ![]const u8 {
         return std.fmt.allocPrint(self.arena.allocator(), "{s}/{s}", .{ base, rel });
     }
-
-    /// What `/hooks`, `/skills` or `/agents` prints.
-    fn report(
-        self: *Fixture,
-        comptime write: fn (*std.Io.Writer, *const cc.app_module.App) std.Io.Writer.Error!void,
-    ) ![]const u8 {
-        var out: std.Io.Writer.Allocating = .init(self.arena.allocator());
-        try write(&out.writer, self.app);
-        return out.written();
-    }
-
-    fn banner(self: *Fixture) ![]const u8 {
-        const buf = try self.arena.allocator().alloc(u8, 160);
-        return cc.repl_loop.formatConfigProblems(buf, self.app.configProblems());
-    }
 };
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
     if (std.mem.indexOf(u8, haystack, needle) == null) {
         std.debug.print("\n--- expected to find ---\n{s}\n--- in ---\n{s}\n", .{ needle, haystack });
         return error.TestExpectedSubstring;
-    }
-}
-
-fn expectLacks(haystack: []const u8, needle: []const u8) !void {
-    if (std.mem.indexOf(u8, haystack, needle) != null) {
-        std.debug.print("\n--- did not expect ---\n{s}\n--- in ---\n{s}\n", .{ needle, haystack });
-        return error.TestUnexpectedSubstring;
     }
 }
 
@@ -248,20 +226,7 @@ test "hooks: every malformed piece is reported; the well-formed hooks load and r
         try std.testing.expectEqual(hooks_mod.HookDecision.block, result.decision);
     }
 
-    // `/hooks` shows the hooks in effect and every problem with its location.
-    const out = try fx.report(cc.repl_loop.writeHooksReport);
-    try expectContains(out, "PreToolUse");
-    try expectContains(out, "[Bash] cat >/dev/null; echo 'blocked by policy' >&2; exit 2");
-    try expectContains(out, "(timeout 30 s)");
-    try expectContains(out, "./remember.sh");
-    try expectContains(out, "Problems (9):");
-    for (expected) |want| try expectContains(out, want.location);
-    try expectContains(out, "SessionStart is a Claude Code event metacodes does not run");
-    try expectContains(out, "none of this file's hooks load");
-
-    // The banner and `/doctor` count them and point at `/hooks`.
     try std.testing.expectEqual(@as(usize, 9), app.configProblems().hooks);
-    try std.testing.expectEqualStrings("config issues: 9 hooks · see /hooks", try fx.banner());
 }
 
 test "hooks: well-formed settings report nothing; no settings say where hooks go" {
@@ -283,11 +248,7 @@ test "hooks: well-formed settings report nothing; no settings say where hooks go
         try std.testing.expectEqualStrings("./check.sh", set.pre_tool_use[0].commands[0]);
         try std.testing.expectEqualStrings("./lint.sh", set.post_tool_use[0].commands[0]);
         try std.testing.expectEqualStrings("./snapshot.sh", set.pre_compact[0].commands[0]);
-        const out = try fx.report(cc.repl_loop.writeHooksReport);
-        try expectContains(out, "[Write|Edit] ./lint.sh");
-        try expectLacks(out, "Problems (");
         try std.testing.expectEqual(@as(usize, 0), fx.app.configProblems().total());
-        try std.testing.expectEqualStrings("", try fx.banner());
     }
     {
         var fx: Fixture = undefined;
@@ -295,9 +256,6 @@ test "hooks: well-formed settings report nothing; no settings say where hooks go
         defer fx.deinit();
         try std.testing.expect(fx.app.hooks == null);
         try std.testing.expectEqual(@as(usize, 0), fx.app.hook_diagnostics.?.items().len);
-        const out = try fx.report(cc.repl_loop.writeHooksReport);
-        try expectContains(out, "No hooks configured.");
-        try expectContains(out, "PreToolUse, PostToolUse, Stop, PreCompact, PostCompact");
     }
 }
 
@@ -327,15 +285,7 @@ test "skills: a Skill without a description loads as before and is reported" {
     try expectContains(listing, "- fallback: Summarize the release notes\n");
     try expectContains(listing, "- described: Review the staged diff\n");
 
-    // `/skills` names both, and only them.
-    const out = try fx.report(cc.repl_loop.writeSkillsReport);
-    try expectContains(out, "No description (2):");
-    try expectContains(out, "/fallback: SKILL.md has no `description`; listings show its first line instead: \"Summarize the release notes\"");
-    try expectContains(out, "/blank: SKILL.md has no `description`; listings say nothing about when to use it");
-    try expectLacks(out, "/described: SKILL.md has no");
-
     try std.testing.expectEqual(@as(usize, 2), fx.app.configProblems().skills);
-    try std.testing.expectEqualStrings("config issues: 2 skills · see /skills", try fx.banner());
 }
 
 test "skills: described Skills report nothing" {
@@ -348,10 +298,6 @@ test "skills: described Skills report nothing" {
     const snapshot = fx.app.skill_runtime.snapshot orelse return error.NoCatalog;
     try std.testing.expect(snapshot.findByInvocation("described") != null);
     try std.testing.expect(snapshot.findByInvocation("folded") != null);
-    const out = try fx.report(cc.repl_loop.writeSkillsReport);
-    try expectContains(out, "Skills (2):");
-    try expectLacks(out, "No description");
-    try expectLacks(out, "Blank name");
     try std.testing.expectEqual(@as(usize, 0), fx.app.configProblems().skills);
 }
 
@@ -393,20 +339,8 @@ test "skills: a blank name or description reads as absent, falls back, and is re
     try expectContains(skill_tool.description, "- demo: Use for demonstrating an empty frontmatter.\n");
     try expectContains(skill_tool.description, "- described: Review the staged diff\n");
 
-    // `/skills` says which field was blank and what stood in for it.
-    const out = try fx.report(cc.repl_loop.writeSkillsReport);
-    try expectContains(out, "No description (2):");
-    try expectContains(out, "/demo: SKILL.md has a blank `description`; listings show its first line instead: \"Use for demonstrating an empty frontmatter.\"");
-    try expectContains(out, "/hollow: SKILL.md has a blank `description`; listings say nothing about when to use it");
-    try expectContains(out, "Blank name (1):");
-    try expectContains(out, "/demo: SKILL.md has a blank `name`; the directory name stands in");
-    try expectLacks(out, "/described: SKILL.md has");
-    try expectLacks(out, "/hollow: SKILL.md has a blank `name`");
-    try expectLacks(out, "Not loaded");
-
     // Counted once per Skill, however many fields were blank.
     try std.testing.expectEqual(@as(usize, 2), fx.app.configProblems().skills);
-    try std.testing.expectEqualStrings("config issues: 2 skills · see /skills", try fx.banner());
 }
 
 test "agents: a broken file and a missing description are reported; the rest load" {
@@ -431,15 +365,7 @@ test "agents: a broken file and a missing description are reported; the rest loa
     try std.testing.expectEqualStrings(broken_path, agents.load_failures.items[0].path);
     try std.testing.expectEqualStrings("InvalidAgentEffort", agents.load_failures.items[0].reason);
 
-    const out = try fx.report(cc.repl_loop.writeAgentsReport);
-    try expectContains(out, "No description (1):");
-    try expectContains(out, "silent: no `description` in ");
-    try expectContains(out, "Not loaded (1):");
-    try expectContains(out, "broken.md: InvalidAgentEffort");
-    try expectLacks(out, "reviewer: no `description`");
-
     try std.testing.expectEqual(@as(usize, 2), fx.app.configProblems().agents);
-    try std.testing.expectEqualStrings("config issues: 2 agents · see /agents", try fx.banner());
 }
 
 test "agents: well-formed agents report nothing" {
@@ -451,23 +377,5 @@ test "agents: well-formed agents report nothing" {
     try std.testing.expect(fx.app.agents.find("reviewer") != null);
     try std.testing.expectEqual(@as(usize, 0), fx.app.agents.load_failures.items.len);
     try std.testing.expectEqual(@as(usize, 0), fx.app.agents.missingDescriptionCount());
-    const out = try fx.report(cc.repl_loop.writeAgentsReport);
-    try expectContains(out, "reviewer");
-    try expectLacks(out, "No description");
-    try expectLacks(out, "Not loaded");
     try std.testing.expectEqual(@as(usize, 0), fx.app.configProblems().total());
-}
-
-test "banner: every kind together names each command once" {
-    var fx: Fixture = undefined;
-    try fx.setup(&.{
-        .{ .path = "home/.claude/settings.json", .data = "{\"hooks\":{\"SessionStart\":[]}}" },
-        .{ .path = "home/.claude/skills/fallback/SKILL.md", .data = "---\nname: fallback\n---\nFirst line\n" },
-        .{ .path = "home/.claude/agents/silent.md", .data = "---\nname: silent\n---\nbody\n" },
-    });
-    defer fx.deinit();
-    try std.testing.expectEqualStrings(
-        "config issues: 1 hook, 1 skill, 1 agent · see /hooks /skills /agents",
-        try fx.banner(),
-    );
 }

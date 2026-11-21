@@ -51,33 +51,6 @@ test "L2 goal: set active goal, account tokens, cross budget, persist and reload
     try std.testing.expectEqual(cc.core_goal.Status.budget_limited, loaded.current.?.status);
 }
 
-test "L2 loop: continuation gate rejects non-idle and non-active goal states" {
-    const base = cc.repl_loop.LoopGateInput{
-        .loop_enabled = true,
-        .loop_remaining = 2,
-        .queued_count = 0,
-        .goal_status = .active,
-        .aborted = false,
-    };
-    try std.testing.expect(cc.repl_loop.shouldRunLoopContinuationInput(base));
-
-    var queued = base;
-    queued.queued_count = 1;
-    try std.testing.expect(!cc.repl_loop.shouldRunLoopContinuationInput(queued));
-
-    var paused = base;
-    paused.goal_status = .paused;
-    try std.testing.expect(!cc.repl_loop.shouldRunLoopContinuationInput(paused));
-
-    var complete = base;
-    complete.goal_status = .complete;
-    try std.testing.expect(!cc.repl_loop.shouldRunLoopContinuationInput(complete));
-
-    var exhausted = base;
-    exhausted.loop_remaining = 0;
-    try std.testing.expect(!cc.repl_loop.shouldRunLoopContinuationInput(exhausted));
-}
-
 test "L2 goal: clear removes persisted goal file" {
     const a = std.testing.allocator;
     var dir_buf: [512]u8 = undefined;

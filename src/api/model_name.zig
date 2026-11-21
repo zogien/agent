@@ -44,7 +44,7 @@ test "model name matching is ASCII case insensitive and bounded" {
 // The behavioural half of this guard, that every consumer answers the same
 // for either case, is `model_name_consumers_test.zig`. It cannot live here: the
 // provider kernel reaches this file through `util/pricing.zig`, so every test
-// in it compiles into `test:provider` and `test:picker`, and that test imports
+// in it compiles into `test:provider`, and that test imports
 // the system prompt and, through it, the whole tool set.
 test "model routing source guard rejects direct case-sensitive model matching" {
     const sources = [_][]const u8{
@@ -54,8 +54,8 @@ test "model routing source guard rejects direct case-sensitive model matching" {
         @embedFile("dialects/qwen.zig"),          @embedFile("dialects/minimax.zig"),      @embedFile("dialects/mistral.zig"),
         @embedFile("dialects/openrouter.zig"),    @embedFile("dialects/gemini.zig"),       @embedFile("dialects/registry.zig"),
         @embedFile("dialects/openai_compat.zig"), @embedFile("model_context.zig"),         @embedFile("../util/pricing.zig"),
-        @embedFile("../util/model.zig"),          @embedFile("../core/system_prompt.zig"), @embedFile("../repl/model_command.zig"),
-        @embedFile("../main.zig"),                @embedFile("../plugin/runtime.zig"),
+        @embedFile("../util/model.zig"),          @embedFile("../core/system_prompt.zig"), @embedFile("../main.zig"),
+        @embedFile("../plugin/runtime.zig"),
     };
     const forbidden = [_][]const u8{
         "std.mem.indexOf(u8, model", "std.mem.eql(u8, model", "std.mem.startsWith(u8, model", "std.mem.eql(u8, e.model_id",

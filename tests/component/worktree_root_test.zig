@@ -246,7 +246,7 @@ const Fixture = struct {
         try self.app.conversation.appendText(.user, prompt);
         var jobs = try cc.job_registry.JobRegistry.init(std.testing.allocator);
         defer jobs.deinit();
-        var options = cc.session_service.buildRunOptions(self.app, null);
+        var options = cc.repl_headless.buildOptions(self.app, null, null, null, false, null, null, null);
         options.max_turns = 8;
         options.emit_tool_cards = true;
         options.jobs = &jobs;
@@ -303,7 +303,7 @@ test "L2 worktree: a later call, the next Run and Bash follow EnterWorktree; Exi
     try std.testing.expectEqualStrings(worktree, fx.app.permission_ctx.match_ctx.cwd);
 
     // Run 2: assembled from the App, it starts in the worktree.
-    const next = cc.session_service.buildRunOptions(fx.app, null);
+    const next = cc.repl_headless.buildOptions(fx.app, null, null, null, false, null, null, null);
     try std.testing.expectEqualStrings(worktree, next.cwd_abs);
     try expectContains(next.system_prompt.?, worktree);
     try expectContains(next.system_prompt.?, WORKTREE_SWITCHED_MODEL);

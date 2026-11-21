@@ -231,7 +231,7 @@ const Session = struct {
     fn turn(self: *Session, host: *Host) !cc.agent_loop.StopReason {
         const app = self.app;
         try app.conversation.appendText(.user, "set the conveyor speed");
-        var options = cc.session_service.buildRunOptions(app, null);
+        var options = cc.repl_headless.buildOptions(app, null, null, null, false, null, null, null);
         options.max_turns = 3;
         options.ui_requester = host.requester();
         app.permission_ctx.ui_requester = host.requester();

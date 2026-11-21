@@ -17,7 +17,8 @@ The installed `metacodes -p` against a loopback mock provider in this process
   5. controls: an answer that recovers on the last continuation and a plain
      `end_turn` exit 0 with no notice; an HTTP 402 keeps its own diagnostic and
      does not gain this one;
-  6. NDJSON streaming and a successful cross-process resume.
+  6. NDJSON streaming and a successful cross-process resume;
+  7. an ignored hangup does not end the Run (POSIX).
 
 Run by `zig build test:product` (METACODES_NATIVE_E2E_BIN set by build.zig);
 by hand: `zig build && python3 tests/e2e/headless_stop_notice_e2e.py`.
@@ -186,7 +187,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(entry[0])
             self.wfile.flush()
             server.responding.set()
-            server.release.wait(TIMEOUT)
+            if server.release.wait(TIMEOUT) and len(entry) == 2:
+                self.wfile.write(entry[1])
             return
         self.wfile.write(entry)
 
@@ -318,6 +320,34 @@ def streaming_and_resume(runner: Runner) -> None:
     print("ok: streamed NDJSON and cross-process resume")
 
 
+def ignored_hangup(runner: Runner) -> None:
+    if os.name != "posix":
+        print("skip: ignored hangup (POSIX signals)")
+        return
+    reply = anthropic("survived hangup", False)
+    at = reply.index(b'data: {"type": "message_delta"')
+    runner.mock.play([(reply[:at], reply[at:])])
+    with subprocess.Popen(
+        ["sh", "-c", 'trap "" HUP; exec "$@"', "sh", *runner.argv("-p", "answer", "--json")],
+        cwd=runner.tmp / "work", env=runner.env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    ) as proc:
+        try:
+            check(runner.mock.responding.wait(TIMEOUT), "ignored hangup: no request reached the mock")
+            proc.send_signal(signal.SIGHUP)
+            runner.mock.release.set()
+            code, out, err = runner.wait(proc)
+        finally:
+            runner.mock.release.set()
+            if proc.poll() is None:
+                proc.kill()
+    check(code == 0 and err == "", f"ignored hangup: exit {code}, stderr {err!r}")
+    result = json.loads(out)
+    check(result["stop_reason"] == "end_turn" and result["text"] == "survived hangup",
+          f"ignored hangup: {out!r}")
+    print("ok: ignored hangup survives a headless Run")
+
+
 def interrupted(runner: Runner) -> None:
     if os.name == "nt":  # no way to deliver SIGINT/SIGTERM to one child here
         print("skip: interrupted (POSIX signals)")
@@ -387,6 +417,7 @@ def main() -> int:
         exhaustion_plain_and_json(runner)
         exhaustion_on_resume(runner)
         streaming_and_resume(runner)
+        ignored_hangup(runner)
         interrupted(runner)
         controls(runner)
         print("headless stop notice e2e: OK")

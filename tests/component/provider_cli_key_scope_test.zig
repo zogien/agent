@@ -224,7 +224,7 @@ test "L2 --api-key scope: the Metask key never reaches another provider's pick" 
 
     // `/model use` the relay's model. The relay has no credential of its own
     // here, so the only key available is the Metask one.
-    const outcome = cc.repl_picker_host.useSelector(app, "relay-model");
+    const outcome = @import("offer_fixture.zig").useSelector(app, "relay-model");
     try sendOneTurn(app);
 
     // Whatever the commit did, no byte of the Metask key went to the relay.
@@ -263,7 +263,7 @@ test "L2 --api-key scope: another provider's pick uses that provider's own key, 
     const app = try App.init(std.testing.allocator, io_runtime.io(), config, METASK_KEY);
     defer app.deinit();
 
-    try std.testing.expect(cc.repl_picker_host.useSelector(app, "relay-model") == .switched);
+    try std.testing.expect(@import("offer_fixture.zig").useSelector(app, "relay-model") == .switched);
     try sendOneTurn(app);
 
     try expectNeverSent(relay, METASK_KEY);
@@ -294,7 +294,7 @@ test "L2 --api-key scope: on the historical path a Metask pick still authenticat
     try host.ingestMetask(try originOf(allocator, gateway), GATEWAY_MODELS, .messages_and_chat);
     const offer = try offerIdText(app, "metask", "kimi-k3", "anthropic_messages");
 
-    try std.testing.expect(cc.repl_picker_host.useSelector(app, &offer) == .switched);
+    try std.testing.expect(@import("offer_fixture.zig").useSelector(app, &offer) == .switched);
     try sendOneTurn(app);
 
     const captured = gateway.lastRequest() orelse return error.NoRequestCaptured;
@@ -333,13 +333,13 @@ test "L2 --api-key scope: --provider X --api-key is X's key, for X's picks only"
     // A Metask pick cannot borrow the relay's key. Refused before any request
     // exists, so nothing is dialled.
     const metask_offer = try offerIdText(app, "metask", "claude-sonnet-4-6", "anthropic_messages");
-    const refused = cc.repl_picker_host.useSelector(app, &metask_offer);
+    const refused = @import("offer_fixture.zig").useSelector(app, &metask_offer);
     try std.testing.expect(refused == .failed);
     try std.testing.expectEqualStrings("MissingCredentials", refused.failed);
     try std.testing.expectEqualStrings("relay-model", app.activeModel());
 
     // The relay's own other model keeps working with the flag.
-    try std.testing.expect(cc.repl_picker_host.useSelector(app, "relay-model-b") == .switched);
+    try std.testing.expect(@import("offer_fixture.zig").useSelector(app, "relay-model-b") == .switched);
     try sendOneTurn(app);
     const captured = relay.lastRequest() orelse return error.NoRequestCaptured;
     try std.testing.expect(std.mem.startsWith(u8, requestLine(captured), "POST /relay/v1/chat/completions "));

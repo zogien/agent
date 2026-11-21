@@ -14,10 +14,8 @@ drives the real binary with a scripted loopback provider and checks two things:
    of WINDOW samples, so a transient (a worker thread whose stack is committed
    at the moment of one sample) cannot pass for growth, while a leak, which
    only grows, still shows.
-2. hygiene: a REPL session with tool turns, a forced auto-compaction and slash
-   commands exits 0 with no panic and, on a Debug binary, no DebugAllocator
-   leak or invalid-free report (the REPL path returns from `main`, so the
-   allocator checks run at exit).
+2. hygiene: a headless Run reads stdin and uses tools. Normal exit runs
+   cleanup, so a Debug binary can report allocator leaks and invalid frees.
 
 usage: session_memory_smoke.py --binary zig-out/bin/metacodes
 """
@@ -50,7 +48,7 @@ READ_TURNS = 60
 WARMUP_TURNS = 10
 WINDOW = 5
 FILE_BYTES = 12000
-CRASH = re.compile(r"panic|Segmentation fault|reached unreachable|error\(DebugAllocator\)|Invalid free|Double free")
+CRASH = re.compile(r"panic|Segmentation fault|reached unreachable|error\(DebugAllocator\)|memory address .* leaked:|Invalid free|Double free")
 
 
 def _memory_bytes(pid: int) -> Optional[int]:
@@ -218,43 +216,38 @@ def hygiene_check(binary: Path) -> List[str]:
         ("TaskList", {}),
     ]
 
-    def respond(n: int, request: Dict) -> bytes:
-        if not request.get("tools"):
-            return _final_sse(n, "SUMMARY: smoke/a.txt was written, read and edited.")
-        messages = request.get("messages", [])
-        steps = 0
-        for message in reversed(messages):
-            content = message.get("content")
-            if isinstance(content, str):
-                break
-            results = sum(1 for block in content or [] if block.get("type") == "tool_result")
-            if message.get("role") == "user" and not results:
-                break
-            steps += results
-        if steps < len(sequence):
-            name, args = sequence[steps]
-            return _tool_sse(n, f"smoke-{n}", name, args)
-        return _final_sse(n, "turn finished")
+    step = 0
+
+    def respond(n: int, _request: Dict) -> bytes:
+        nonlocal step
+        if step == len(sequence):
+            return _final_sse(n, "turn finished")
+        name, args = sequence[step]
+        step += 1
+        return _tool_sse(n, f"smoke-{n}", name, args)
 
     provider = Provider(respond)
     try:
-        with tempfile.TemporaryDirectory(prefix="metacodes-memory-smoke-repl-") as directory:
-            completed = _run(
-                binary, provider, Path(directory), [],
-                "first turn\n/cost\nsecond turn\n/clear\nthird turn\n/exit\n",
-                {"METACODES_FORCE_COMPACT_AT": "20000", "METACODES_FORCE_COMPACT_KEEP": "4"},
-            )
+        with tempfile.TemporaryDirectory(prefix="metacodes-memory-smoke-headless-") as directory:
+            work = Path(directory)
+            completed = _run(binary, provider, work, ["-"], "Perform the smoke test.\n", {})
+            output = work / "smoke" / "a.txt"
+            edited = output.is_file() and output.read_text(encoding="utf-8") == "alpha\ngamma\n"
     finally:
         provider.close()
     stderr = completed.stderr.decode("utf-8", "replace")
     problems = []
     if completed.returncode != 0 or provider.error:
-        problems.append(f"REPL session exited {completed.returncode} ({provider.error})")
+        problems.append(f"headless session exited {completed.returncode} ({provider.error})")
+    if step != len(sequence) or not edited:
+        problems.append(f"headless hygiene: {step}/{len(sequence)} tool turns, file edited: {edited}")
+    if completed.stdout != b"turn finished\n" and completed.stdout != b"turn finished\r\n":
+        problems.append(f"headless hygiene: the final answer was not returned: {completed.stdout[-200:]!r}")
     crash = CRASH.search(stderr)
     if crash:
         start = max(0, crash.start() - 200)
-        problems.append(f"REPL session reported {crash.group(0)!r}: {stderr[start:start + 1200]}")
-    print(f"hygiene: REPL exit {completed.returncode}, {provider.requests} requests")
+        problems.append(f"headless session reported {crash.group(0)!r}: {stderr[start:start + 1200]}")
+    print(f"hygiene: headless exit {completed.returncode}, {provider.requests} requests")
     return problems
 
 

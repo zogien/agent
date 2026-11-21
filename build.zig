@@ -2402,22 +2402,6 @@ pub fn build(b: *std.Build) void {
     subsystem_boundary_step.dependOn(&subsystem_boundary_run.step);
     subsystem_boundary_step.dependOn(&addTestRunArtifact(b, subsystem_boundary_unit).step);
 
-    // test:picker —— issue #16 cross-UI model picker, in isolation.
-    // Same shape as `test:provider`, and run by `test` for the same reason: it
-    // proves the picker builds standalone. The rule that it may reach only the
-    // provider kernel and the terminal theme is enforced by
-    // `subsystem:boundary`.
-    const picker_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/picker_test_root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    addPlatform(b, picker_test_mod);
-    const picker_test = b.addTest(.{ .name = "picker-test", .root_module = picker_test_mod });
-    const picker_test_step = b.step("test:picker", "Test the cross-UI model picker in isolation (issue #16)");
-    picker_test_step.dependOn(&addTestRunArtifact(b, picker_test).step);
-
     // test:platform —— 可移植抽象层(sync/process/fs/signal/rng/paths)。platform 成独立命名模块后
     // 其测试不再聚合进 cc-test，故独立入口，并由 `test` 依赖。fork 真子进程的测试需
     // METACODES_PROC_TEST=1,`test` 里不设 —— 并行的 build runner 下 fork 会崩(见 process.zig
@@ -2544,7 +2528,6 @@ pub fn build(b: *std.Build) void {
     units_test_step.dependOn(subsystem_boundary_step);
     units_test_step.dependOn(provider_test_step);
     units_test_step.dependOn(mcp_test_step);
-    units_test_step.dependOn(picker_test_step);
     units_test_step.dependOn(lsp_test_step);
     units_test_step.dependOn(platform_test_step);
     const tinykg_contract_test_cmd = b.addSystemCommand(&.{
@@ -2679,19 +2662,6 @@ pub fn build(b: *std.Build) void {
     const terminal_io_test_step = b.step("test:terminal-io", "Test that REPL terminal reads retry EINTR and writes go through pfs.writeAll");
     terminal_io_test_step.dependOn(&terminal_io_test_cmd.step);
     units_test_step.dependOn(&terminal_io_test_cmd.step);
-    // Only the Renderer writes past the inline viewport: no ED 1/2/3 outside
-    // RenderRegion.resetScreen, no cursor save/restore, no direct terminal
-    // write outside the listed functions (doc/TUI_VIEWPORT_OWNERSHIP.md).
-    const scrollback_test_cmd = b.addSystemCommand(&.{
-        if (@import("builtin").os.tag == .windows) "python" else "python3",
-        "-m",
-        "unittest",
-        "scripts.tests.test_scrollback_discipline",
-        "-v",
-    });
-    const scrollback_test_step = b.step("test:scrollback", "Test that only the TUI Renderer erases the screen and writes the scrollback");
-    scrollback_test_step.dependOn(&scrollback_test_cmd.step);
-    units_test_step.dependOn(&scrollback_test_cmd.step);
     // No built-in destination that is on by default is cleartext to a public
     // host (#474): the product's `http://` literals name loopback only, except
     // the Jev default no host takes, and the CLI's decision stays off.
@@ -3441,35 +3411,8 @@ pub fn build(b: *std.Build) void {
         kg_experience_feedback_step.dependOn(&run_t.step);
     }
 
-    // 注:TTY 渲染测试(tests/tty/)用独立 python runner 跑,**不接 zig build**——
-    // PTY(pty.fork)在 zig build-runner 的进程/stdio 监管下时序不稳(直接跑 12/12 全过,
-    // 经 build SystemCommand 跑会大面积假失败)。跑法:
-    //   zig build && python3 tests/tty/run_tty_tests.py --bin zig-out/bin/metacodes-debug
-    // 这与 e2e(走 shell 而非 zig build)同理。CI 的 `TTY (Linux)` job 就是这样跑的
-    // (ci.yml);Windows 走下面的 windows:tty。
-
-    // test:e2e-tty —— tty 真模型工具 e2e(cases/test_e2e_*.py)。与渲染测试不同:这些用例
-    // 自建 PTY、断言靠落盘的 transcript.jsonl(非 build-runner 捕获的屏幕字节),所以经
-    // SystemCommand 跑不受 PTY 时序假失败影响(已实测 stdin=/dev/null 下通过)。
-    // 打真模型(凭证来自 ~/.metacodes/auth.json 或 METASK_API_KEY,无硬编码)→ 默认应设 TTY_SKIP_MODEL=1
-    // 跳过(CI/离线);显式 `TTY_SKIP_MODEL= zig build test:e2e-tty` 才真打模型、真副作用
-    // (真联网/真排程/真发通知/真改 git)。先 build debug 二进制 + mock_mcp_server。
-    const e2e_tty_step = b.step("test:e2e-tty", "Run tty real-model tool e2e (打真模型, 设 TTY_SKIP_MODEL=1 跳过)");
-    // python 命令名:Windows 官方发行版只有 python(无 python3 别名);POSIX 惯例 python3。
-    const python_exe = if (@import("builtin").os.tag == .windows) "python" else "python3";
-    const tty_bin = if (@import("builtin").os.tag == .windows) "zig-out/bin/metacodes-debug.exe" else "zig-out/bin/metacodes-debug";
-    const e2e_tty_cmd = b.addSystemCommand(&.{
-        python_exe, "tests/tty/run_tty_tests.py",
-        "--bin",    tty_bin,
-        "-k",       "e2e_",
-    });
-    e2e_tty_cmd.step.dependOn(&install_debug.step);
-    e2e_tty_cmd.step.dependOn(&install_mock_mcp.step);
-    e2e_tty_cmd.step.dependOn(&install_replay.step);
-    e2e_tty_step.dependOn(&e2e_tty_cmd.step);
-
     const windows_gate_failure = if (!target_was_explicit)
-        b.addFail("windows:gate and windows:tty require explicit -Dtarget=x86_64-windows-gnu")
+        b.addFail("windows:gate requires explicit -Dtarget=x86_64-windows-gnu")
     else if (target.result.os.tag != .windows or !agentcore_target_is_native)
         b.addFail(b.fmt(
             "Windows native gate cannot run target {s} on host {s}",
@@ -3481,10 +3424,8 @@ pub fn build(b: *std.Build) void {
         "windows:gate",
         "Run native Windows platform keystones + CLI smoke (full suite: zig build test)",
     );
-    const windows_tty_step = b.step("windows:tty", "Run optional offline Windows ConPTY tests (requires python + pywinpty)");
     if (windows_gate_failure) |failure| {
         windows_gate_step.dependOn(&failure.step);
-        windows_tty_step.dependOn(&failure.step);
     } else {
         const windows_help_cmd = b.addRunArtifact(exe);
         windows_help_cmd.addArg("--help");
@@ -3506,16 +3447,6 @@ pub fn build(b: *std.Build) void {
         // comment above is guarding against.
         windows_gate_step.dependOn(lsp_test_step);
         windows_gate_step.dependOn(&windows_help_cmd.step);
-
-        const windows_tty_cmd = b.addSystemCommand(&.{
-            "python", "tests/tty/run_tty_tests.py",
-            "--bin",  "zig-out/bin/metacodes-debug.exe",
-        });
-        windows_tty_cmd.setEnvironmentVariable("TTY_SKIP_MODEL", "1");
-        windows_tty_cmd.step.dependOn(&install_debug.step);
-        windows_tty_cmd.step.dependOn(&install_mock_mcp.step);
-        windows_tty_cmd.step.dependOn(&install_replay.step);
-        windows_tty_step.dependOn(&windows_tty_cmd.step);
     }
 
     _ = b.addFmt(.{

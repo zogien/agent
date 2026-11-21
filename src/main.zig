@@ -7,7 +7,6 @@ const platform_signal = @import("platform").signal;
 const types = @import("types.zig");
 const client = @import("client.zig");
 const app_mod = @import("app.zig");
-const repl = @import("repl/loop.zig");
 const auth = @import("core/auth.zig");
 const api_keys_mod = @import("api/api_keys.zig");
 const oauth_login = @import("api/oauth_login.zig");
@@ -66,16 +65,6 @@ pub const std_options: std.Options = .{
     .signal_stack_size = if (std.debug.default_enable_segfault_handler) (std.Options{}).signal_stack_size else null,
     .allow_stack_tracing = !builtin.strip_debug_info and builtin.mode != .ReleaseSmall,
 };
-
-/// Panics go through the default handler (message, stack trace, abort), after
-/// the TUI writes the reply text its merge window still holds (#328).
-pub const panic = std.debug.FullPanic(panicAfterPendingOutput);
-
-fn panicAfterPendingOutput(msg: []const u8, first_trace_addr: ?usize) noreturn {
-    @branchHint(.cold);
-    _ = tui_render_region.flushPendingOnPanic();
-    std.debug.defaultPanic(msg, first_trace_addr);
-}
 
 // Public re-exports for tests and future consumers.
 pub const api_stream = @import("api/stream.zig");
@@ -238,7 +227,6 @@ pub const transcript = @import("core/transcript.zig");
 pub const repl_headless = @import("repl/headless.zig");
 pub const repl_next_step = @import("repl/next_step.zig"); // pub: the component test reads the route a /model pick moved to
 pub const repl_stream_json = @import("repl/stream_json_backend.zig");
-pub const repl_loop = @import("repl/loop.zig");
 pub const app_module = @import("app.zig");
 pub const app_route_strings = @import("app/route_strings.zig");
 pub const app_mcp_startup = @import("app/mcp_startup.zig");
@@ -309,14 +297,12 @@ pub const prompt_sections = @import("core/prompt_sections.zig");
 pub const user_context = @import("core/memory/user_context.zig");
 pub const memdir = @import("core/memory/memdir.zig");
 pub const util_log = @import("util/log.zig");
-pub const tui_render_region = @import("repl/tui/render_region.zig");
 pub const ui_event = @import("core/protocol/ui_event.zig");
 pub const ui_backend = @import("core/protocol/ui_backend.zig");
 pub const ui_request = @import("core/protocol/ui_request.zig");
 pub const wire = @import("core/protocol/wire.zig");
 pub const frontend_capabilities = @import("core/protocol/frontend_capabilities.zig");
 pub const session_id = @import("core/session_id.zig");
-pub const tui_backend = @import("repl/tui/tui_backend.zig");
 pub const writer_backend = @import("core/writer_backend.zig");
 pub const headless_backend = @import("core/headless_backend.zig");
 pub const suspend_state = @import("core/suspend_state.zig");
@@ -347,29 +333,9 @@ pub const project_harness_runtime = @import("formal/project_harness_runtime.zig"
 pub const project_rule_bundle = @import("core/project_rule_bundle.zig");
 pub const project_rule_gate = @import("core/project_rule_gate.zig");
 pub const project_rule_activation = @import("core/project_rule_activation.zig");
-pub const repl_msg_queue = @import("repl/msg_queue.zig");
-pub const repl_history = @import("repl/history.zig");
-pub const repl_user_echo = @import("repl/user_echo.zig");
-pub const repl_replay = @import("repl/replay.zig");
 pub const event_journal = @import("core/event_journal.zig");
 pub const session_host = @import("core/session_host.zig");
-pub const session_intent = @import("session_intent.zig"); // U11:UI 中立输入意图(issue #3)
-pub const session_service = @import("session_service.zig"); // U11:canonical 会话命令面 + run 装配
 pub const core_shutdown = @import("core/shutdown.zig"); // U9:进程级停机信号
-pub const tui_status_bar = @import("repl/tui/widget/status_bar.zig");
-pub const tui_verbs = @import("repl/tui/verbs.zig");
-pub const tui_ui_state = @import("repl/tui/ui_state.zig");
-pub const tui_ui = @import("repl/tui/ui.zig");
-pub const tui_event = @import("repl/tui/event.zig");
-pub const tui_theme = @import("repl/tui/theme.zig");
-pub const tui_term = @import("repl/tui/term.zig");
-pub const tool_card = @import("repl/tui/widget/tool_card.zig");
-pub const tui_test_capture = @import("repl/tui/test_capture.zig");
-pub const repl_input = @import("repl/input.zig");
-pub const repl_complete = @import("repl/complete.zig");
-pub const repl_model_picker = @import("repl/model_picker.zig");
-pub const repl_model_picker_view = @import("repl/model_picker_view.zig");
-pub const repl_picker_host = @import("repl/picker_host.zig");
 pub const answer_queue = @import("core/answer_queue.zig");
 pub const recorder = @import("core/recorder.zig");
 
@@ -512,27 +478,18 @@ fn localConfigAllowlist(arena: std.mem.Allocator) state_env_mod.Allowlist {
     return state_env_mod.allowlistFrom(arena, host.registry.profiles.items, if (document) |*value| value else null, text) catch .{};
 }
 
-/// Says once what of `<state root>/.env` is not read: a file that cannot be,
-/// and the names it sets that are ignored (never a value). To the log only
-/// while the TUI owns the terminal; `metacodes doctor` shows the same.
-fn warnLocalConfig(allocator: std.mem.Allocator, local: *const state_env_mod.Loaded, to: enum { stderr, log }) void {
-    const log = @import("util/log.zig");
-    const quiet = to == .log;
+/// Warn about unreadable local configuration and ignored names.
+fn warnLocalConfig(allocator: std.mem.Allocator, local: *const state_env_mod.Loaded) void {
     const problem: ?[]const u8 = switch (local.status) {
         .unreadable => "cannot be read",
         .not_a_file => "is not a regular file",
         .too_large => "is larger than " ++ std.fmt.comptimePrint("{d}", .{state_env_mod.max_file_bytes / 1024}) ++ " KiB",
         .absent, .read, .no_state_root => null,
     };
-    if (problem) |what| {
-        if (quiet)
-            log.warn("config", "{s} {s}; nothing in it is read", .{ local.path, what })
-        else
-            std.debug.print("warning: {s} {s}; nothing in it is read\n", .{ local.path, what });
-    }
+    if (problem) |what| std.debug.print("warning: {s} {s}; nothing in it is read\n", .{ local.path, what });
     const summary = (local.ignoredSummary(allocator) catch null) orelse return;
     defer allocator.free(summary);
-    if (quiet) log.warn("config", "{s}", .{summary}) else std.debug.print("warning: {s}\n", .{summary});
+    std.debug.print("warning: {s}\n", .{summary});
 }
 
 /// Level 7's other way in, after the sign-in hint: where this install's
@@ -550,39 +507,6 @@ fn printLocalConfigHint(local: *const state_env_mod.Loaded, unchosen: []const []
     std.debug.print("{s} holds keys for several providers (", .{local.path});
     for (unchosen, 0..) |id, index| std.debug.print("{s}{s}", .{ if (index == 0) "" else ", ", id });
     std.debug.print(") and names none: add {s}=<id> to choose one.\n", .{state_env_mod.provider_variable});
-}
-
-/// The notices said once under the banner, one per line; null when none
-/// is set. In `arena` (a notice alone is returned as it is).
-fn joinNotices(arena: std.mem.Allocator, notices: []const ?[]const u8) ?[]const u8 {
-    var first: ?[]const u8 = null;
-    var out: std.Io.Writer.Allocating = .init(arena);
-    var count: usize = 0;
-    for (notices) |maybe| {
-        const notice = maybe orelse continue;
-        if (count == 0) first = notice;
-        if (count > 0) out.writer.writeByte('\n') catch return first;
-        out.writer.writeAll(notice) catch return first;
-        count += 1;
-    }
-    return if (count <= 1) first else out.written();
-}
-
-/// What the TUI says once under its banner when `.env` holds keys of
-/// several providers and names none (#486): which ones, by display name, and
-/// that `/model` chooses (`route_state.writeUnchosenLocalNotice`). In `arena`.
-fn unchosenLocalNotice(arena: std.mem.Allocator, ids: []const []const u8) ?[]const u8 {
-    if (ids.len == 0) return null;
-    const names = arena.alloc([]const u8, ids.len) catch return null;
-    const host = buildProviderHost(arena);
-    defer if (host) |built| built.destroy();
-    for (ids, names) |id, *name| {
-        const profile = if (host) |built| built.registry.find(id) else null;
-        name.* = if (profile) |found| (arena.dupe(u8, found.display_name) catch id) else id;
-    }
-    var out: std.Io.Writer.Allocating = .init(arena);
-    route_state_mod.writeUnchosenLocalNotice(&out.writer, names) catch return null;
-    return out.written();
 }
 
 /// ` (template: <dir>/.env.example)` when that file exists, else "".
@@ -712,23 +636,15 @@ fn presetFactsOutOfMemory() noreturn {
     std.process.exit(2);
 }
 
-/// A preset this start was asked for that config.json does not define
-/// (#489): `-p` and the REPL stop, listing the presets
-/// there; the interactive TUI starts as if it had not been named and says so
-/// once under its banner (the returned notice).
-fn presetNotice(
+fn requireKnownPreset(
     allocator: std.mem.Allocator,
-    config: types.Config,
     facts: *const presets_mod.Facts,
     unknown: startup_order.Unknown,
     env_path: []const u8,
-) ?[]const u8 {
-    const report = (presets_mod.unknownReport(allocator, facts, unknown, env_path) catch presetFactsOutOfMemory()) orelse return null;
-    if (!(interactiveRepl(config) and platform_term.isatty(0))) {
-        std.debug.print("error: {s}\n", .{report});
-        std.process.exit(2);
-    }
-    return std.fmt.allocPrint(allocator, "{s}\nStarted without it.", .{report}) catch report;
+) void {
+    const report = (presets_mod.unknownReport(allocator, facts, unknown, env_path) catch presetFactsOutOfMemory()) orelse return;
+    std.debug.print("error: {s}\n", .{report});
+    std.process.exit(2);
 }
 
 /// Levels 2, 3 and 6 (#489): the preset that decided names the route the
@@ -1065,7 +981,7 @@ const incomplete_login_hint =
 /// What a `--provider metask` run prints when no usable Metask session is stored.
 const metask_session_hint = "Metask session is unavailable or expired; run `{[command]s} login --provider metask` to log in again.\n";
 
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) !u8 {
     const allocator = init.arena.allocator();
 
     // SIGPIPE 全局忽略:向已关闭的 pipe/socket 写(例如 hook 或子进程管道)默认会
@@ -1084,12 +1000,12 @@ pub fn main(init: std.process.Init) !void {
     // included — can resolve it.
     @import("util/toolchain.zig").setLayout(if (build_options.release_layout) .release else .development);
 
-    // `metacodes --help` (or `-h`) answers before the rest of startup. The
+    // With no arguments, --help, or -h, print help before startup. The
     // state-dir option, subcommand dispatch and the full Config change nothing
     // about that answer but map code and data the help never uses, and the
     // idle red line is measured on this path (doc/PERF_MEMORY_PRINCIPLES.md
     // §2). `--help` in any later position is still parseArgsInto's.
-    if (helpRequestedFirst(init)) {
+    if (showHelpImmediately(init)) {
         printHelp();
         std.process.exit(0);
     }
@@ -1108,6 +1024,12 @@ pub fn main(init: std.process.Init) !void {
 
     if (config.parse_error) |parse_err| {
         std.debug.print("error: {s} (use --help to list supported flags)\n", .{parse_err});
+        std.process.exit(2);
+    }
+    if (config.prompt == null and config.resume_response == null and config.teammate_name.len == 0 and
+        !config.show_version and !config.dump_prompt and !config.dump_plugins and !config.check_providers)
+    {
+        std.debug.print("error: specify -p <prompt>, - to read stdin, or a subcommand (use --help)\n", .{});
         std.process.exit(2);
     }
     // The learning turn's print-mode environment and its verdict-source rule.
@@ -1171,7 +1093,7 @@ pub fn main(init: std.process.Init) !void {
             std.process.exit(1);
         };
         dumpWrite(out.written());
-        return;
+        return 0;
     }
 
     // The state root, after `--version` (which needs no state) and before
@@ -1191,13 +1113,6 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("warning: cannot create the state root {s} ({s}); sessions, credentials and memory will not persist\n", .{ config.state_root, @errorName(err) });
         };
         @import("core/context_caps.zig").configureStateRoot(config.state_root);
-    }
-
-    // `--resume <id>` binds the App to the stored session before it is built.
-    // KG summary, permission routing and the transcript writer start as that
-    // session. The conversation loads once the App exists.
-    if (config.resume_session) |query| {
-        config.session_id = resolveResumeSession(allocator, config.state_root, query) catch std.process.exit(1);
     }
 
     // 初始化日志：读 METACODES_LOG / METACODES_LOG_FILE 环境变量
@@ -1235,9 +1150,7 @@ pub fn main(init: std.process.Init) !void {
     // setenv. It outlives every App built from `config`: they borrow it.
     var local_config = loadLocalConfig(init.gpa, allocator, config.state_root);
     defer local_config.deinit();
-    // The TUI gets its warning in the log, once it owns the terminal (below).
-    const tui_owns_stderr = interactiveRepl(config) and !config.verbose and platform_term.isatty(2);
-    if (!tui_owns_stderr) warnLocalConfig(allocator, &local_config, .stderr);
+    warnLocalConfig(allocator, &local_config);
     config.credential_env_fallback = local_config.lookup();
     // The file's METASK_API_KEY as the historical path reads it: everywhere
     // that path looks (the sign-in check, the legacy route, credential
@@ -1286,7 +1199,6 @@ pub fn main(init: std.process.Init) !void {
     const stored_default: StoredDefault = startup_facts.stored_default;
     // Whether a flag, the shell or a preset named the route: then nothing
     // below is a "default" the start chose for the user.
-    const named_at_start = startup_facts.named or startup_decision.byPreset();
     // Level 5 by the Metask session (#499, #527): the browser sign-in
     // (`/login`, `metacodes login`) and the device code both store it, and a
     // plain launch signs in with it the way `--provider metask` does. A key
@@ -1320,8 +1232,8 @@ pub fn main(init: std.process.Init) !void {
     }
     // Levels 2, 3 and 6 by a preset (#489): it names its route as the flags
     // would, so everything below treats it as a named provider. A preset
-    // config.json does not define decides nothing (`presetNotice`).
-    const preset_notice = presetNotice(allocator, config, &preset_facts, startup_order.unknownPresets(startup_facts, startup_decision), local_config.path);
+    // config.json does not define is an error.
+    requireKnownPreset(allocator, &preset_facts, startup_order.unknownPresets(startup_facts, startup_decision), local_config.path);
     const preset_applied = applyDecidedPreset(&config, allocator, &local_config, &preset_facts, startup_decision);
     if (metask_session_sign_in) {
         config.provider_profile = "metask";
@@ -1443,21 +1355,6 @@ pub fn main(init: std.process.Init) !void {
     // --- record/replay cassette 录制目录(Stage 7)---
     if (config.record_dir) |dir| recorder.setDir(dir);
 
-    // 交互式 TUI 拥有终端:禁止日志写 stderr(fd 2),否则 err/warn 与渲染(render_region.flush 也走
-    // std.debug.print→fd 2)字节级交错,把固定区写花、滚屏 desync。日志仍写文件(METACODES_LOG_FILE)。
-    // **gate 必须查渲染所在的 fd 2**(不是 fd 1):`metacodes >file` 只重定向 stdout、TUI 仍渲染到 fd 2 的
-    // 终端,此时也要抑制日志。verbose(用户显式要日志)/ fd 2 非 tty(无终端可写花)不关。
-    // **必须在 App.init 之前**:init 期的 warn/err(如 KG 降级告警)否则抢在 gate 前直接打进终端,
-    // 留在 TUI 上方成残行,且超宽行在 strict-autowrap 终端还会折行挤歪整屏。
-    // 非 TUI 模式(teammate/resume/headless/dump)无渲染流,保留 stderr 日志。
-    const interactive_tui = interactiveRepl(config);
-    const quiet_stderr = interactive_tui and !config.verbose and platform_term.isatty(2);
-    if (quiet_stderr) log.setStderrEnabled(false);
-    if (quiet_stderr) warnLocalConfig(allocator, &local_config, .log);
-    // The REPL shows its prompt while MCP servers connect and joins them
-    // before its first request; every other frontend connects them in App.init.
-    if (interactive_tui) config.mcp_connect = .first_request;
-
     // Introspection builds the same App/Plugin snapshot but cannot issue a
     // provider request, so it neither requires credentials nor consumes the
     // one-shot runtime FD authority. Every executable Run path still resolves
@@ -1475,14 +1372,7 @@ pub fn main(init: std.process.Init) !void {
     const metask_legacy_explicit = metask_legacy_requested;
     var provider_secret: ?[]u8 = null;
     var metask_oauth_selected = false;
-    // Where the session's credential came from, for the banner (#484): every
-    // credential the Metask scope resolves is Metask's.
     var credential_origin: route_state_mod.CredentialOrigin = .metask;
-    // Only the interactive TUI has someone to tell what is missing (#484):
-    // `-p`, `-`, resumed suspensions, teammates and a REPL whose input is a
-    // pipe stop at once, non-zero, as scripts expect.
-    const may_open_unbound = interactive_tui and platform_term.isatty(0);
-    var unbound: ?route_state_mod.Unbound = null;
     if (!introspection_only and metask_scope and config.provider_profile != null and
         std.ascii.eqlIgnoreCase(config.provider_profile.?, "metask") and !metask_legacy_explicit)
     {
@@ -1497,12 +1387,6 @@ pub fn main(init: std.process.Init) !void {
                 browser_key = true;
                 break :blk key;
             };
-            // Level 1 (#485): Metask was named and has no sign-in. The TUI
-            // opens on nothing rather than on another provider.
-            if (no_sign_in and may_open_unbound) {
-                unbound = .{ .missing_credential = provider_ids_mod.Slug.lit("metask") };
-                break :blk null;
-            }
             if (no_sign_in) {
                 std.debug.print(metask_session_hint, .{ .command = invokedCommand(allocator) });
             } else {
@@ -1514,28 +1398,9 @@ pub fn main(init: std.process.Init) !void {
     } else if (!introspection_only and metask_scope and metask_legacy_explicit) {
         provider_secret = resolveProviderScopedSecret(allocator, config, "metask") catch |err| return err;
     } else if (!introspection_only and !metask_scope) {
-        // Level 1 (and 2 to 4 and 6, which name their provider the same way): a
-        // provider without a key opens the TUI unbound, naming the key it
-        // needs (#485, 第十节第 3 条); `-p` and the rest stop with its help.
-        const report: CredentialReport = if (may_open_unbound) .quiet else .print_help;
-        if (resolveProviderScopedCredentialReporting(allocator, config, config.provider_profile.?, report)) |scoped| {
-            provider_secret = scoped.secret;
-            credential_origin = scoped.origin;
-        } else |err| {
-            if (!may_open_unbound or err != error.MissingCredentials) {
-                // Any other refusal (conflicting variables) still stops the
-                // start, with the help it always printed.
-                if (report == .quiet) {
-                    if (resolveProviderScopedCredentialReporting(allocator, config, config.provider_profile.?, .print_help)) |again| {
-                        std.crypto.secureZero(u8, again.secret);
-                        allocator.free(again.secret);
-                    } else |_| {}
-                }
-                return err;
-            }
-            const named = provider_ids_mod.Slug.parse(config.resolved_provider_id orelse config.provider_profile.?) catch provider_ids_mod.Slug.lit("unknown");
-            unbound = .{ .missing_credential = named };
-        }
+        const scoped = try resolveProviderScopedCredentialReporting(allocator, config, config.provider_profile.?, .print_help);
+        provider_secret = scoped.secret;
+        credential_origin = scoped.origin;
     }
     // Same handling as `ResolvedCredential.deinit`: zero the bytes before
     // returning them to the allocator so key material does not linger in freed
@@ -1545,17 +1410,9 @@ pub fn main(init: std.process.Init) !void {
         allocator.free(secret);
     };
 
-    // Level 7 of the startup order (#484): with no credential at all, the
-    // interactive TUI opens unbound — no model, nothing sent, a reminder of
-    // what to set up — instead of exiting (`may_open_unbound`).
     var resolved_credential: ?auth.ResolvedCredential = null;
-    if (!introspection_only and provider_secret == null and unbound == null) {
-        resolved_credential = auth.resolveRuntimeCredentialWithEnvFallback(allocator, config.state_root, config.api_key, config.auth_precedence, local_metask_key) catch |err| blk: {
-            if (may_open_unbound and err == error.MissingCredentials) {
-                log.info("auth", "no credential: the TUI opens without a model", .{});
-                unbound = .nothing_configured;
-                break :blk null;
-            }
+    if (!introspection_only and provider_secret == null) {
+        resolved_credential = auth.resolveRuntimeCredentialWithEnvFallback(allocator, config.state_root, config.api_key, config.auth_precedence, local_metask_key) catch |err| {
             @import("util/log.zig").err("auth", "credential resolution failed: {s}", .{@errorName(err)});
             std.debug.print(auth_required_hint, .{ .command = invokedCommand(allocator) });
             printLocalConfigHint(&local_config, unchosen_local_providers);
@@ -1575,71 +1432,32 @@ pub fn main(init: std.process.Init) !void {
         };
     }
     if (metask_scope) if (resolved_credential) |credential| if (!isUsableConfiguredSession(config, credential.source)) {
-        // A sign-in without a key and model to run: the TUI opens unbound
-        // (the reminder says so; `/login` finishes it), anything else stops.
-        if (!may_open_unbound) {
-            std.debug.print(incomplete_login_hint, .{ .command = invokedCommand(allocator) });
-            return error.IncompleteLoginSelection;
-        }
-        log.info("auth", "Metask login is incomplete: the TUI opens without a model", .{});
-        unbound = .metask_login_incomplete;
+        std.debug.print(incomplete_login_hint, .{ .command = invokedCommand(allocator) });
+        return error.IncompleteLoginSelection;
     };
-    // Unbound, the session holds no key at all: none is ever sent.
-    const api_key = if (unbound != null)
-        ""
-    else if (provider_secret) |secret|
+    const api_key = if (provider_secret) |secret|
         @as([]const u8, secret)
     else if (resolved_credential) |credential|
         @as([]const u8, credential.bearer_token)
     else
         "";
-    // Level 4 passed over (#485): said once — in the TUI under its banner,
-    // elsewhere on stderr now — with what this start uses instead.
+    // Report which route took the place of the saved default.
     const skipped_default_notice: ?[]const u8 = switch (stored_default) {
-        .lacks_credential => |label| skippedDefaultNotice(allocator, label, if (unbound != null) null else .{
+        .lacks_credential => |label| skippedDefaultNotice(allocator, label, .{
             .model = config.model,
             .origin = credential_origin,
         }),
         else => null,
     };
-    if (skipped_default_notice) |notice| if (!interactive_tui) std.debug.print("warning: {s}\n", .{notice});
+    if (skipped_default_notice) |notice| std.debug.print("warning: {s}\n", .{notice});
     // A subscription plan is licensed for a person in a coding tool
     // (`ProviderProfile.subscription_plan`). Said once when nobody is at the
-    // keyboard: `-p`, a resumed suspension or the REPL reading a pipe.
-    // A teammate answers to its lead's session. A note, never a refusal.
-    const unattended = config.prompt != null or config.resume_response != null or
-        (interactive_tui and !may_open_unbound);
+    // keyboard: a prompt or a resumed suspension. A teammate answers to its lead.
+    const unattended = config.prompt != null or config.resume_response != null;
     if (unattended and !introspection_only and !metask_scope and provider_secret != null) {
         if (subscriptionPlanName(allocator, config.resolved_provider_id orelse config.provider_profile.?)) |plan|
             std.debug.print("warning: {s} is a subscription plan for interactive use; its terms may not cover -p or CI. Use a pay-as-you-go key for automation.\n", .{plan});
     }
-    // 第七节第 3 条 (#485): `.env` configures a provider, yet the start is on
-    // Metask, which ranks above it (a sign-in or a stored default). Said once
-    // under the TUI's banner, with the two ways to the file's provider.
-    const shadowed_local_notice: ?[]const u8 = shadowed: {
-        if (!interactive_tui or named_at_start or unbound != null or credential_origin != .metask) break :shadowed null;
-        const chosen = switch (local_choice) {
-            .provider => |value| value,
-            else => break :shadowed null,
-        };
-        if (providerIsMetask(allocator, chosen.name)) break :shadowed null;
-        const name = providerDisplayName(allocator, chosen.name);
-        break :shadowed std.fmt.allocPrint(allocator, ".env configures {s}; the default is Metask. To use {s}: /model, or /logout", .{ name, name }) catch null;
-    };
-    // `.env` holds keys of several providers and names none, and nothing
-    // above it decided (#486): the TUI opens without a model, as with nothing
-    // set up, and says once which providers and that `/model` chooses. `-p`
-    // and the rest stopped above, naming them (`printLocalConfigHint`).
-    const unchosen_local_notice: ?[]const u8 = unchosen: {
-        const reason = unbound orelse break :unchosen null;
-        if (!interactive_tui or reason != .nothing_configured) break :unchosen null;
-        break :unchosen switch (local_choice) {
-            .several => |ids| unchosenLocalNotice(allocator, ids),
-            else => null,
-        };
-    };
-    const startup_notice: ?[]const u8 = joinNotices(allocator, &.{ preset_notice, skipped_default_notice, shadowed_local_notice, unchosen_local_notice });
-
     // The session runs on the general-purpose allocator, never on the process
     // arena `allocator` above: an arena frees nothing, and a session allocates
     // per request, per streamed response and per tool result for hours or
@@ -1649,47 +1467,16 @@ pub fn main(init: std.process.Init) !void {
     // them and never frees them.
     const gpa = init.gpa;
 
-    // The startup splash plays while App.init runs (MCP connects, catalog
-    // fetches), not after it. Only when init's logs cannot reach the
-    // terminal: a frame redraws its rows relative to the cursor, and a line
-    // written between frames would shift them. The REPL's terminal is settled
-    // first, theme and keyboard protocol in one round trip (#327): its query
-    // reads stdin, which is the splash's until it ends, and the protocol must
-    // be known before the REPL first enters raw mode.
-    var splash: repl.Splash = .not_started;
-    var init_options: app_mod.App.InitOptions = .{
-        .models_cache = interactive_tui,
-        .route_state = if (unbound) |why| .{ .unbound = why } else .{ .bound = credential_origin },
-        .unchosen_local_providers = switch (local_choice) {
-            .several => |ids| ids,
-            else => unchosen_local_providers,
-        },
-        // What `/logout` falls back to (#485): the provider `.env`
-        // configures, whatever this start was decided by.
+    const app = try app_mod.App.initWithOptions(gpa, init.io, config, api_key, .{
+        .route_state = .{ .bound = credential_origin },
         .local_provider = switch (local_choice) {
             .provider => |chosen| .{ .name = chosen.name, .model = local_config.get(state_env_mod.model_variable) },
             else => null,
         },
-        .startup_notice = startup_notice,
-    };
-    if (interactive_tui) {
-        const variant = app_mod.resolveInteractiveTerminal(allocator, config.no_theme, config.state_root);
-        init_options.theme_variant = variant;
-        if (quiet_stderr or !platform_term.isatty(2)) splash = repl.startSplash(gpa, variant, config.state_root);
-    }
-    // A Shift+Enter binding `/terminal-setup` put into the terminal (or one
-    // that sends the same newline) turns the footer's hint to Shift+Enter.
-    if (interactive_tui) @import("repl/input.zig").recordNewlineBinding(@import("app/terminal_setup/setup.zig").bindingLiveHere(gpa, config.state_root));
-    const app = app: {
-        errdefer repl.stopSplash(splash);
-        break :app try app_mod.App.initWithOptions(gpa, init.io, config, api_key, init_options);
-    };
+    });
     defer app.deinit();
 
-    app.installSigintHandler() catch |err| {
-        repl.stopSplash(splash);
-        return err;
-    };
+    try app.installSigintHandler();
 
     log.info("main", "metacodes starting; model={s}", .{config.model});
 
@@ -1718,8 +1505,7 @@ pub fn main(init: std.process.Init) !void {
         };
         // 所有 run-mode 路径统一:process.exit 跳过 defer app.deinit → MCP/LSP 子进程变孤儿,
         // exit 前显式 deinit(此时 mailbox 循环已退出,App quiescent)。
-        app.deinit();
-        std.process.exit(code);
+        return code;
     }
 
     // U8:`--resume-response <json>` → 恢复挂起的 session(read suspend.json→resumeRun),不进 REPL。
@@ -1728,8 +1514,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("error: headless resume setup failed: {s}\n", .{@errorName(err)});
             break :blk 1;
         };
-        app.deinit(); // 同上:reap MCP/LSP 子进程(恢复运行已结束,quiescent)
-        std.process.exit(code);
+        return code;
     }
 
     // Headless 模式：`-p "..."` / stdin pipe → 跑单次 prompt 后退出，不进 REPL。
@@ -1740,24 +1525,10 @@ pub fn main(init: std.process.Init) !void {
             break :blk 1;
         };
         if (model_failure) |*failure| printNextStep(app, allocator, failure);
-        app.deinit(); // 同上:headless 一样跑 MCP/LSP,同款孤儿病(agent loop 已结束,quiescent)
-        std.process.exit(code);
+        return code;
     }
 
-    // `--resume <id>`: the App was built as that session (above); load its
-    // conversation before the first prompt, or stop before the TUI starts.
-    const resumed: ?app_mod.App.ResumedConversation = if (config.resume_session != null)
-        app.resumePersistedConversation() catch |err| {
-            repl.stopSplash(splash);
-            std.debug.print("error: cannot resume session {s}: {s}\n", .{ app.session_id.asSlice(), repl.resumeLoadFailure(err) });
-            app.deinit();
-            std.process.exit(1);
-        }
-    else
-        null;
-
-    // (stderr 日志 gate 已提前到 App.init 之前——见 interactive_tui;init 期日志同样不得上屏。)
-    try repl.run(app, gpa, .{ .resumed = resumed, .splash = splash });
+    unreachable; // Startup validated and handled every execution mode.
 }
 
 /// `-p`: after the raw error the run printed, one line saying what to do when
@@ -1768,13 +1539,6 @@ fn printNextStep(app: *app_mod.App, allocator: std.mem.Allocator, failure: *cons
     if (!repl_next_step.applies(failure)) return;
     const line = (repl_next_step.forFailure(allocator, app, failure, .{ .print = invokedCommand(allocator) }) catch return) orelse return;
     std.debug.print("{s}\n", .{line});
-}
-
-/// Whether this run ends in the interactive REPL (`repl.run`).
-/// Only that frontend shows a prompt before its MCP servers connect.
-pub fn interactiveRepl(config: types.Config) bool {
-    return config.resume_response == null and config.prompt == null and
-        config.teammate_name.len == 0 and !config.dump_prompt and !config.dump_plugins;
 }
 
 /// Write pipeable command output directly to stdout, without routing it through
@@ -2159,11 +1923,11 @@ fn leadingStateDir(init: std.process.Init, allocator: std.mem.Allocator) Leading
 
 /// Whether argv[1] is `--help` or `-h`. parseArgsInto stops at that argument
 /// too, so every later argument was already ignored.
-fn helpRequestedFirst(init: std.process.Init) bool {
+fn showHelpImmediately(init: std.process.Init) bool {
     var args = argsIter(init);
     defer args.deinit();
     _ = args.next();
-    const first = args.next() orelse return false;
+    const first = args.next() orelse return true;
     return std.mem.eql(u8, first, "--help") or std.mem.eql(u8, first, "-h");
 }
 
@@ -2215,34 +1979,6 @@ fn hostStateRoot() error{StateRootRejected}![]const u8 {
         return error.StateRootRejected;
     };
     return resolved.path;
-}
-
-/// The id of the stored session of the working directory that `--resume
-/// <query>` names, by the rule `/resume <id>` uses (`transcript.findSession`).
-/// Says why on stderr when there is none.
-fn resolveResumeSession(allocator: std.mem.Allocator, state_root: []const u8, query: []const u8) error{ResumeTargetNotFound}![]const u8 {
-    if (state_root.len == 0) {
-        std.debug.print("error: --resume: there is no state root, so no stored sessions (set HOME or --state-dir)\n", .{});
-        return error.ResumeTargetNotFound;
-    }
-    const cwd = fs_util.getCwd(allocator) catch {
-        std.debug.print("error: --resume: cannot read the current directory\n", .{});
-        return error.ResumeTargetNotFound;
-    };
-    defer allocator.free(cwd);
-    const list = transcript.listSessions(cwd, .{ .path = state_root }, allocator) catch |err| {
-        std.debug.print("error: --resume: cannot list the sessions of {s} ({s})\n", .{ cwd, @errorName(err) });
-        return error.ResumeTargetNotFound;
-    };
-    defer transcript.freeSessionList(list, allocator);
-    const entry = transcript.findSession(list, query) orelse {
-        std.debug.print("error: no session matching '{s}' in {s} (/resume lists them)\n", .{ query, cwd });
-        return error.ResumeTargetNotFound;
-    };
-    return allocator.dupe(u8, entry.id) catch {
-        std.debug.print("error: --resume: out of memory\n", .{});
-        return error.ResumeTargetNotFound;
-    };
 }
 
 /// The state root this host resolved at startup ("" when there is none).
@@ -4577,14 +4313,6 @@ fn parseArgsInto(config: *types.Config, args: *std.process.Args.Iterator, alloca
                     config.resume_response = allocator.dupe(u8, v) catch v;
                 }
             }
-        } else if (std.mem.eql(u8, arg, "--resume")) {
-            // A flag in the id's place means the id was left out.
-            const v = args.next() orelse "";
-            if (v.len == 0 or v[0] == '-') {
-                setParseError(config, allocator, "missing session id for --resume", .{});
-                return;
-            }
-            config.resume_session = allocator.dupe(u8, v) catch v;
         } else if (std.mem.eql(u8, arg, "--dump-prompt")) {
             config.dump_prompt = true;
         } else if (std.mem.eql(u8, arg, "--sections")) {
@@ -4620,27 +4348,6 @@ fn parseArgsInto(config: *types.Config, args: *std.process.Args.Iterator, alloca
     if (config.dump_prompt_sections and !config.dump_prompt and config.parse_error == null) {
         setParseError(config, allocator, "--sections requires --dump-prompt", .{});
     }
-    // `--resume` opens a session in the interactive REPL; every other mode
-    // would ignore it, and `--session` names a different session identity.
-    if (config.resume_session != null and config.parse_error == null) {
-        const other: ?[]const u8 = if (config.prompt != null)
-            "-p/--print or -"
-        else if (config.resume_response != null)
-            "--resume-response"
-        else if (config.session_id != null)
-            "--session"
-        else if (config.teammate_name.len > 0)
-            "--teammate"
-        else if (config.dump_prompt)
-            "--dump-prompt"
-        else if (config.dump_plugins)
-            "--dump-plugins"
-        else
-            null;
-        if (other) |flag| setParseError(config, allocator, "--resume opens the interactive REPL and cannot be combined with {s}", .{flag});
-    }
-    // The gate without a command would arm a no-op; a lone command would run
-    // nothing. Either half alone is a mistyped treatment, so fail closed.
     if ((config.check_gate or config.check_gate_observe) and config.host_check_command == null and config.parse_error == null) {
         setParseError(config, allocator, "--check-gate / --check-gate-observe requires --host-check <cmd>", .{});
     }
@@ -4772,13 +4479,12 @@ fn appendNulList(allocator: std.mem.Allocator, prev: ?[]const u8, item: []const 
 fn printHelp() void {
     dumpWrite(
         \\metacodes — embeddable agent core and coding CLI
-        \\Usage: metacodes [options]
+        \\Usage: metacodes -p <prompt> [options] | metacodes - [options] | metacodes <subcommand>
         \\  --version             Print version and build identity and exit (--json: one JSON document)
         \\  doctor [--json | --plain] [--strict]
         \\                        Report where ripgrep and TinyKG resolve from and whether they match this build
-        \\  terminal-setup [--dry-run | --restore] [--terminal <name>] [--keybindings <file>]
-        \\                        Bind Shift+Enter to a newline in Apple Terminal or VS Code (and forks),
-        \\                        after a backup; --restore undoes it (terminal-setup --help for more)
+        \\  terminal-setup --restore [--terminal <name>] [--keybindings <file>]
+        \\                        Restore key bindings installed by a prior version
         \\  mcp login <server> [--no-browser] | mcp logout <server> | mcp list
         \\                        OAuth login for an HTTP or SSE MCP server (stored, refreshed per session)
         \\  update [--check] [--version X.Y.Z] [--release-base <url>] [--pull] [--allow-downgrade]
@@ -4789,8 +4495,6 @@ fn printHelp() void {
         \\  -                     Headless: read prompt from stdin
         \\  --json                Headless: emit NDJSON result event
         \\  --stream-json         Headless: also stream per-event NDJSON lines live (text/tool/usage/turn)
-        \\  --resume <id>         Start the REPL in a stored session of this directory (an id or id prefix, as
-        \\                        /resume takes; an interactive exit prints the command for the current one)
         \\  --resume-response <j> Resume a suspended session with a late tool response (@file to read from a file)
         \\  --model <model>       Model (default: claude-sonnet-4-20250514)
         \\  --model-display-name <name>  Stable actor-visible model identity
@@ -4829,8 +4533,7 @@ fn printHelp() void {
         \\  --test-integrity      When the model stops with tests that existed before the run rewritten,
         \\                        deleted or disabled, ask once to restore them or quote the request
         \\  --test-integrity-observe  Only record and report changes to tests that existed before the run
-        \\  --stall-gate          Stop a run whose tool rounds keep returning nothing new (default in
-        \\                        the REPL and web sessions; off in print mode unless given)
+        \\  --stall-gate          Enable stopping a run whose tool rounds keep returning nothing new
         \\  --stall-gate-observe  Only record where the stall gate would have stopped the run
         \\  --no-stall-gate       Never stop a run for returning nothing new
         \\  --no-progress-updates  Do not ask the model for a progress note after silent tool rounds
@@ -4859,7 +4562,6 @@ fn printHelp() void {
         \\  --state-dir <dir>     State root for config, credentials, KG store, sessions (first
         \\                        argument to also apply to subcommands; else METACODES_HOME,
         \\                        <prefix>/etc/metacodes/install.json, ~/.metacodes)
-        \\  --no-theme            Disable colors
         \\  --verbose             Verbose output
         \\  --lsp                 Enable language server integration (default; overrides an earlier --no-lsp)
         \\  --no-lsp              Disable language server integration (Edit/Write diagnostics, CodeMap,
@@ -4874,43 +4576,6 @@ fn printHelp() void {
 
 test "basic" {
     try std.testing.expect(true);
-}
-
-test "--resume takes a session id for the REPL and fails closed without one or beside another mode" {
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const ok = parseArgsForTest(&[_][*:0]const u8{ "metacodes", "--resume", "000001a16627", "--model", "m" }, a);
-    try std.testing.expect(ok.parse_error == null);
-    try std.testing.expectEqualStrings("000001a16627", ok.resume_session.?);
-    try std.testing.expectEqualStrings("m", ok.model);
-    // The id resolves against the stored sessions in main, before App.init.
-    try std.testing.expect(ok.session_id == null);
-
-    const missing = [_][]const [*:0]const u8{
-        &.{ "metacodes", "--resume" },
-        &.{ "metacodes", "--resume", "" },
-        &.{ "metacodes", "--resume", "--model", "m" },
-    };
-    for (missing) |argv| {
-        const config = parseArgsForTest(argv, a);
-        try std.testing.expectEqualStrings("missing session id for --resume", config.parse_error.?);
-    }
-
-    const Conflict = struct { argv: []const [*:0]const u8, flag: []const u8 };
-    const conflicts = [_]Conflict{
-        .{ .argv = &.{ "metacodes", "--resume", "x", "-p", "hi" }, .flag = "-p/--print or -" },
-        .{ .argv = &.{ "metacodes", "--resume", "x", "--resume-response", "{}" }, .flag = "--resume-response" },
-        .{ .argv = &.{ "metacodes", "--resume", "x", "--session", "y" }, .flag = "--session" },
-        .{ .argv = &.{ "metacodes", "--resume", "x", "--agent-name", "w" }, .flag = "--teammate" },
-        .{ .argv = &.{ "metacodes", "--resume", "x", "--dump-prompt" }, .flag = "--dump-prompt" },
-        .{ .argv = &.{ "metacodes", "--resume", "x", "--dump-plugins" }, .flag = "--dump-plugins" },
-    };
-    for (conflicts) |c| {
-        const config = parseArgsForTest(c.argv, a);
-        const expected = try std.fmt.allocPrint(a, "--resume opens the interactive REPL and cannot be combined with {s}", .{c.flag});
-        try std.testing.expectEqualStrings(expected, config.parse_error.?);
-    }
 }
 
 test "Metask login dispatch uses JSON device flow except token import" {
@@ -5116,9 +4781,6 @@ test {
     _ = &@import("app/terminal_setup/apple_terminal.zig");
     _ = &@import("app/terminal_setup/setup.zig");
     _ = &@import("app/terminal_setup/cli.zig");
-    _ = &@import("session_service.zig");
-    _ = &@import("repl/loop.zig");
-    _ = &@import("repl/replay.zig");
     _ = &@import("util/abort.zig");
     _ = &@import("util/file_lock.zig");
     _ = &@import("util/toolchain.zig");
@@ -5128,11 +4790,6 @@ test {
     _ = &@import("api/catalog.zig");
     _ = &@import("api/model_name_consumers_test.zig");
     _ = &@import("tools/context.zig");
-    _ = &@import("repl/input.zig");
-    _ = &@import("repl/model_command.zig");
-    _ = &@import("repl/model_picker.zig");
-    _ = &@import("repl/model_picker_view.zig");
-    _ = &@import("repl/picker_host.zig");
     _ = &@import("provider/host.zig");
     _ = &@import("provider/api_key_store.zig");
     _ = &@import("provider/alias.zig");
@@ -5145,51 +4802,19 @@ test {
     _ = &@import("api/models_pages.zig");
     _ = &@import("api/gemini_signatures.zig");
     _ = &@import("api/models_cache.zig");
-    _ = &@import("repl/msg_queue.zig");
-    _ = &@import("repl/history.zig");
-    _ = &@import("repl/user_echo.zig");
-    _ = &@import("repl/cmd_output.zig");
-    _ = &@import("repl/dialogs.zig");
-    _ = &@import("repl/tui/dialog/pane.zig");
-    _ = &@import("repl/multiline.zig");
-    _ = &@import("repl/render.zig");
     _ = &@import("repl/headless.zig");
     _ = &@import("repl/next_step.zig");
-    _ = &@import("repl/complete.zig");
-    _ = &@import("repl/paste.zig");
-    _ = &@import("repl/transcript_viewer.zig");
-    _ = &@import("repl/vim.zig");
-    _ = &@import("repl/tui/ansi.zig");
-    _ = &@import("repl/tui/term.zig");
-    _ = &@import("repl/tui/overlay.zig");
-    _ = &@import("repl/tui/theme.zig");
-    _ = &@import("repl/tui/bg_probe.zig");
-    _ = &@import("repl/tui/splash.zig");
-    _ = &@import("repl/tui/splash_player.zig");
-    _ = &@import("repl/tui/layout.zig");
-    _ = &@import("repl/tui/test_capture.zig");
-    _ = &@import("repl/tui/render_region.zig");
     _ = &@import("core/protocol/ui_event.zig");
     _ = &@import("core/protocol/ui_backend.zig");
     _ = &@import("core/protocol/ui_request.zig");
     _ = &@import("core/protocol/wire.zig");
     _ = &@import("core/protocol/frontend_capabilities.zig");
-    _ = &@import("repl/tui/tui_backend.zig");
     _ = &@import("core/writer_backend.zig");
     _ = &@import("core/headless_backend.zig");
     _ = &@import("core/tee_backend.zig");
     _ = &@import("core/diagnostics_backend.zig");
     _ = &@import("telemetry/telemetry.zig");
     _ = &@import("core/suspend_state.zig");
-    _ = &@import("repl/tui/ui_state.zig");
-    _ = &@import("repl/tui/ui.zig");
-    _ = &@import("repl/tui/event.zig");
-    _ = &@import("repl/tui/dialog/permission.zig");
-    _ = &@import("repl/tui/widget/tool_card.zig");
-    _ = &@import("repl/tui/widget/agent_tree.zig");
-    _ = &@import("repl/tui/widget/thinking.zig");
-    _ = &@import("repl/tui/widget/pager.zig");
-    _ = &@import("repl/tui/config.zig");
     _ = &@import("mcp/protocol.zig");
     _ = &@import("mcp/transport_stdio.zig");
     _ = &@import("mcp/client.zig");

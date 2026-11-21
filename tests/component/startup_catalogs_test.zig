@@ -351,16 +351,3 @@ test "L2 startup: a refresh for a key the session has since left is dropped" {
     try std.testing.expect(app.models_refresh == null);
     try std.testing.expectEqual(@as(u32, 33333), app.api_client.resolveMaxTokens());
 }
-
-test "L2 startup: a theme the host resolved is the App's theme" {
-    var fx: Fixture = undefined;
-    try fx.setup();
-    defer fx.deinit();
-    var srv = try harness.MockServer.startCassette(&.{MODELS_A}, 0);
-    defer srv.stop();
-    const url = try srv.urlOwned(std.testing.allocator);
-    defer std.testing.allocator.free(url);
-    const app = try fx.start(url, .{ .theme_variant = .light });
-    defer app.deinit();
-    try std.testing.expectEqual(@as(@TypeOf(app.theme_variant), .light), app.theme_variant);
-}
