@@ -8,9 +8,9 @@
 //! and a `/model` pick of a Z.AI model without one ended in
 //! `MissingCredentials`.
 //!
-//! `/model` takes no key itself (#488): a provider without one is listed as
-//! not configured, and the key this login stores makes its routes ones a
-//! pick applies.
+//! `/model` takes no key itself (#488): a provider without one is not
+//! listed, and the key this login stores makes its routes ones a pick
+//! applies.
 
 const std = @import("std");
 const harness = @import("harness");

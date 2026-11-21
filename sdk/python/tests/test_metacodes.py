@@ -207,6 +207,51 @@ class PythonSdkTest(unittest.TestCase):
                 result = session.run("read notes.txt")
         self.assertIn("the secret is 42", result.text)
 
+    def test_preview_disabled_rejects_explicit_preview_tool_selection(self) -> None:
+        with self.assertRaisesRegex(metacodes.AgentCoreError, "PreviewFeatureDisabled"):
+            metacodes.Runtime(tools=["ExecuteCode"])
+
+    def test_preview_comment_check_matches_the_provider_prompt_and_disk(self) -> None:
+        for preview in (True, False):
+            with self.subTest(preview=preview):
+                target = self.root / "example.py"
+                source = "answer = 42  # explain\n"
+                script = [("tool", "Write", {"file_path": str(target), "content": source}), ("echo",)]
+                with MockProvider(script) as provider:
+                    with metacodes.Runtime(tools=["Write"], preview=preview) as runtime:
+                        session = self.session(runtime, provider, permission_mode="full_access")
+                        result = session.run("write the example")
+                self.assertEqual(preview, "Do not add explanatory code comments." in str(provider.requests[0]["system"]))
+                if preview:
+                    self.assertIn("adds a code comment", result.text)
+                    self.assertFalse(target.exists())
+                else:
+                    self.assertEqual(source, target.read_text(encoding="utf-8"))
+
+    def test_execute_code_calls_python_tools_and_keeps_intermediates_local(self) -> None:
+        calls = []
+
+        @metacodes.tool(description="Return a private intermediate value.")
+        def lookup(arguments):
+            calls.append(arguments)
+            return {"private": "INTERMEDIATE_MUST_STAY_LOCAL", "answer": 42}
+
+        script = [
+            ("tool", "ExecuteCode", {"code": "var row = await tools.lookup({key:'a'}); row.answer"}),
+            ("tool", "ExecuteCode", {"code": "row.answer + 1"}),
+            ("echo",),
+        ]
+        with MockProvider(script) as provider:
+            with metacodes.Runtime(tools=[], host_tools=[lookup], preview=True) as runtime:
+                session = self.session(runtime, provider, permission_mode="full_access")
+                result = session.run("compute using the JavaScript bridge")
+        self.assertEqual(calls, [{"key": "a"}])
+        self.assertEqual(result.stop_reason, "end_turn")
+        self.assertIn('"value":43', result.text)
+        self.assertEqual(result.tool_calls, 3)
+        self.assertIn("ExecuteCode", [tool["name"] for tool in provider.requests[0]["tools"]])
+        self.assertNotIn("INTERMEDIATE_MUST_STAY_LOCAL", str(provider.requests))
+
     def test_runtime_points_rg_bin_at_the_bundled_ripgrep(self) -> None:
         library = _native.load()
         if library.ripgrep is None:

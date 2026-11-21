@@ -41,6 +41,13 @@ These rules apply to the entire repository.
   is for a host that sets `Config.jev_builtin_default`, none here): name a
   service in `config.json` or the environment, or use https
   (`zig build test:builtin-egress` enforces it, #474).
+- Agents do not write comments, doc comments or docstrings. Let names, types
+  and structure carry the meaning, and put the reasoning behind a change in
+  its commit message or PR description. The exceptions are what this file or
+  a check requires (`// no EINTR: <reason>`, the stated reason for a listed
+  terminal write), tool directives (`# shellcheck disable=...`, `# noqa`,
+  `# type: ignore`) and shebangs. Leave existing comments alone unless the
+  code they describe changes; then correct or delete them.
 - Preserve the kernel boundaries: plugins cannot replace the AgentLoop or bypass
   permission, sandbox, budget, formal verdicts, TinyKG admission, or artifact CAS.
 - Provider-visible bytes are a cache contract. Runtime generation, plugin paths,
@@ -49,6 +56,32 @@ These rules apply to the entire repository.
   manually reviewed cross-platform binary bundle, selected by target and pinned
   by SHA-256. Never add TinyKG source vendoring, download-on-build, `PATH` search,
   sibling-checkout discovery, or stale build-output fallback.
+
+## Preview features
+
+Every preview feature has its own field. Source embedders set these fields in
+`RuntimeConfig.preview` ([doc/API.md](doc/API.md#preview-features)). When you
+add a preview feature:
+
+- Add its name to `PreviewFeature` and a field of the same name to
+  `PreviewFeatures` in `src/types.zig`, shrinking `_unused` by one bit; `all`,
+  `has`, `with` and `max_arg_len` derive from the enum, and a field without a
+  matching name fails to compile. The name is what users type, so use
+  `snake_case`.
+- Gate the feature on its own field and nothing else: `opts.preview.<name>`,
+  `ctx.preview.<name>`, or `.preview_feature = .<name>` on a tool's registry
+  entry. Never gate on another feature's field, on "any feature enabled", or on
+  a new `bool`. Features with dedicated settings, such as HarnessMM and RSI,
+  are selected by those settings alone.
+- Pass the existing `preview.Features` value through; do not add a parallel
+  field. Child agents, Teamwork seats and teammate processes already inherit
+  the resolved set.
+- Prove with a Core integration test that selecting the feature enables it
+  and selecting only a different feature leaves it disabled.
+- Document it in the same change: the feature table in
+  [doc/API.md](doc/API.md#preview-features) and `CHANGELOG.md`.
+- The AgentCore ABI has no per-feature selection: `RuntimeConfigV1.preview = 1`
+  enables every feature. Adding one there is an ABI revision.
 
 ## PR review and repair workflow
 
@@ -106,7 +139,7 @@ not accepted.
 Before submitting:
 
 ```sh
-zig fmt --check build.zig src tests
+zig build gate:static
 zig build test:lib -Doptimize=ReleaseSafe
 zig build test
 scripts/test_coverage_audit.sh
@@ -115,28 +148,23 @@ python3 scripts/check_doc_facts.py
 git diff --check
 ```
 
-`zig build gate:pr` runs this list: the core suite always in ReleaseSafe, the
-full suite at `-Doptimize` (Debug by default). CI runs the same commands (the
-full suite in Debug, the core suite in ReleaseSafe;
-`scripts/tests/test_gate_manifest.py` asserts every command above has a CI
-step), so this block is the single source. CI runs the full suite as its
-three parts, `zig build test:units`, `test:integration` and `test:product`, on
-separate runners; `zig build test` is exactly those three, so a new check
-goes into one of them, and a new CI step names its leg (`doc/CI_DESIGN.md`
-§4, "Where a new check goes"). The one exception is a release or
-reopen PR that adds only `scripts/release_cut.py`'s generated bump to a base
-whose complete CI coverage passed: it takes the CI fast path
-(`doc/RELEASE_AUTOMATION_DESIGN.md` §3). A change confined to documentation,
-or to documentation and the evaluation harness, skips the CI suites it cannot
-affect (`scripts/ci_scope.py`). CI runs once per PR revision on Linux x86_64,
-macOS ARM64 and Windows x86_64; main pushes do not repeat it. Linux ARM64,
-Intel macOS and Windows ARM64 cross-build checks run in the release workflow
-(`doc/CI_DESIGN.md` §3); keep lightweight target-contract fixtures in PR CI.
+`zig build gate:static` runs only the guards that read the source:
+`zig fmt --check build.zig src tests`, the scans of `http-status:gate` and
+`subsystem:boundary` (their self-tests run in `test:units`), the
+`scripts/tests/test_*_discipline.py` scans and `git diff --check`. It takes seconds, and it comes first because the build
+runner has no fail-fast: inside the full gate a failed guard is reported
+only when everything else has finished (#587).
+
+`zig build gate:pr` runs the local checklist, with the core suite in
+ReleaseSafe and the full suite at `-Doptimize` (Debug by default).
+`zig build test` aggregates `test:units`, `test:integration` and `test:product`.
+The fork's CI builds SDK archives on pull requests and pushes to `main`.
+The Release workflow builds the platform matrix on fork tags.
 Document deletions/moves use link and protocol-reference checks;
 release-document changes use `release:docs:check`, which shares the release
 copy steps without compiling the product.
-The local `gate:pr` checklist above remains unchanged. Run the full suite with
-`-Doptimize=ReleaseSafe` as well when a change touches unsafe code or an ABI.
+Run the full suite with `-Doptimize=ReleaseSafe` as well when a change touches
+unsafe code or an ABI.
 
 The Python steps need Python >= 3.9 and PyYAML (`requirements-dev.txt`).
 

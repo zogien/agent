@@ -16,6 +16,9 @@
 //!   sent at all;
 //! - `forgetProviderKey` (`/logout <provider>`) removes the stored key and
 //!   leaves a session that ran on it without a credential;
+//! - `adoptProviderLogin` (`/login <provider>` once it stored a key or a
+//!   sign-in, #566) moves a session running on that provider onto it, on the
+//!   same route, and leaves any other session where it is;
 //! - `applyMetaskSession` (`/login`) revokes the session it replaced, once
 //!   the new one is stored and bound, and never when it fails (#560).
 //!
@@ -82,7 +85,7 @@ const cleared = [_][*:0]const u8{
     "KIMI_API_KEY",        "MOONSHOT_API_KEY",         "KIMI_CODE_API_KEY",     "DASHSCOPE_API_KEY",
     "MINIMAX_API_KEY",     "AWS_BEARER_TOKEN_BEDROCK", "METACODES_PROVIDER",    "METACODES_MODEL",
     "METACODES_BASE_URL",  "METASK_GATEWAY_URL",       "METACODES_CONFIG_FILE", "METACODES_AUTH_FILE",
-    "METACODES_OAUTH_DIR", "METASK_SITE_URL",          RELAY_ENV,
+    "METACODES_OAUTH_DIR", "METASK_SITE_URL",          "OPENROUTER_API_KEY",    RELAY_ENV,
 };
 
 /// A state root, a working directory and a home; keys cleared, no probe, no

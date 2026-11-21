@@ -687,6 +687,7 @@ pub fn handleSlash(
         .parent_model = app.activeModel(),
         .skills = &app.skills,
         .api_client = app.anthropicClientOrNull(),
+        .preview = app.config.preview.features(),
     };
     const activation = app.skill_runtime.activate(
         &tool_context,
@@ -993,6 +994,7 @@ fn executeFork(
             // loop is its executor and sets no shorter turn cap of its own.
             .max_turns = if (sealed) |remote| remote.maxTurns() else 20,
             .agent_depth = ctx.agent_depth + 1,
+            .preview = ctx.preview,
             .state_root = ctx.state_root,
             .dyn_registry = ctx.dyn_registry,
             .model_override = if (sealed != null) null else model_override,

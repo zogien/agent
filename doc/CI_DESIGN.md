@@ -1,5 +1,9 @@
 # CI design: PR validation, release targets and the legs
 
+The Agent fork runs the SDK archive matrix in [CI](../.github/workflows/ci.yml)
+and publishes from [Release](../.github/workflows/release.yml) on fork tags.
+The rest of this document describes the upstream MetaCodes checks.
+
 `ci.yml` runs the AGENTS.md pre-submit checklist on three platforms plus the
 offline TTY suites. This document covers how a required job skips work (§1),
 which of that work a change has to pay for (§2), how approved PRs

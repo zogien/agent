@@ -199,6 +199,24 @@ class InputDigestTest(Tree):
         (self.root / contract.PY_PROJECT).write_bytes(project.replace(b"metacodes", b"other"))
         self.assertNotEqual(release.input_digest(self.root), before, "the package apart from its version line")
 
+    def test_quickjs_engine_changes_the_agentcore_input_digest(self) -> None:
+        engine = self.root / "vendor" / "quickjs" / "quickjs.c"
+        engine.parent.mkdir(parents=True)
+        engine.write_text("/* engine */\n", encoding="utf-8")
+        git(self.root, "add", "vendor/quickjs/quickjs.c")
+        before = release.input_digest(self.root)
+        engine.write_text("/* changed engine */\n", encoding="utf-8")
+        self.assertNotEqual(release.input_digest(self.root), before)
+
+    def test_quickjs_stage_script_changes_the_agentcore_input_digest(self) -> None:
+        stage = self.root / "scripts" / "stage_quickjs_sources.py"
+        stage.parent.mkdir(parents=True, exist_ok=True)
+        stage.write_text("# stage\n", encoding="utf-8")
+        git(self.root, "add", "scripts/stage_quickjs_sources.py")
+        before = release.input_digest(self.root)
+        stage.write_text("# changed stage\n", encoding="utf-8")
+        self.assertNotEqual(release.input_digest(self.root), before)
+
     def test_only_tracked_files_count_and_line_endings_do_not(self) -> None:
         before = release.input_digest(self.root)
         (self.root / "sdk" / "node" / "prebuilds").mkdir()

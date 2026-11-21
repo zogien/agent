@@ -248,14 +248,20 @@ test "L2 SW6 F7: 进程外 teammate 先等死再收尸——已死收掉,存活�
     try std.testing.expectEqual(@as(std.c.pid_t, -1), std.c.waitpid(live_pid, &st, 1));
 }
 
-test "L2: lead 的 --no-lsp 跟着进程外 teammate 过进程边界" {
+test "L2: lead LSP and preview settings reach the teammate process" {
     // LSP 默认开之后,不透传就等于"lead 关了、teammate 照样起 language server"——逃生口
     // 在进程边界上漏掉,而进程外 teammate 恰恰是资源开销最该被尊重的地方。
     const a = std.testing.allocator;
     var home_buf: [256]u8 = undefined;
     const home = cc.util_fs.testing.uniqueDir(&home_buf, "cc-zig-sw6-nolsp");
     defer cc.util_fs.testing.rmrfBestEffort(home);
-    for ([_]bool{ true, false }) |lead_lsp_on| {
+    const Features = cc.types_mod.PreviewFeatures;
+    for ([_]struct { lsp: bool, preview: Features, flag: ?[]const u8 }{
+        .{ .lsp = true, .preview = .none, .flag = null },
+        .{ .lsp = true, .preview = .all, .flag = "--preview=execute_code,teamwork,comment_guard" },
+        .{ .lsp = false, .preview = .none, .flag = null },
+        .{ .lsp = false, .preview = .{ .comment_guard = true }, .flag = "--preview=comment_guard" },
+    }) |scenario| {
         // 每轮重建:lead 的 sw.deinit() 会做 orphan 清理删掉整个 team 目录。
         var dirbuf: [std.fs.max_path_bytes]u8 = undefined;
         try cc.util_fs.mkdirParents(team.teamDirPath(home, "proj", &dirbuf));
@@ -266,10 +272,14 @@ test "L2: lead 的 --no-lsp 跟着进程外 teammate 过进程边界" {
 
         var sw = swctx.SwarmContext{ .allocator = a, .session = test_session, .state_root = home, .team_sanitized = try a.dupe(u8, "proj") };
         defer sw.deinit();
+        sw.preview = scenario.preview;
 
         g_mock_flags_len = 0;
-        _ = try tp.spawnTeammateProcess(&sw, "worker", "", "", "", "0123456789abcdef01234567", null, &mockSpawn, lead_lsp_on);
+        _ = try tp.spawnTeammateProcess(&sw, "worker", "", "", "", "0123456789abcdef01234567", null, &mockSpawn, scenario.lsp);
         // 两侧都断言:开着时不得平白多塞 flag,关着时必须带上。
-        try std.testing.expectEqual(!lead_lsp_on, mockSawFlag("--no-lsp"));
+        try std.testing.expectEqual(!scenario.lsp, mockSawFlag("--no-lsp"));
+        try std.testing.expect(mockSawFlag("--no-preview"));
+        if (scenario.flag) |flag| try std.testing.expect(mockSawFlag(flag));
+        try std.testing.expectEqual(@as(usize, if (scenario.lsp) 1 else 2) + @intFromBool(scenario.flag != null), g_mock_flags_len);
     }
 }

@@ -95,6 +95,13 @@ pub fn captureTranscript(allocator: std.mem.Allocator, messages: []const msg.Mes
 }
 
 pub const SpawnOptions = struct {
+    preview: @import("../preview.zig").Features = .none,
+    /// Explicit host selections, also used when continuing a prebuilt root
+    /// conversation. Fresh child calls leave them disabled by default.
+    harnessmm: bool = false,
+    rsi: bool = false,
+    /// Borrowed for the synchronous child run.
+    rsi_policy: ?*const @import("../skills/rsi.zig").Policy = null,
     max_turns: u32 = 20,
     /// `agent_loop.Options.retractable_stream_retries` of the child, for a
     /// child that is itself the Run (an AgentCore Skill invocation in its own
@@ -178,6 +185,7 @@ pub const SpawnOptions = struct {
     sandbox: ?*const @import("../sandbox/config.zig").SandboxSettings = null,
     cwd_abs: []const u8 = "",
     resolve_relative_paths: bool = false,
+    path_aliases: []const @import("../tools/common.zig").PathAlias = &.{},
     home_dir: []const u8 = "",
     /// Host state root, propagated to the child's ToolContext and KG clone.
     state_root: []const u8 = "",
@@ -299,6 +307,10 @@ pub fn spawnAgentSink(
         ctx_to_use,
         .{
             .max_turns = opts.max_turns,
+            .preview = opts.preview,
+            .harnessmm = opts.harnessmm,
+            .rsi = opts.rsi,
+            .rsi_policy = opts.rsi_policy,
             .retractable_stream_retries = opts.retractable_stream_retries,
             .model_error_out = opts.model_error_out,
             .cost_budget_usd = opts.cost_budget_usd,
@@ -339,6 +351,7 @@ pub fn spawnAgentSink(
             .sandbox = opts.sandbox,
             .cwd_abs = opts.cwd_abs,
             .resolve_relative_paths = opts.resolve_relative_paths,
+            .path_aliases = opts.path_aliases,
             .home_dir = opts.home_dir,
             .state_root = opts.state_root,
             .artifact_root = opts.artifact_root,

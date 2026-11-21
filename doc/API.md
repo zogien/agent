@@ -18,10 +18,9 @@ helper contract and the current network-policy limits.
 
 | Interface | Entry point | Status | Compatibility rule |
 |---|---|---|---|
-| CLI | `metacodes-<version>-<target-id>/bin/metacodes` (the release unit, `release/LAYOUT.md`; `zig-out/bin/metacodes` in a development tree) | pre-1.0 | flags may evolve with changelog notice; `manifest.json` records version, commit, target, contract numbers and every file's digest |
 | Provider control plane | `src/provider/` kernel API | experimental | schema-versioned documents and revisioned mutations |
 | Zig source API | `@import("metacodes-core")` | experimental | pin repository commit and Zig toolchain |
-| AgentCore C ABI | `metask_agentcore_get_api(1)` | experimental rev 28 | exact root/child layouts and bundle manifest |
+| AgentCore C ABI | `metask_agentcore_get_api(1)` | experimental rev 29 | exact root/child layouts and bundle manifest |
 | Python package | `import metacodes` ([sdk/python](../sdk/python/README.md)) | experimental, unpublished | speaks exactly the AgentCore ABI revision it was built for and refuses any other |
 | Node package | `require('metacodes')` ([sdk/node](../sdk/node/README.md)) | experimental, unpublished; macOS and Linux | same exact-revision rule; the addon is rebuilt per platform |
 | Process plugins | strict manifest + stdio protocol | versioned v1 | reject unknown fields and digest drift |
@@ -31,6 +30,50 @@ helper contract and the current network-policy limits.
 Use [SessionHost](#sessionhost-a-multi-session-service-for-network-hosts)
 behind your own transport, or use the [AgentCore SDK](#agentcore-binary-embedding)
 to embed sessions in an application.
+
+## Preview features
+
+Preview features default to disabled, and each has its own switch:
+
+| Feature | Enables |
+|---|---|
+| `execute_code` | The `ExecuteCode` JavaScript orchestration tool |
+| `teamwork` | Teamwork runtime and Manager MCP execution |
+| `comment_guard` | The no-comment instruction and the editors' comment check |
+
+Source embedders set `AgentRuntime.RuntimeConfig.preview`, a
+`preview.Features` value such as `.all` or `.{ .execute_code = true }`.
+Child agents inherit the features. Each feature's own selection and permission
+rules still apply. HarnessMM and RSI have independent runtime settings.
+AgentCore ABI revision 29 exposes `RuntimeConfigV1.preview` (0 or 1, default
+0), where 1 enables every feature; Python uses `Runtime(preview=True)` and
+Node.js uses `new Runtime({ preview: true })`. The SDKs include `ExecuteCode`
+when enabled. Selecting a preview built-in by name while its feature is
+disabled is rejected.
+
+`comment_guard` instructs agents to express intent in code and avoid adding
+explanatory comments. Built-in Write, Edit, ApplyPatch and NotebookEdit check
+proposed edits before writing. For each recognized language they compare
+comment tokens, including repetitions, with the file or code cell being edited.
+A new token produces a recoverable tool error with the path and line.
+Shebangs and recognized tool directives are allowed. The lexical check covers
+text with a known baseline and up to 512 KiB on each side. It uses the bundled
+highlighter's string and comment rules, so language-specific constructs can be
+misclassified. It skips Bash sources containing `<<`, and YAML and CSS files entirely. Writes by shell commands,
+external tools and edits to unsupported formats rely on the prompt guidance.
+
+## JavaScript tool orchestration
+
+`ExecuteCode({code, timeout_ms?})` runs JavaScript in a per-session QuickJS
+context. `await tools.Read(args)` and the equivalent interfaces for selected
+built-in, Host and process tools enter the kernel's ordinary tool admission
+and execution pipeline. Meta Code and its tools remain implemented in Zig.
+The result contains the last expression, explicit logs and the inner call count;
+intermediate tool results stay outside provider messages. This is a preview
+feature: it is absent from the tool menu by default, and a guessed invocation
+is rejected before creating a VM. Enabling preview admits it to the catalog;
+Session tool selection and ordinary admission still apply. The normative behavior, limits and reset
+rules are in [PROGRAMMATIC_TOOL_CALLING.md](PROGRAMMATIC_TOOL_CALLING.md).
 
 ## Provider selection surface
 
@@ -207,6 +250,26 @@ The flag surface is fail-closed: an unknown flag or positional argument exits wi
 harnesses pass treatment configuration through this surface. Headless
 automation uses `-p/--print` (or `-` for stdin) with `--json`/`--stream-json`
 NDJSON output; introspection uses `--dump-prompt` and `--dump-plugins`.
+Two independent preview features default to off and are selected only by
+their own switches; the shared preview setting neither selects nor blocks them.
+`--harnessmm` / `--no-harnessmm`
+enables bounded runtime EDGs, guarded reuse of decisions through the native
+tool dispatcher, and durable callback-substitution certificates; the
+[HarnessMM protocol](HARNESSMM_PROTOCOL.md) defines supported guards and
+conservative fallback. `--rsi` / `--no-rsi`, with `--rsi-policy <file>`,
+enables the evolved procedural instruction and its own local ridge router
+together. With RSI off, its policy is not opened or required; with HarnessMM
+off, plans are not admitted and certificates are not read or written. Neither runtime switch
+starts optimization. The [RSI protocol](SKILL_RSI_PROTOCOL.md) defines offline
+training, budgets, exact features, hash binding and host-origin injection.
+Zig consumers use `harnessmm`, `skill_rsi`, and `agent_loop.Options.harnessmm`,
+`rsi` / `rsi_policy`. Explicit child
+selections use the matching `subagent.SpawnOptions` fields; fresh children
+default to no selection, while background root continuation retains it.
+The policy is borrowed for the run or job lifetime. Restoring a conversation
+does not restore feature permission or execute historical graphs; inactive
+host guidance is omitted only from provider projection. C ABI layouts are
+unchanged by these selections and AgentCore Sessions do not implicitly inherit CLI features.
 `metacodes update [--check] [--version X.Y.Z] [--release-base <url>] [--pull]
 [--allow-downgrade] [--no-sdk] [--ignore-running] [--json]` brings the install
 the executable belongs to up to date from the source its install record names
@@ -691,7 +754,7 @@ non-null value with `error.AgentEffortUnsupportedProvider`.
 `WorkspaceConfig.additional_dirs` widens exactly what the workspace root grants:
 `accept_edits` auto-approval of Write/Edit/NotebookEdit and sandboxed shell
 writes. It is not named in the system prompt. These two are source-level only;
-AgentCore revision 28 does not carry them.
+AgentCore revision 29 does not carry them.
 
 ### Permission modes the settings disable
 
@@ -1154,7 +1217,7 @@ The source-free bundle is one coordinate root: `sdk/metask/agentcore.h`
 (C11/C++17), the `sdk/zig` and `sdk/rust` bindings, one target-specific static
 library, the manifest-pinned ripgrep runtime asset, and a manifest whose file
 allow-list and SHA-256 values are mandatory. Consumers call only
-`metask_agentcore_get_api(METASK_AGENTCORE_ABI_V1)` and must validate ABI revision 28,
+`metask_agentcore_get_api(METASK_AGENTCORE_ABI_V1)` and must validate ABI revision 29,
 the exact 80-byte root, all seven mandatory typed tables, reserved zeros, function
 slots, and the schema-1 bundle manifest. The ABI is experimental, with no
 compatibility shim between revisions: pin a bundle, not only a semantic version.
@@ -1275,3 +1338,22 @@ documented paired release API: AgentCore-owned byte buffers are released with
 registered release function. Hosts must not retain sink pointers, call mutating
 session APIs reentrantly, or destroy a runtime with active sessions. The normative
 ownership rules live beside each public header/type and its consumer fixture.
+
+## Teamwork Manager MCP (#522)
+
+The normative Manager protocol is [TEAMWORK_MCP.md](TEAMWORK_MCP.md).
+`teamwork/mcp_server.zig` exposes `Server.init(gpa, run: *runtime.Run) Server`,
+`handle(self, gpa, line) error{OutOfMemory}!?[]u8`, `serve(self) !void` on
+stdin/stdout, and `serveFds(self, input: platform.fs.Fd, output: platform.fs.Fd)
+!void`. The host starts an already-user-approved run and retains ownership.
+`handle` responses are owned by its allocator; the caller frees them. Serving
+uses bounded NDJSON with protocol-only stdout and cancels live runs on EOF.
+
+The tools are `teamwork_status`, synchronous `teamwork_dispatch` (only
+implementer/reviewer and optional instructions), `teamwork_request_completion`
+and `teamwork_cancel`. No tool starts or approves a run, replaces the approved
+request, changes configuration/budget/check command, or chooses a workspace.
+The runtime alone verifies review approval, independently audits and merges;
+an unavailable audit cannot complete. Results contain real runtime snapshots
+in text and structured content. See the normative document for lifecycle,
+error codes, ownership, limits and cancellation semantics.

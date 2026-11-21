@@ -409,7 +409,19 @@ pub fn spawnTeammateProcess(
     }
 
     // ③ fork+exec(或 mock)。
-    const lsp_off = [_][]const u8{"--no-lsp"};
+    var flags: [3][]const u8 = undefined;
+    var preview_arg: [@import("../preview.zig").Features.max_arg_len]u8 = undefined;
+    var flag_count: usize = 0;
+    if (!lsp_enabled) {
+        flags[flag_count] = "--no-lsp";
+        flag_count += 1;
+    }
+    flags[flag_count] = "--no-preview";
+    flag_count += 1;
+    if (!sw.preview.eql(.none)) {
+        flags[flag_count] = sw.preview.enableArg(&preview_arg);
+        flag_count += 1;
+    }
     const pid = try spawn_fn(a, .{
         .name = name_s,
         .team = sw.team_sanitized,
@@ -417,7 +429,7 @@ pub fn spawnTeammateProcess(
         .lease_id = lease_id.asSlice(),
         .cwd = effective_wt,
         .state_root = sw.state_root,
-        .extra_flags = if (lsp_enabled) &.{} else &lsp_off,
+        .extra_flags = flags[0..flag_count],
     });
     // The child is live but not yet owned by process_teammates. Any
     // allocation/append failure below must terminate and reap it before the

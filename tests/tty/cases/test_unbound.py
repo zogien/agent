@@ -18,7 +18,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from tty_driver import READY, WAIT_S, case_tmpdir, run, submit, wait_for  # noqa: E402
+from tty_driver import READY, case_tmpdir, run, submit, wait_for  # noqa: E402
 from asserts import TTYAssert  # noqa: E402
 
 NOT_SET = "not set — /login, or configure .env"
@@ -31,7 +31,7 @@ KEY_VARIABLES = (
     "METASK_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
     "ZAI_API_KEY", "GLM_API_KEY", "Z_AI_API_KEY", "DEEPSEEK_API_KEY",
     "KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_CODE_API_KEY", "DASHSCOPE_API_KEY",
-    "MINIMAX_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "METACODES_PROVIDER",
+    "MINIMAX_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "OPENROUTER_API_KEY", "METACODES_PROVIDER",
     "METACODES_MODEL", "METACODES_PRESET", "METACODES_API_KEY_FD", "METACODES_AUTH_FILE",
 )
 
