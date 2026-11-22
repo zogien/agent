@@ -12,7 +12,7 @@ from scripts.eval.e2e_adapter import (
 )
 from scripts.eval.kgd_processes import temporary_directory_without_kgd
 from scripts.eval.model import load_json
-from tests.tty.slow_mock_server import SlowMockServer, simple_text, slow_text_then_tooluse
+from scripts.eval.tests.slow_mock_server import SlowMockServer, simple_text, slow_text_then_tooluse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

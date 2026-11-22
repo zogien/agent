@@ -133,7 +133,7 @@ run from an extracted release unit or one staged from source (`release:verify`):
    called, so this is how its hints name the command the user ran
    (`metacodes-dev login`, #482). Every process a session starts inherits
    the variable, so the executable believes it only when the file it names
-   is a launcher that execs it (`src/app/invocation.zig`);
+   is a launcher that execs it;
 6. runs the installed `bin/metacodes doctor --strict` in an empty environment
    (POSIX) and requires every runtime asset adjacent and the state root to come
    from the install record.

@@ -1,6 +1,9 @@
 # `metacodes update`: bring an install up to date from where it came from
 
-Status: implemented 2026-10-25 (§12 records the decisions). Code:
+This records the upstream CLI self-update design implemented on 2026-10-25.
+See the [SDK guide](../sdk/README.md) for this fork's packaging and usage.
+
+The original implementation used
 `src/app/update.zig`, `src/app/release_fetch.zig`, `src/app/unit_archive.zig`,
 `src/app/release_source.zig`, `src/platform/process_scan.zig`. Builds on [INSTALL_DESIGN.md](INSTALL_DESIGN.md) §4 (the installer
 and `install.sh`) and [RELEASE_AUTOMATION_DESIGN.md](RELEASE_AUTOMATION_DESIGN.md)

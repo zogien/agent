@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from scripts.eval.skill_rsi import PREFIX, SUFFIX, Settings, route, run_rsi, stable
-from tests.tty.slow_mock_server import SlowMockServer, simple_text, slow_text_then_tooluse
+from scripts.eval.tests.slow_mock_server import SlowMockServer, simple_text, slow_text_then_tooluse
 
 ROOT = Path(__file__).resolve().parents[3]
 BIN = os.environ.get("METACODES_NATIVE_E2E_BIN")

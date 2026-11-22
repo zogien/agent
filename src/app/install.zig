@@ -660,7 +660,7 @@ pub fn launcherTarget(arena: std.mem.Allocator, body: []const u8) !?[]const u8 {
 /// first: `exec` hands the executable its own path as argv[0], the same for
 /// every install, so this is how a run learns that the user typed
 /// `metacodes-dev` and names that command in its messages
-/// (app/invocation.zig, #482). Argv[0] itself is left alone, so `ps` still
+/// (upstream #482). Argv[0] itself is left alone, so `ps` still
 /// shows the install's path, which `install.sh --uninstall` looks for.
 pub fn launcherBody(arena: std.mem.Allocator, executable: []const u8) ![]const u8 {
     var quoted: std.ArrayList(u8) = .empty;
