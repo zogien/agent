@@ -4,7 +4,7 @@ Start here rather than reading design ledgers chronologically.
 
 ## Start here
 
-- **Using metacodes:** [Getting started](GETTING_STARTED.md) — install,
+- **Upstream Metacodes CLI:** [Getting started](GETTING_STARTED.md) — install,
   providers, Metask OAuth, build from source; [Providers](PROVIDERS.md) — where
   models come from: a Metask account, a vendor's key, a model API of your own
   (`metacodes providers`); [Local configuration](LOCAL_CONFIG.md)

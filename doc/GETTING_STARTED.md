@@ -1,7 +1,8 @@
 # Getting started
 
-> This page documents the former Metacodes CLI. For the current build and
-> host integration instructions, see the [AgentCore SDK guide](../sdk/README.md).
+> This page documents the upstream Metacodes CLI. The CLI install scripts
+> and source build commands below apply to the upstream checkout. For this
+> fork's build and host integration, see the [AgentCore SDK guide](../sdk/README.md).
 
 Install, configure a model, build from source. The [README](../README.md) is
 the overview; this page holds the details it links to.
@@ -16,7 +17,7 @@ the overview; this page holds the details it links to.
 
 ## Install a release
 
-macOS and Linux (aarch64 or x86_64), the latest release:
+On macOS and Linux (aarch64 or x86_64), install the latest upstream CLI release:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/metask-ai/metacodes/main/scripts/install.sh | sh
@@ -35,7 +36,7 @@ keeps the state. `| sh -s -- --version X.Y.Z` picks a release, `--help` lists
 the rest. Nothing needs starting by hand: the first session of an install sets
 up and starts its TinyKG service in the background.
 
-A downloaded archive installs the same way:
+To install a downloaded CLI archive, run the installer from an upstream checkout:
 
 ```sh
 sh scripts/install.sh metacodes-<version>-<target>.tar.gz
@@ -45,8 +46,8 @@ sh scripts/install.sh metacodes-<version>-<target>.tar.gz
 powershell -ExecutionPolicy Bypass -File scripts\install.ps1 metacodes-<version>-x86_64-windows-gnu.zip
 ```
 
-From a checkout, `scripts/install.sh --dev` builds the release unit from source
-and installs it beside the released one: the main checkout as `metacodes-dev`
+From an upstream checkout, `scripts/install.sh --dev` builds the release unit
+from source and installs it beside the released one: the main checkout as `metacodes-dev`
 (`~/.local/opt/metacodes-dev`), a linked worktree as
 `metacodes-dev-<worktree directory>`, each with a state root of its own. An
 install is a copy, so rebuilding or removing the checkout leaves it running;
@@ -338,9 +339,9 @@ With a Lean toolchain (elan) on the machine, `zig build test` also builds both
 governance kernels from this checkout (`kernels:stage`, cached on the Lean
 sources) and runs every kernel-gated test against them; `-Dlean-kernels=on`
 turns a missing toolchain into a failure, `off` skips the kernels. On Windows
-the kernel scripts run under Git for Windows' bash, never WSL's. A release
-unit from source is `zig build kernels:stage --prefix <u>` followed by
-`zig build release:verify -Drelease-layout=true --prefix <u> $(python3
+the kernel scripts run under Git for Windows' bash, never WSL's. In an upstream
+CLI checkout, build a release unit with `zig build kernels:stage --prefix <u>`
+followed by `zig build release:verify -Drelease-layout=true --prefix <u> $(python3
 scripts/kernel_pins.py <u>)`; `<u>/bin/metacodes install --prefix <dir>` then
 installs it. `scripts/install.sh --dev` does all three, plus the AgentCore SDK.
 

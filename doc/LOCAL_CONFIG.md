@@ -1,5 +1,7 @@
 # Local configuration: `.env` in the state root
 
+> These paths and configuration commands apply to upstream Metacodes CLI installs.
+
 You can use metacodes with your own provider key instead of a Metask sign-in.
 Put the key in one file of your install, `.env` in its state root, and start
 metacodes again. Nothing goes into your shell profile and nothing into a
@@ -26,8 +28,8 @@ file is `.env` in it.
 
 | Install | File |
 |---|---|
-| Release, installed with `scripts/install.sh` | `~/.local/opt/metacodes/state/.env` |
-| Development install, `scripts/install.sh --dev` | `~/.local/opt/metacodes-dev/state/.env` (a linked worktree: `~/.local/opt/metacodes-dev-<worktree directory>/state/.env`) |
+| Upstream release install | `~/.local/opt/metacodes/state/.env` |
+| Upstream development install | `~/.local/opt/metacodes-dev/state/.env` (a linked worktree: `~/.local/opt/metacodes-dev-<worktree directory>/state/.env`) |
 | A build run from a checkout, or an install older than install records | `~/.metacodes/.env` |
 | `--state-dir <dir>`, or `METACODES_HOME=<dir>` | `<dir>/.env` |
 
