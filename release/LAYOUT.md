@@ -1,5 +1,8 @@
 # CLI release layout
 
+> This document records the upstream MetaCodes CLI release unit. The fork's
+> delivery format is described in the [AgentCore SDK guide](../sdk/README.md).
+
 The `metacodes-cli` release unit is the default install prefix sealed with a
 manifest (#47 §5.2, stage 5 / #80). `zig build release:stage -Drelease-layout=true
 --prefix <dir>` produces the tree; `release:manifest` writes `manifest.json`;

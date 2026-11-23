@@ -11,12 +11,10 @@ C ABI v1 revision 29:
   permission handling ([python/README.md](python/README.md));
 - `node/` — the `metacodes` Node package: a Node-API addon over the shared
   library with the same API shape for JavaScript ([node/README.md](node/README.md));
-- `VERSION` — AgentCore's own SemVer version, distinct from the main project's
-  and from the ABI revision. Every package carries it; `agentcore-releases.json`
-  maps each release to its ABI revision and to the metacodes releases that ship it
-  ([doc/RELEASE_AUTOMATION_DESIGN.md](../doc/RELEASE_AUTOMATION_DESIGN.md) §2a);
-- `CHANGELOG.md` — AgentCore's changes and migration steps. A change a Host can
-  see gets an entry here.
+
+The root [changelog](../CHANGELOG.md) records host-visible changes and
+migration steps. The [release ledger](../agentcore-releases.json) records
+the upstream provenance of earlier AgentCore releases.
 
 Do not copy individual files into a release. Consume the complete generated bundle
 and validate its manifest, hashes, target, ABI version, exact 80-byte root, all
@@ -115,6 +113,23 @@ the pinned TinyKG tools under `zig-out/vendor/tinykg/`.
 
 `zig build archive -Dtarget=<target> -Doptimize=ReleaseSafe` writes a
 redistributable archive and its SHA-256 sidecar to `zig-out/agentcore-archives/`.
+
+## Release version
+
+The `.version` field in [build.zig.zon](../build.zig.zon) is the AgentCore
+version. Run `python scripts/check_version_state.py --sync` after updating it
+to synchronize the Zig, Python and Node declarations.
+
+An ordinary build produces `X.Y.Z-dev+<commit12>` and appends `.dirty`
+when the checkout has changes. A fork release declares `X.Y.Z-fork.N` and
+uses a matching `fork/vX.Y.Z-fork.N` tag on a clean commit. The archive and
+npm packages use the version without the tag prefix. The optional Python
+wheel uses the PEP 440 version `X.Y.Z+fork.N`.
+
+The [release workflow](../.github/workflows/release.yml) builds the platform
+archives and publishes them to GitHub Releases and npm. The
+[upstream release design](../doc/RELEASE_AUTOMATION_DESIGN.md) records the
+historical MetaCodes process.
 
 Run the native host acceptance checks with the following command.
 

@@ -37,14 +37,6 @@ import agentcore_release  # noqa: E402
 SUMMARY = "Embed the metacodes agent runtime (AgentCore C ABI) in Python"
 
 
-def python_version(sdk_version: str) -> str:
-    """sdk/VERSION 0.11.0-dev -> PEP 440 0.11.0.dev0."""
-    match = re.fullmatch(r"(\d+\.\d+\.\d+)(?:-dev)?", sdk_version.strip())
-    if not match:
-        raise SystemExit("unsupported sdk/VERSION: %r" % sdk_version)
-    return match.group(1) + (".dev0" if sdk_version.strip().endswith("-dev") else "")
-
-
 def platform_tag(target: dict) -> str:
     """Wheel platform tag for a bundle manifest `target` object."""
     arch, os_name, abi = target["architecture"], target["os"], target["abi"]
@@ -78,7 +70,7 @@ def build(bundle: Path, out_dir: Path, tag_override: str = "", formal: bool = Fa
         raise SystemExit("cannot package %s: %s" % (bundle, error))
     library = bundle / manifest["shared_library"]["path"]
     base, development = agentcore_contract.base_of_built(manifest["version"])
-    version = python_version(base + ("-dev" if development else ""))
+    version = agentcore_contract.python_version(base + ("-dev" if development else ""))
     tag = tag_override or platform_tag(manifest["target"])
     source = root / "sdk" / "python" / "src" / PACKAGE
 

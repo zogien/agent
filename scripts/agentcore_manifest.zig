@@ -99,6 +99,7 @@ pub fn main(init: std.process.Init) !void {
     const strip_text = args.next() orelse return usage();
     const library_file = args.next() orelse return usage();
     const shared_file = args.next() orelse return usage();
+    const sdk_version = args.next() orelse return usage();
     if (args.next() != null) return usage();
 
     if (bundle_root.len == 0 or resolved_target.len == 0 or architecture.len == 0 or
@@ -108,7 +109,7 @@ pub fn main(init: std.process.Init) !void {
     const strip = parseBool(strip_text) orelse return error.InvalidBoolean;
 
     const source = try common.sourceIdentity(allocator, init.io, "AgentCore manifest");
-    const version = try versionAtHead(allocator, init.io, source);
+    const version = try versionAtHead(allocator, init.io, sdk_version, source);
     if (version.len > 32) return error.PackageVersionTooLong;
     const target_id = try common.packageTargetId(allocator, architecture, os, abi);
     const rust_target = try rustTarget(architecture, os, abi);
@@ -231,7 +232,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn usage() error{InvalidArguments} {
     std.debug.print(
-        "usage: agentcore-manifest <bundle-root> <target> <arch> <os> <abi> <optimize> <strip> <library-file> <shared-library-file>\n",
+        "usage: agentcore-manifest <bundle-root> <target> <arch> <os> <abi> <optimize> <strip> <library-file> <shared-library-file> <sdk-version>\n",
         .{},
     );
     return error.InvalidArguments;
@@ -263,14 +264,20 @@ fn parseRipgrepPin(allocator: std.mem.Allocator, bytes: []const u8) !RipgrepPin 
     return parsed;
 }
 
-fn versionAtHead(allocator: std.mem.Allocator, io: std.Io, source: SourceIdentity) ![]const u8 {
+fn versionAtHead(allocator: std.mem.Allocator, io: std.Io, sdk_version: []const u8, source: SourceIdentity) ![]const u8 {
     const tags = try common.runGit(allocator, io, "AgentCore manifest", &.{
         "git", "tag", "--list", "--points-at", "HEAD", "fork/v*-fork.*",
     });
-    if (try forkVersion(tags)) |version| return version;
+    return versionForSource(allocator, sdk_version, tags, source);
+}
 
-    const sdk_version = try std.Io.Dir.cwd().readFileAlloc(io, "sdk/VERSION", allocator, .limited(256));
-    return packageVersion(allocator, std.mem.trim(u8, sdk_version, " \r\n\t"), source);
+fn versionForSource(allocator: std.mem.Allocator, sdk_version: []const u8, tags: []const u8, source: SourceIdentity) ![]const u8 {
+    if (try forkVersion(tags)) |version| {
+        if (!std.mem.eql(u8, sdk_version, version)) return error.ForkTagVersionMismatch;
+        if (source.dirty) return error.DirtyForkRelease;
+        return sdk_version;
+    }
+    return packageVersion(allocator, sdk_version, source);
 }
 
 fn forkVersion(tags: []const u8) error{ InvalidForkTag, AmbiguousForkTags }!?[]const u8 {
@@ -298,7 +305,7 @@ fn packageVersion(allocator: std.mem.Allocator, sdk_version: []const u8, source:
     if (sdk_version.len == 0) return error.InvalidSdkVersion;
     const parsed = std.SemanticVersion.parse(sdk_version) catch return error.InvalidSdkVersion;
     if (parsed.build != null) return error.InvalidSdkVersion;
-    const prerelease = parsed.pre orelse return allocator.dupe(u8, sdk_version);
+    const prerelease = parsed.pre orelse return error.InvalidSdkVersion;
     if (!std.mem.eql(u8, prerelease, "dev") and !isForkPrerelease(prerelease)) return error.InvalidSdkVersion;
 
     // An untagged checkout of a fork version still produces a development bundle.
@@ -522,19 +529,13 @@ test "package version is derived from sdk version and source identity" {
     defer allocator.free(clean_version);
     try std.testing.expectEqualStrings("0.1.0-dev+0123456789ab", clean_version);
 
-    const stable_version = try packageVersion(allocator, "0.1.0", clean);
-    defer allocator.free(stable_version);
-    try std.testing.expectEqualStrings("0.1.0", stable_version);
+    try std.testing.expectError(error.InvalidSdkVersion, packageVersion(allocator, "0.1.0", clean));
 
     var dirty = clean;
     dirty.dirty = true;
     const dirty_version = try packageVersion(allocator, "0.1.0-dev", dirty);
     defer allocator.free(dirty_version);
     try std.testing.expectEqualStrings("0.1.0-dev+0123456789ab.dirty", dirty_version);
-    const dirty_stable_version = try packageVersion(allocator, "0.1.0", dirty);
-    defer allocator.free(dirty_stable_version);
-    try std.testing.expectEqualStrings("0.1.0", dirty_stable_version);
-
     const fork_dev_version = try packageVersion(allocator, "0.15.0-fork.1", clean);
     defer allocator.free(fork_dev_version);
     try std.testing.expectEqualStrings("0.15.0-dev+0123456789ab", fork_dev_version);
@@ -543,7 +544,19 @@ test "package version is derived from sdk version and source identity" {
     try std.testing.expectError(error.InvalidSdkVersion, packageVersion(allocator, "0.1.0-rc.1", clean));
 }
 
-test "a fork tag supplies the entire package version" {
+test "the fork tag must confirm the declared version on a clean commit" {
+    const clean = SourceIdentity{ .commit = "0123456789abcdef0123456789abcdef01234567", .dirty = false };
+    var dirty = clean;
+    dirty.dirty = true;
+    const tag = "fork/v0.15.0-fork.1";
+    const allocator = std.testing.allocator;
+    try std.testing.expectEqualStrings("0.15.0-fork.1", try versionForSource(allocator, "0.15.0-fork.1", tag, clean));
+    try std.testing.expectError(error.ForkTagVersionMismatch, versionForSource(allocator, "0.15.0-dev", tag, clean));
+    try std.testing.expectError(error.ForkTagVersionMismatch, versionForSource(allocator, "0.15.0-fork.2", tag, clean));
+    try std.testing.expectError(error.DirtyForkRelease, versionForSource(allocator, "0.15.0-fork.1", tag, dirty));
+}
+
+test "fork tag parsing rejects malformed or ambiguous tags" {
     try std.testing.expectEqualStrings("0.15.0-fork.1", (try forkVersion("fork/v0.15.0-fork.1\r\n")).?);
     try std.testing.expect((try forkVersion("")) == null);
     try std.testing.expectError(error.InvalidForkTag, forkVersion("fork/0.15.0-fork.1\n"));

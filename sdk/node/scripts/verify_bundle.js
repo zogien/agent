@@ -9,12 +9,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const FINAL = /^\d+\.\d+\.\d+$/;
+const FORK = /^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)-fork\.(?:0|[1-9][0-9]*)$/;
 const BUILT_DEV = /^(\d+\.\d+\.\d+)-dev\+[0-9a-f]{12}(\.dirty)?$/;
 
 function packageVersionOf(built) {
-  if (FINAL.test(built)) return built;
+  if (FINAL.test(built) || FORK.test(built)) return built;
   const match = BUILT_DEV.exec(built);
-  if (!match) throw new Error(`bundle version ${built} is neither a final X.Y.Z nor X.Y.Z-dev+<commit12>`);
+  if (!match) throw new Error(`invalid AgentCore bundle version: ${built}`);
   return `${match[1]}-dev.0`;
 }
 
@@ -22,7 +23,7 @@ function verifyBundle(bundle, { release = false, packageRoot = path.resolve(__di
   const manifest = JSON.parse(fs.readFileSync(path.join(bundle, 'manifest.json'), 'utf8'));
   const declared = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8')).version;
   const expected = packageVersionOf(manifest.version);
-  if (release && !FINAL.test(manifest.version)) {
+  if (release && BUILT_DEV.test(manifest.version)) {
     throw new Error(`development version ${manifest.version} cannot go into a formal release package`);
   }
   if (declared !== expected) {

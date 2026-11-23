@@ -281,14 +281,15 @@ flowchart TB
 
 ## Project status
 
-metacodes is pre-1.0. The version is declared in `build.zig.zon`, and releases
-ship for five targets with checksums.
+AgentCore is pre-1.0. The version in `build.zig.zon` drives the
+[SDK releases](sdk/README.md#release-version). Each platform archive ships
+with a SHA-256 checksum.
 
 | Area | Status |
 |---|---|
 | AgentCore C ABI | Experimental; hosts pin the exact revision |
 | `metacodes-core` Zig module | Experimental source API |
-| TinyKG memory and task DAG | On by default in the CLI; not yet in AgentCore |
+| TinyKG memory and task DAG | Available through the source library |
 | Lean project rules | Experimental; dormant until a project activates them |
 | Self-evolution, learning turn, check gate | Experimental, off by default |
 | Sandbox | macOS (Seatbelt) and Linux (bubblewrap), opt-in |

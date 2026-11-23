@@ -102,12 +102,15 @@ Run `zig build gate:pr` to execute the single AGENTS.md pre-submit checklist.
 - [CI design](CI_DESIGN.md) — required checks, the change scope that skips
   suites a change cannot affect, and the merge queue that tests a batch of
   PRs once.
-- [Release automation](RELEASE_AUTOMATION_DESIGN.md) — version bumping,
-  cutting, tagging, publishing, and the CI fast path for release PRs.
+- [AgentCore release version and workflow](../sdk/README.md#release-version).
+- [Upstream release automation](RELEASE_AUTOMATION_DESIGN.md) — historical
+  MetaCodes cut, tag and publish process.
 - [`metacodes update`](UPDATE_DESIGN.md) — historical upstream design for
   CLI self-updates.
 
 ## History
+
+- [MetaCodes application changelog](history/METACODES_CHANGELOG.md).
 
 - `doc/history/AGENTCORE_V1_REVISION14_PLUGIN_ABI_PLAN.md` — revision 14 plugin ABI plan.
 - `doc/history/AGENTCORE_V1_MCP_TRANSPORT_HARDCUT_DESIGN.md` — MCP transport hard-cut design.

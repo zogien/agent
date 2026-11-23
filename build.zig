@@ -4,6 +4,11 @@ const std = @import("std");
 // runtime_arm_smoke 的 --expected-version 在 `zig build test` 中用真实二进制强制。
 const manifest = @import("build.zig.zon");
 
+comptime {
+    if (!std.mem.eql(u8, manifest.version, @import("src/version.zig").semver))
+        @compileError("AgentCore version mirrors are out of date. Run python scripts/check_version_state.py --sync.");
+}
+
 // highlight-zig 轻量高亮库(Y2:已取代 tree-sitter 做 diff 高亮)。纯 Zig + 嵌入 rules_blob.zlib,
 // 零 C 依赖,200+ 语言。作为 git submodule 位于 lib/highlight-zig(独立 repo
 // github.com/shuzuan-org/highlight-zig),纯 Zig 模块方式消费其源(每个 root 各按自身
@@ -1520,6 +1525,7 @@ pub fn build(b: *std.Build) void {
         if (agentcore_strip) "true" else "false",
         agentcore_library_file,
         agentcore_shared_file,
+        manifest.version,
     });
     manifest_cmd.setCwd(b.path("."));
     manifest_cmd.step.dependOn(&agentcore_symbol_gate_cmd.step);
@@ -2256,16 +2262,17 @@ pub fn build(b: *std.Build) void {
     const pr_loop_test_step = b.step("test:pr-loop", "Test PR review, repair, exact-head merging and CI evidence");
     pr_loop_test_step.dependOn(&pr_loop_test_cmd.step);
     units_test_step.dependOn(&pr_loop_test_cmd.step);
-    const release_cut_test_cmd = b.addSystemCommand(&.{
+    const sdk_version_test_cmd = b.addSystemCommand(&.{
         if (@import("builtin").os.tag == .windows) "python" else "python3",
         "-m",
         "unittest",
-        "scripts.tests.test_release_cut",
+        "scripts.tests.test_agentcore_release",
+        "scripts.tests.test_sdk_package_versions",
         "-v",
     });
-    const release_cut_test_step = b.step("test:release-cut", "Test the release cut / reopen rules and the version-state gate");
-    release_cut_test_step.dependOn(&release_cut_test_cmd.step);
-    units_test_step.dependOn(&release_cut_test_cmd.step);
+    const sdk_version_test_step = b.step("test:sdk-version", "Test AgentCore version, bundle and release checks");
+    sdk_version_test_step.dependOn(&sdk_version_test_cmd.step);
+    units_test_step.dependOn(&sdk_version_test_cmd.step);
     // The rule-control sensors read source text, so moving the code a sensor
     // reads turns its rule red without failing any product test. Only the
     // dispatch-only rule-control workflow ran them, and three drifted

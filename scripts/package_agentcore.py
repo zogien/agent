@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""Create one immutable AgentCore SDK archive and its SHA-256 sidecar.
-
-Since #81 the archive core lives in `scripts/release_archive.py`, shared with
-the CLI release unit; this entry point keeps the SDK's command line
-(`package_agentcore.py <bundle_root> <output_dir>` and `--self-test`) and its
-identity (`--kind agentcore`). The channel gate is `release_archive.enforce_channel`:
-a stable SDK version archives only from the main-project release the ledger
-(`sdk/agentcore-releases.json`) names as the one that builds it.
-"""
 from __future__ import annotations
 
 import argparse
@@ -17,7 +8,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
-from scripts import release_archive  # noqa: E402
+from scripts import agentcore_contract, release_archive  # noqa: E402
 
 # Kept as names for the callers and tests that imported them from here.
 SAFE_COORDINATE = release_archive.SAFE_COORDINATE
@@ -29,14 +20,19 @@ write_zip_file = release_archive.write_zip_file
 
 
 def load_bundle(bundle_root: Path) -> tuple[dict, str, str, tuple[str, ...]]:
-    bundle = release_archive.load_bundle(bundle_root, "agentcore")
+    bundle = release_archive.load_bundle(bundle_root)
     return bundle.manifest, bundle.target_os, bundle.coordinate, bundle.archive_paths
 
 
 def write_archive(bundle_root: Path, output_dir: Path) -> tuple[Path, Path]:
-    bundle = release_archive.load_bundle(bundle_root.resolve(), "agentcore")
-    git_facts = release_archive.collect_git_facts(PROJECT_ROOT, bundle.version if bundle.channel == "stable" else None)
-    return release_archive.write_archive(bundle_root, output_dir, "agentcore", git_facts)
+    bundle = release_archive.load_bundle(bundle_root.resolve())
+    git_facts = release_archive.collect_git_facts(PROJECT_ROOT)
+    if agentcore_contract.FORK_VERSION_RE.fullmatch(bundle.version):
+        findings = agentcore_contract.correspondence_findings(bundle.manifest, PROJECT_ROOT)
+        findings.extend(agentcore_contract.package_version_findings(PROJECT_ROOT))
+        if findings:
+            raise ValueError("; ".join(findings))
+    return release_archive.write_archive(bundle_root, output_dir, git_facts)
 
 
 def main() -> int:
