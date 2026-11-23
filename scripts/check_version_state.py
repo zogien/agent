@@ -1,150 +1,43 @@
 #!/usr/bin/env python3
-"""Gate: a version without `-dev` is legal only on the commit that carries its
-tag, or on a `release/<version>` head (the release PR before it merges).
-
-Closes the reopen window of doc/RELEASE_AUTOMATION_DESIGN.md stage D: between
-the release PR merging and the reopen PR merging, `main` carries the bare
-released version; any other change merged in that window would ship an
-untagged bare version (`release:manifest` fails on it while `--version`
-looks stable). Wired into `doc:check`, so `zig build gate:pr` and every PR's
-CI run it. Between releases (`X.Y.Z-dev`) it is a no-op.
-
-Head branch detection: `GITHUB_HEAD_REF` (pull_request events check out a
-merge commit, so the branch name is only in the environment), else
-`git rev-parse --abbrev-ref HEAD`. In CI the release-PR exception also needs
-RELEASE_PR_TITLE == `release: <version>` and `release` in RELEASE_PR_LABELS
-(ci.yml passes the title from the event payload and the labels the PR has
-when the step runs: `gh pr create --label` adds the label after creating the
-PR, so the `opened` payload can lack it); the merge-subject exception is
-honoured only on push runs. A merge queue group (doc/CI_DESIGN.md §3)
-carries no PR in its event: ci.yml takes the PR at the group's head (the
-newest entry) from its ref and passes that PR's head branch as
-GITHUB_HEAD_REF, with its title and labels, so the release PR passes only
-as its group's head and a PR queued behind it is refused. Tags:
-`actions/checkout` with `fetch-depth: 0` fetches every branch and tag, so no
-fetch is needed here.
-
-`--rehearse` (CI only): on a release PR head or on main's run of the release
-merge commit, tag HEAD locally so `release:verify` / `release:archive` can run
-the stable channel on the candidate before the real tag exists (design §3 C).
-The AgentCore half (`agentcore_release.state_findings`) runs in the same gate:
-AgentCore is finalized and reopened with the main project, its packages agree
-with `sdk/VERSION`, every ABI revision mirror agrees, the ledger is valid and
-append-only, and a release commit is the release its ledger entry records.
-Python 3.9, stdlib only.
-"""
 from __future__ import annotations
 
-import os
-import re
+import argparse
 import subprocess
-import sys
 from pathlib import Path
-from typing import Dict, Optional
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import agentcore_release  # noqa: E402  (same directory, stdlib only)
+import agentcore_contract as contract
+import agentcore_release
+
 
 ROOT = Path(__file__).resolve().parents[1]
-ZON_VERSION_RE = re.compile(r'\.version\s*=\s*"([^"]+)"')
 
 
-def git(*argv: str, root: Path) -> str:
-    # git writes UTF-8 (a HEAD subject can carry any character); `text=True`
-    # would decode with the locale codec, GBK on a Chinese Windows.
-    proc = subprocess.run(["git", *argv], cwd=str(root), capture_output=True, check=False)
-    return proc.stdout.decode("utf-8").strip() if proc.returncode == 0 else ""
-
-
-def check(root: Path, head_ref: str, env: Optional[Dict[str, str]] = None) -> str:
-    """Empty string = ok, otherwise the finding. `env` defaults to the process
-    environment; tests pass an explicit one (the CI environment itself sets
-    GITHUB_ACTIONS, which would otherwise leak into fixture repositories)."""
-    text = (root / "build.zig.zon").read_text(encoding="utf-8")
-    match = ZON_VERSION_RE.search(text)
-    if match is None:
-        return "build.zig.zon: no .version declaration"
-    version = match.group(1)
-    if version.endswith("-dev"):
-        return ""
-    if git("describe", "--tags", "--exact-match", "HEAD", root=root) == version:
-        return ""
-    if rehearsable(root, version, head_ref, env):
-        return ""
-    return (
-        f"build.zig.zon says {version} (no -dev) but HEAD is not tagged {version} and the head branch "
-        f"({head_ref or 'unknown'}) is not release/{version}: a release is mid-flight; merge the reopen PR "
-        f"(python3 scripts/release_cut.py --reopen) before merging anything else"
-    )
-
-
-def rehearsable(root: Path, version: str, head_ref: str, env: Optional[Dict[str, str]] = None) -> bool:
-    """The two legitimate untagged bare-version states: the release PR itself
-    and main's own run on its merge commit, which release-tag.yml is tagging
-    concurrently. In CI the release PR is recognised by trusted event
-    metadata, not by its branch name alone: ci.yml passes the PR title and
-    labels (RELEASE_PR_TITLE / RELEASE_PR_LABELS) and the gate requires
-    `release: <version>` plus the `release` label — the same facts
-    release-tag.yml checks before tagging, so a branch merely named
-    `release/<version>` cannot pass. Outside CI (no GITHUB_ACTIONS) the branch
-    name is enough: that is the maintainer's own checkout."""
-    env = os.environ if env is None else env
-    if head_ref == f"release/{version}":
-        if env.get("GITHUB_ACTIONS") != "true":
-            return True
-        labels = [label.strip() for label in env.get("RELEASE_PR_LABELS", "").split(",") if label.strip()]
-        return env.get("RELEASE_PR_TITLE", "") == f"release: {version}" and "release" in labels
-    if env.get("GITHUB_ACTIONS") == "true" and env.get("GITHUB_EVENT_NAME") != "push":
-        return False  # only main's push run may rely on the merge subject
-    subject = git("log", "-1", "--format=%s", "HEAD", root=root)
-    return re.match(r"^Merge pull request #\d+ from \S+/release/" + re.escape(version) + r"$", subject) is not None
-
-
-def rehearse(root: Path, head_ref: str, env: Optional[Dict[str, str]] = None) -> str:
-    """`--rehearse`: in a rehearsable state, create the release tag *locally*
-    (never pushed) so the existing release chain (`release:manifest` stable
-    channel: clean tree + `git describe --exact-match`) can run on the
-    candidate exactly as it will on the tag. Returns what was done."""
-    match = ZON_VERSION_RE.search((root / "build.zig.zon").read_text(encoding="utf-8"))
-    version = match.group(1) if match else ""
-    if not version or version.endswith("-dev"):
-        return "no rehearsal needed (development version)"
-    if git("describe", "--tags", "--exact-match", "HEAD", root=root) == version:
-        return f"HEAD already carries tag {version}"
-    if not rehearsable(root, version, head_ref, env):
-        return ""
-    proc = subprocess.run(["git", "tag", version, "HEAD"], cwd=str(root), capture_output=True, check=False)
-    if proc.returncode != 0:
-        return ""
-    return f"rehearsal: tagged HEAD as {version} locally (not pushed)"
-
-
-def check_agentcore(root: Path) -> list:
-    match = ZON_VERSION_RE.search((root / "build.zig.zon").read_text(encoding="utf-8"))
-    last_tag = git("describe", "--tags", "--abbrev=0", "--match", "[0-9]*.[0-9]*.[0-9]*", root=root)
-    return agentcore_release.state_findings(root, match.group(1) if match else "", last_tag or None)
+def historical_baselines(root: Path) -> list[str]:
+    last_release = subprocess.run(
+        ["git", "-C", str(root), "describe", "--tags", "--abbrev=0",
+         "--match", "fork/v*-fork.*", "--match", "[0-9]*.[0-9]*.[0-9]*"],
+        capture_output=True, text=True, encoding="utf-8", check=False,
+    ).stdout.strip()
+    return ["HEAD", last_release] if last_release else ["HEAD"]
 
 
 def main() -> int:
-    head_ref = os.environ.get("GITHUB_HEAD_REF") or git("rev-parse", "--abbrev-ref", "HEAD", root=ROOT)
-    finding = check(ROOT, head_ref)
-    if finding:
-        print(f"check_version_state: {finding}", file=sys.stderr)
-        return 1
-    findings = check_agentcore(ROOT)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--sync", action="store_true", help="update the version mirrors from build.zig.zon")
+    args = parser.parse_args()
+    try:
+        if args.sync:
+            contract.set_sdk_version(ROOT, contract.sdk_version(ROOT))
+        findings = agentcore_release.state_findings(ROOT, historical_baselines(ROOT))
+    except ValueError as error:
+        findings = [str(error)]
     if findings:
-        for item in findings:
-            print(f"check_version_state: {item}", file=sys.stderr)
+        for finding in findings:
+            print(f"check_version_state: {finding}")
         return 1
-    if "--rehearse" in sys.argv[1:]:
-        done = rehearse(ROOT, head_ref)
-        if not done:
-            print("check_version_state: cannot rehearse this state", file=sys.stderr)
-            return 1
-        print(done)
     print("version state ok")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

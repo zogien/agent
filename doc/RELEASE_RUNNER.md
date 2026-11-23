@@ -82,9 +82,9 @@ macOS and ARM64 Linux run their full suites natively at release time; the
 release-only Windows ARM64 GNU/MSVC job cross-builds and link-checks SDK
 consumers and must pass before drafting. It does not execute ARM64 code or
 publish an ARM64 Windows CLI unit. On macOS and Linux,
-`scripts/install.sh` then installs the job's own archives as a published
-release, from a loopback mirror that holds only that unit, so it must pick the
-archive by the host's target. The
+the upstream `scripts/install.sh` then installs the job's own archives as a
+published release, from a loopback mirror that holds only that unit, so it must
+pick the archive by the host's target. The
 `publish` job downloads every platform's archives, writes
 `metacodes-<version>-SHA256SUMS` with `release_sums.py`, and attaches archives
 and sums to a draft release created with `--verify-tag`. A consumer verifies an

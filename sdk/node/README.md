@@ -111,7 +111,9 @@ const session = runtime.session('…', {
 `prebuilds/<platform>-<arch>/` holds the addon and, in a packaged build, the
 AgentCore library and ripgrep. The library is otherwise looked up through the
 `library` option, `METACODES_AGENTCORE_LIB`, `METACODES_AGENTCORE_SDK/lib`,
-and the SDK of a metacodes install under `~/.local/opt/metacodes`.
+and the SDK from an existing upstream CLI install under
+`~/.local/opt/metacodes` or `~/.local/opt/metacodes-dev`. To use a standalone
+SDK archive, set `METACODES_AGENTCORE_SDK` to the extracted bundle directory.
 
 ## Building and testing
 

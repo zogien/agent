@@ -281,14 +281,15 @@ flowchart TB
 
 ## Project status
 
-metacodes is pre-1.0. The version is declared in `build.zig.zon`, and releases
-ship for five targets with checksums.
+AgentCore is pre-1.0. The version in `build.zig.zon` drives the
+[SDK releases](sdk/README.md#release-version). Each platform archive ships
+with a SHA-256 checksum.
 
 | Area | Status |
 |---|---|
 | AgentCore C ABI | Experimental; hosts pin the exact revision |
 | `metacodes-core` Zig module | Experimental source API |
-| TinyKG memory and task DAG | On by default in the CLI; not yet in AgentCore |
+| TinyKG memory and task DAG | Available through the source library |
 | Lean project rules | Experimental; dormant until a project activates them |
 | Self-evolution, learning turn, check gate | Experimental, off by default |
 | Sandbox | macOS (Seatbelt) and Linux (bubblewrap), opt-in |
@@ -327,9 +328,9 @@ vulnerabilities go through [SECURITY.md](SECURITY.md), never public issues.
 
 | | |
 |---|---|
-| [doc/GETTING_STARTED.md](doc/GETTING_STARTED.md) | Install, providers, build from source |
+| [doc/GETTING_STARTED.md](doc/GETTING_STARTED.md) | Upstream CLI installation, providers, and source builds |
 | [doc/PROVIDERS.md](doc/PROVIDERS.md) | Where models come from: a Metask account, a vendor's key, a model API of your own |
-| [doc/LOCAL_CONFIG.md](doc/LOCAL_CONFIG.md) | Your own provider key in the install's `.env` |
+| [doc/LOCAL_CONFIG.md](doc/LOCAL_CONFIG.md) | Provider keys in an upstream CLI install's `.env` |
 | [doc/API.md](doc/API.md) | Every supported entry point and its compatibility |
 | [doc/AGENTCORE_BINARY_ABI.md](doc/AGENTCORE_BINARY_ABI.md) | The normative C ABI contract |
 | [doc/BENCHMARKS.md](doc/BENCHMARKS.md) | How metacodes is measured, and every result so far |

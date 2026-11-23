@@ -137,9 +137,11 @@ session = runtime.session("…", on_ui_request=approve, allow=["Read"], deny=["B
 
 Platform wheels carry `libmetask_agentcore` and ripgrep inside the package.
 Otherwise the package looks, in order, at `Runtime(library=...)`,
-`METACODES_AGENTCORE_LIB`, `METACODES_AGENTCORE_SDK/lib`, and the SDK of a
-metacodes install under `~/.local/opt/metacodes` (`scripts/install.sh`
-installs it). `metacodes.candidate_library_paths()` prints the list. The
+`METACODES_AGENTCORE_LIB`, `METACODES_AGENTCORE_SDK/lib`, and the SDK from an
+existing upstream CLI install under `~/.local/opt/metacodes` or
+`~/.local/opt/metacodes-dev`. To use a standalone SDK archive, set
+`METACODES_AGENTCORE_SDK` to the extracted bundle directory.
+`metacodes.candidate_library_paths()` prints the list. The
 package refuses any library whose ABI revision differs from the one it was
 written for (`metacodes.ABI_REVISION`).
 

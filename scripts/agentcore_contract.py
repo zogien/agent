@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""What one AgentCore release is: its version, its ledger entry, and the checks
-a bundle must pass to be that release.
-
-Design: doc/RELEASE_AUTOMATION_DESIGN.md §2a. AgentCore has its own SemVer
-(`sdk/VERSION`, `X.Y.Z-dev` between releases and `X.Y.Z` on a release commit),
-apart from the main project's. `sdk/agentcore-releases.json` is the ledger the
-release cut appends to: the explicit mapping from a release version to the
-binary ABI it implements, to a digest of the inputs it was built from, and to
-the main-project releases that carry it. The ABI revision is read from
-`sdk/zig/types.zig` at the cut and never written here by hand, so a later bump
-needs no change to these scripts.
-
-Everything here refuses with `CutError` (a ValueError). Python 3.9, stdlib only.
-Tests: scripts/tests/test_agentcore_release.py.
-"""
 from __future__ import annotations
 
 import json
@@ -24,22 +9,15 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from release_common import CutError, fmt, read, write  # noqa: E402  (same directory, stdlib only)
+from release_common import CutError, VERSION_ZIG, ZIG_VERSION_RE, ZON, ZON_VERSION_RE, fmt, read, set_version_text, write  # noqa: E402
 
-SDK_VERSION = "sdk/VERSION"
+SDK_VERSION = ZON
 PY_PROJECT = "sdk/python/pyproject.toml"
 PY_INIT = "sdk/python/src/metacodes/__init__.py"
 NODE_PACKAGE = "sdk/node/package.json"
-SDK_CHANGELOG = "sdk/CHANGELOG.md"
-LEDGER = "sdk/agentcore-releases.json"
-# The files a cut or a reopen rewrites for AgentCore. release_fast_path.py
-# regenerates each of them and compares bytes, so a new one belongs here.
-GENERATED = (SDK_VERSION, PY_PROJECT, PY_INIT, NODE_PACKAGE, SDK_CHANGELOG, LEDGER)
+LEDGER = "agentcore-releases.json"
 
 LEDGER_SCHEMA = "metacodes.agentcore-releases/v1"
-# `Migration` is what a Host must change. A release that moves the ABI revision
-# has to fill it (agentcore_release.apply_cut).
-SDK_SUBSECTIONS = ("Added", "Changed", "Deprecated", "Removed", "Fixed", "Security", "Migration")
 
 # Every copy of the ABI revision a consumer can see. sdk/zig/types.zig is the
 # authority; the others are mirrors, and a release refuses them disagreeing.
@@ -55,7 +33,7 @@ ABI_VERSION_RE = re.compile(r"^pub const ABI_VERSION_V1: u32 = (\d+);$", re.M)
 
 _BARE = r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
 BARE_RE = re.compile(rf"^{_BARE}$")
-SOURCE_VERSION_RE = re.compile(rf"^({_BARE})(-dev)?$")
+SOURCE_VERSION_RE = re.compile(rf"^({_BARE})(?:-dev|-fork\.(?:0|[1-9][0-9]*))?$")
 # What `scripts/agentcore_manifest.zig` packageVersion produces.
 BUILT_DEV_RE = re.compile(rf"^({_BARE})-dev\+([0-9a-f]{{12}})(\.dirty)?$")
 FORK_VERSION_RE = re.compile(rf"{_BARE}-fork\.(?:0|[1-9][0-9]*)", re.ASCII)
@@ -69,9 +47,9 @@ DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def parse(version: str) -> Tuple[int, int, int]:
-    match = SOURCE_VERSION_RE.match(version)
+    match = SOURCE_VERSION_RE.fullmatch(version)
     if match is None:
-        raise CutError(f"not an AgentCore version: {version!r} (want X.Y.Z or X.Y.Z-dev)")
+        raise CutError(f"not an AgentCore version: {version!r} (want X.Y.Z, X.Y.Z-dev or X.Y.Z-fork.N)")
     return tuple(int(part) for part in match.group(1).split("."))  # type: ignore[return-value]
 
 
@@ -82,22 +60,26 @@ def is_dev(version: str) -> bool:
 
 def python_version(version: str) -> str:
     """0.13.0-dev -> PEP 440 0.13.0.dev0; a release is itself."""
-    return fmt(parse(version)) + (".dev0" if is_dev(version) else "")
+    base = fmt(parse(version))
+    if FORK_VERSION_RE.fullmatch(version):
+        return version.replace("-fork.", "+fork.", 1)
+    return base + (".dev0" if is_dev(version) else "")
 
 
 def node_version(version: str) -> str:
     """0.13.0-dev -> 0.13.0-dev.0; a release is itself."""
-    return fmt(parse(version)) + ("-dev.0" if is_dev(version) else "")
+    parse(version)
+    return version + ".0" if version.endswith("-dev") else version
 
 
 def base_of_built(version: str) -> Tuple[str, bool]:
     """(X.Y.Z, is_development) of a version as a bundle manifest carries it.
     Refuses every other shape: no release candidates, no local suffixes."""
-    if BARE_RE.match(version):
+    if BARE_RE.fullmatch(version) or FORK_VERSION_RE.fullmatch(version):
         return version, False
     match = BUILT_DEV_RE.match(version)
     if match is None:
-        raise CutError(f"bundle version {version!r} is neither a final X.Y.Z nor X.Y.Z-dev+<commit12>[.dirty]")
+        raise CutError(f"invalid AgentCore bundle version: {version!r}")
     return match.group(1), True
 
 
@@ -105,30 +87,37 @@ def base_of_built(version: str) -> Tuple[str, bool]:
 
 
 def sdk_version(root: Path) -> str:
-    text = read(root, SDK_VERSION).strip()
-    parse(text)
-    return text
+    versions = ZON_VERSION_RE.findall(read(root, SDK_VERSION))
+    if len(versions) != 1:
+        raise CutError(f"{SDK_VERSION}: expected exactly one .version declaration")
+    version = versions[0][1]
+    parse(version)
+    return version
 
 
 def set_sdk_version(root: Path, version: str) -> None:
     """Write one AgentCore version to every package that declares it."""
     parse(version)
-    for rel, pattern, value in (
-        (PY_PROJECT, PY_PROJECT_VERSION_RE, python_version(version)),
-        (PY_INIT, PY_INIT_VERSION_RE, python_version(version)),
-        (NODE_PACKAGE, NODE_VERSION_RE, node_version(version)),
-    ):
-        text, count = pattern.subn(lambda m: m.group(1) + value + m.group(3), read(root, rel))
-        if count != 1:
-            raise CutError(f"{rel}: expected exactly one version declaration, found {count}")
-        write(root, rel, text)
-    write(root, SDK_VERSION, version + "\n")
+    updates = {
+        rel: set_version_text(read(root, rel), pattern, value, rel)
+        for rel, pattern, value in (
+            (SDK_VERSION, ZON_VERSION_RE, version),
+            (VERSION_ZIG, ZIG_VERSION_RE, version),
+            (PY_PROJECT, PY_PROJECT_VERSION_RE, python_version(version)),
+            (PY_INIT, PY_INIT_VERSION_RE, python_version(version)),
+            (NODE_PACKAGE, NODE_VERSION_RE, node_version(version)),
+        )
+    }
+    for rel, text in updates.items():
+        if text != read(root, rel):
+            write(root, rel, text)
 
 
 def package_version_findings(root: Path) -> List[str]:
     version = sdk_version(root)
     findings = []
     for rel, pattern, expected in (
+        (VERSION_ZIG, ZIG_VERSION_RE, version),
         (PY_PROJECT, PY_PROJECT_VERSION_RE, python_version(version)),
         (PY_INIT, PY_INIT_VERSION_RE, python_version(version)),
         (NODE_PACKAGE, NODE_VERSION_RE, node_version(version)),
@@ -347,7 +336,7 @@ def check_bundle_contents(manifest: dict, reader: Reader) -> None:
         raise CutError(f"bundle manifest lacks {exc}") from None
     if not isinstance(version, str):
         raise CutError("bundle manifest version is not a string")
-    development = not FORK_VERSION_RE.fullmatch(version) and base_of_built(version)[1]
+    _, development = base_of_built(version)
     if development:
         built = BUILT_DEV_RE.match(version)
         if not isinstance(commit, str) or not commit.startswith(built.group(2)):
@@ -393,7 +382,7 @@ def correspondence_findings(manifest: dict, root: Path) -> List[str]:
     version = sdk_version(root)
     base, development = base_of_built(manifest.get("version", ""))
     findings = []
-    if base != fmt(parse(version)) or development != is_dev(version):
+    if base != version.removesuffix("-dev") or development != is_dev(version):
         findings.append(f"the bundle is AgentCore {manifest['version']}, but this checkout is {version} ({SDK_VERSION})")
     found = abi_revisions(root)
     revision = (manifest.get("contract") or {}).get("binary_abi_revision")
