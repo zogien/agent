@@ -63,7 +63,14 @@ with a limit of 5,000,000 encoded bytes per image.
 Creation and restore both accept these host options.
 
 - `modelCapabilities` takes entries such as `{ model: 'vision-model', imageInput: true }`.
-  Set `imageInput: false` to reject image input for that model.
+  Set `imageInput: false` to reject image input. You can also declare
+  `{ model: 'custom', maxInputTokens: 1000000, maxTokens: 32000 }`.
+  Each entry needs an image declaration or a nonzero token limit. Limits are
+  unsigned 32-bit integers. For a combined context length, subtract the
+  maximum output before setting `maxInputTokens`. Anthropic sends `maxTokens`
+  as `max_tokens`. OpenAI-compatible routes use it for the local output reserve.
+  `describe()` returns `max_input_tokens`, `max_tokens`, `per_result_bytes`
+  and `per_turn_bytes`.
 - `runJournalMode` defaults to `'ephemeral'`. Choose `'durable_workspace'` to write
   the Session's run journal below `workspaceHome`.
 - `durableBudget` takes a complete byte budget. Supply `hardBytes`, `softBytes`,

@@ -312,8 +312,7 @@ pub const RUN_INPUT_GOAL_CONTINUATION: u32 = 4;
 
 pub const RUN_INPUT_PART_TEXT: u32 = 1;
 pub const RUN_INPUT_PART_IMAGE: u32 = 2;
-/// Revision 21 `ModelCapabilityV1.image_input_code` values. Zero is not a
-/// declaration and is refused; leave a model out to make no statement.
+/// Zero `image_input_code` leaves image support undeclared.
 pub const CAPABILITY_SUPPORTED: u32 = 1;
 pub const CAPABILITY_UNSUPPORTED: u32 = 2;
 /// Revision 22 `RunOptionsV1.time_context_code`: how the runtime tells the
@@ -879,14 +878,23 @@ pub const TeamConfigV1 = extern struct {
     reserved: [2]u64,
 };
 
-/// Revision 21: one Host statement about one model.
+pub const ModelProfileV1 = extern struct {
+    struct_size: u32 = @sizeOf(ModelProfileV1),
+    reserved0: u32 = 0,
+    max_input_tokens: u64 = 0,
+    max_tokens: u64 = 0,
+    reserved: [6]u64 = @splat(0),
+};
+
+/// One Host statement about one model.
 pub const ModelCapabilityV1 = extern struct {
     struct_size: u32,
-    /// CAPABILITY_SUPPORTED or CAPABILITY_UNSUPPORTED.
+    /// Zero, CAPABILITY_SUPPORTED or CAPABILITY_UNSUPPORTED.
     image_input_code: u32,
     /// Non-empty UTF-8, at most MAX_MODEL_CAPABILITY_MODEL_BYTES_V1.
     model: BytesViewV1,
-    reserved: [2]u64,
+    profile: ?*const ModelProfileV1 = null,
+    reserved1: u64 = 0,
 };
 
 /// One edit of the kernel system-prompt sections (#184).
@@ -1608,7 +1616,9 @@ test "ABI v1 public layouts are fixed on supported 64-bit targets" {
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(ModelCapabilityV1));
     try std.testing.expectEqual(@as(usize, 4), @offsetOf(ModelCapabilityV1, "image_input_code"));
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(ModelCapabilityV1, "model"));
-    try std.testing.expectEqual(@as(usize, 24), @offsetOf(ModelCapabilityV1, "reserved"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(ModelCapabilityV1, "profile"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(ModelCapabilityV1, "reserved1"));
+    try std.testing.expectEqual(@as(usize, 72), @sizeOf(ModelProfileV1));
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(SessionCreateConfigV1, "host"));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(SessionCreateConfigV1, "model"));
     try std.testing.expectEqual(@as(usize, 32), @offsetOf(SessionCreateConfigV1, "prompt_profile"));

@@ -190,8 +190,7 @@ extern "C" {
 #define METASK_AGENTCORE_RUN_INPUT_GOAL_CONTINUATION 4u
 #define METASK_AGENTCORE_RUN_INPUT_PART_TEXT 1u
 #define METASK_AGENTCORE_RUN_INPUT_PART_IMAGE 2u
-/* Revision 21 model_capability_v1.image_input_code. Zero is not a declaration;
- * leave a model out to make no statement. */
+/* Zero image_input_code leaves image support undeclared. */
 #define METASK_AGENTCORE_CAPABILITY_SUPPORTED 1u
 #define METASK_AGENTCORE_CAPABILITY_UNSUPPORTED 2u
 /* Revision 22 run_options_v1.time_context_code: how the runtime tells the model
@@ -620,15 +619,24 @@ typedef struct {
     uint64_t reserved[4];
 } metask_agentcore_durable_budget_profile_v1;
 
-/* Revision 21: one Host statement about one model's image input. `model` is
+typedef struct {
+    uint32_t struct_size;
+    uint32_t reserved0;
+    uint64_t max_input_tokens;
+    uint64_t max_tokens;
+    uint64_t reserved[6];
+} metask_agentcore_model_profile_v1;
+
+/* One Host statement about a model's image input or token limits. `model` is
  * non-empty UTF-8 of at most METASK_AGENTCORE_MAX_MODEL_CAPABILITY_MODEL_BYTES_V1
  * bytes, matched against the model a request names ignoring case. */
 typedef struct {
     uint32_t struct_size;
-    /* METASK_AGENTCORE_CAPABILITY_SUPPORTED or _UNSUPPORTED. */
+    /* Zero, METASK_AGENTCORE_CAPABILITY_SUPPORTED or _UNSUPPORTED. */
     uint32_t image_input_code;
     metask_agentcore_bytes_view_v1 model;
-    uint64_t reserved[2];
+    const metask_agentcore_model_profile_v1 *profile;
+    uint64_t reserved1;
 } metask_agentcore_model_capability_v1;
 
 /* Revision 24 (issue #277) team role codes for
@@ -1376,6 +1384,7 @@ METASK_AGENTCORE_ASSERT_SIZE(metask_agentcore_mcp_selector_v1, 80);
 METASK_AGENTCORE_ASSERT_SIZE(metask_agentcore_mcp_selection_v1, 56);
 METASK_AGENTCORE_ASSERT_SIZE(metask_agentcore_durable_budget_profile_v1, 112);
 METASK_AGENTCORE_ASSERT_SIZE(metask_agentcore_session_host_config_v1, 168);
+METASK_AGENTCORE_ASSERT_SIZE(metask_agentcore_model_profile_v1, 72);
 METASK_AGENTCORE_ASSERT_SIZE(metask_agentcore_model_capability_v1, 40);
 METASK_AGENTCORE_ASSERT_SIZE(metask_agentcore_prompt_section_v1, 72);
 METASK_AGENTCORE_ASSERT_SIZE(metask_agentcore_prompt_profile_v1, 56);
@@ -1442,7 +1451,12 @@ METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_session_host_config_v1, model_ca
 METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_session_host_config_v1, team, 160);
 METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_model_capability_v1, image_input_code, 4);
 METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_model_capability_v1, model, 8);
-METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_model_capability_v1, reserved, 24);
+METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_model_capability_v1, profile, 24);
+METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_model_capability_v1, reserved1, 32);
+METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_model_profile_v1, reserved0, 4);
+METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_model_profile_v1, max_input_tokens, 8);
+METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_model_profile_v1, max_tokens, 16);
+METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_model_profile_v1, reserved, 24);
 METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_session_create_config_v1, host, 8);
 METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_session_create_config_v1, model, 16);
 METASK_AGENTCORE_ASSERT_OFFSET(metask_agentcore_session_create_config_v1, prompt_profile, 32);

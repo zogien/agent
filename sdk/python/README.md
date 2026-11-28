@@ -57,6 +57,13 @@ permission lists while idle. The next Run uses the new settings.
 Both `run` and `stream` accept 1–64 ordered parts. Each image admits up to
 5,000,000 bytes of standard base64 data. Declare model support with
 `model_capabilities=[{"model": "vision-model", "image_input": True}]`.
+A limits-only entry can specify `{"model": "custom", "max_input_tokens": 1000000,
+"max_tokens": 32000}`. Each entry needs an image declaration or a nonzero
+unsigned 32-bit token limit. Subtract maximum output from a combined context
+length before setting `max_input_tokens`. Anthropic sends `max_tokens` in its
+request. OpenAI-compatible routes use it for the local output reserve.
+`describe()` returns `max_input_tokens`, `max_tokens`, `per_result_bytes` and
+`per_turn_bytes`.
 
 Set `run_journal_mode="durable_workspace"` to record Runs under `workspace_home`.
 The default is `"ephemeral"`. To supply a complete `durable_budget`, pass a dict

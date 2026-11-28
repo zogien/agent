@@ -45,7 +45,13 @@ pub const Resolution = struct {
 /// the model a request names.
 pub const Declaration = struct {
     model: []const u8,
-    image_input: bool,
+    image_input: ?bool = null,
+    max_input_tokens: ?u32 = null,
+    max_tokens: ?u32 = null,
+
+    pub fn hasTokenLimits(self: Declaration) bool {
+        return (self.max_input_tokens orelse 0) != 0 or (self.max_tokens orelse 0) != 0;
+    }
 };
 
 /// An owned, immutable set of Host declarations. The empty value owns
@@ -55,7 +61,7 @@ pub const Declarations = struct {
     allocator: ?std.mem.Allocator = null,
     items: []const Declaration = &.{},
 
-    pub const Error = error{ DuplicateModel, EmptyModel } || std.mem.Allocator.Error;
+    pub const Error = error{ DuplicateModel, EmptyModel, EmptyDeclaration } || std.mem.Allocator.Error;
 
     /// Copies `source`. Two entries naming the same model (ignoring case)
     /// are refused rather than resolved by order.
@@ -63,6 +69,7 @@ pub const Declarations = struct {
         if (source.len == 0) return .{};
         for (source, 0..) |entry, i| {
             if (entry.model.len == 0) return error.EmptyModel;
+            if (entry.image_input == null and !entry.hasTokenLimits()) return error.EmptyDeclaration;
             for (source[0..i]) |earlier| {
                 if (model_name.eqlIgnoreCase(earlier.model, entry.model)) return error.DuplicateModel;
             }
@@ -74,7 +81,8 @@ pub const Declarations = struct {
             allocator.free(items);
         }
         for (source, items) |entry, *slot| {
-            slot.* = .{ .model = try allocator.dupe(u8, entry.model), .image_input = entry.image_input };
+            slot.* = entry;
+            slot.model = try allocator.dupe(u8, entry.model);
             copied += 1;
         }
         return .{ .allocator = allocator, .items = items };
@@ -90,7 +98,8 @@ pub const Declarations = struct {
             allocator.free(items);
         }
         for (self.items, items) |entry, *slot| {
-            slot.* = .{ .model = try allocator.dupe(u8, entry.model), .image_input = entry.image_input };
+            slot.* = entry;
+            slot.model = try allocator.dupe(u8, entry.model);
             copied += 1;
         }
         return .{ .allocator = allocator, .items = items };
@@ -103,12 +112,16 @@ pub const Declarations = struct {
         self.* = .{};
     }
 
-    /// The Host's statement about `model`, or null when it made none.
-    pub fn imageInputFor(self: Declarations, model: []const u8) ?bool {
+    pub fn forModel(self: Declarations, model: []const u8) ?Declaration {
         for (self.items) |item| {
-            if (model_name.eqlIgnoreCase(item.model, model)) return item.image_input;
+            if (model_name.eqlIgnoreCase(item.model, model)) return item;
         }
         return null;
+    }
+
+    pub fn imageInputFor(self: Declarations, model: []const u8) ?bool {
+        const entry = self.forModel(model) orelse return null;
+        return entry.image_input;
     }
 };
 

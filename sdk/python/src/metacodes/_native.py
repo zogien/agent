@@ -223,10 +223,18 @@ class PromptProfile(ctypes.Structure):
     ]
 
 
+class ModelProfile(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32), ("reserved0", ctypes.c_uint32),
+        ("max_input_tokens", ctypes.c_uint64), ("max_tokens", ctypes.c_uint64),
+        ("reserved", ctypes.c_uint64 * 6),
+    ]
+
+
 class ModelCapability(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32), ("image_input_code", ctypes.c_uint32),
-        ("model", BytesView), ("reserved", ctypes.c_uint64 * 2),
+        ("model", BytesView), ("profile", ctypes.POINTER(ModelProfile)), ("reserved1", ctypes.c_uint64),
     ]
 
 

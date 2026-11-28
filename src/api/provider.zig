@@ -539,6 +539,7 @@ pub const Capability = enum {
 /// 勿把 Provider 值存进比 ctx 长寿的容器(否则 UAF)。Provider 是廉价值(fn-ptr+指针),按值传。
 pub const Provider = struct {
     ctx: *anyopaque,
+    host_capabilities: ?*const image_capability.Declarations = null,
 
     /// 当前 model 名(显示 / model_override 解析 / 日志)。借用,provider 生命周期有效。
     modelFn: *const fn (ctx: *anyopaque) []const u8,

@@ -132,9 +132,17 @@ function copyProfile(profile) {
 
 function copyCapabilities(entries = []) {
   if (!Array.isArray(entries) || entries.length > 256) throw new RangeError('modelCapabilities allows up to 256 models');
-  return Array.from(entries, ({ model, imageInput }) => {
-    if (typeof model !== 'string' || typeof imageInput !== 'boolean') throw new TypeError('invalid model capability');
-    return { model: Buffer.from(model), imageInput: imageInput ? 1 : 2 };
+  return Array.from(entries, ({ model, imageInput, maxInputTokens = 0, maxTokens = 0 }) => {
+    if (typeof model !== 'string' || (imageInput !== undefined && typeof imageInput !== 'boolean'))
+      throw new TypeError('invalid model capability');
+    for (const limit of [maxInputTokens, maxTokens]) {
+      if (!Number.isInteger(limit) || limit < 0 || limit > 0xffffffff)
+        throw new RangeError('model token limits must be unsigned 32-bit integers');
+    }
+    if (imageInput === undefined && !maxInputTokens && !maxTokens)
+      throw new TypeError('model capability requires imageInput or a nonzero token limit');
+    const imageCode = imageInput === undefined ? 0 : (imageInput ? 1 : 2);
+    return { model: Buffer.from(model), imageInput: imageCode, maxInputTokens, maxTokens };
   });
 }
 

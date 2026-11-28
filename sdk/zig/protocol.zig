@@ -702,6 +702,10 @@ pub const SessionDescription = struct {
     permission_mode: PermissionMode,
     catalog_generation: u64,
     model: []const u8,
+    max_input_tokens: ?u32 = null,
+    max_tokens: ?u32 = null,
+    per_result_bytes: ?u32 = null,
+    per_turn_bytes: ?u32 = null,
     /// Revision 21: whether `model` takes image input and who said so.
     image_input: struct {
         supported: bool,

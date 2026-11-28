@@ -81,6 +81,29 @@ pub const Catalog = struct {
         return .{ .allocator = allocator, .entries = .empty };
     }
 
+    pub fn fromHost(allocator: std.mem.Allocator, declarations: []const @import("image_capability.zig").Declaration) !Catalog {
+        var catalog = Catalog.init(allocator);
+        errdefer catalog.deinit();
+        for (declarations) |entry| {
+            if (!entry.hasTokenLimits()) continue;
+            const id = try allocator.dupe(u8, entry.model);
+            errdefer allocator.free(id);
+            try catalog.entries.append(allocator, .{
+                .model_id = id,
+                .max_tokens = nonZero(entry.max_tokens orelse 0),
+                .max_input_tokens = nonZero(entry.max_input_tokens orelse 0),
+            });
+        }
+        return catalog;
+    }
+
+    pub fn entryFor(self: *const Catalog, model: []const u8) ?Entry {
+        for (self.entries.items) |entry| {
+            if (model_name.eqlIgnoreCase(entry.model_id, model)) return entry;
+        }
+        return null;
+    }
+
     pub fn clone(self: *const Catalog, allocator: std.mem.Allocator) !Catalog {
         var copy = Catalog.init(allocator);
         errdefer copy.deinit();

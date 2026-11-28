@@ -461,6 +461,18 @@ for a subagent's `model_override`. Image blocks round-trip through the JSONL
 transcript and the AgentCore checkpoint (block tag 5), so restored sessions
 resend the original bytes.
 
+Embedded hosts can also supply a model's input window and maximum output
+through `SessionConfig.model_capabilities` or the ABI entry's nullable
+`profile`. Both token limits are optional and resolve independently. For a
+combined context length, subtract the gateway's maximum output before
+declaring `max_input_tokens`. The selected model's limits apply on
+creation, model switches and tool-scoped providers. Restore takes the
+current host's declarations. A smaller server-reported input cap remains
+effective. Anthropic sends `max_tokens` on the wire. OpenAI-compatible
+requests use it for the local output reserve and omit it on the wire.
+`describe()` exposes `max_input_tokens`, `max_tokens`, `per_result_bytes`
+and `per_turn_bytes`. See the [model capability ABI](AGENTCORE_BINARY_ABI.md#model-capabilities).
+
 Embedders reach the same capability three ways: source-level hosts build
 ordered `message.UserContentPart` slices and call `AgentSession.runUserParts`
 (or `AdmittedRun.runUserParts`); AgentCore binary consumers submit

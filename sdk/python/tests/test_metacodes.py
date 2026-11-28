@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import metacodes  # noqa: E402
 from metacodes import _native  # noqa: E402
-from mock_provider import MockProvider  # noqa: E402
+from mock_provider import MockProvider, last_tool_result  # noqa: E402
 
 
 def _library_available() -> bool:
@@ -218,6 +218,102 @@ class PythonSdkTest(unittest.TestCase):
         self.assertLess(tags.index("model_error"), len(tags) - 1)
         self.assertEqual(recovered.stop_reason, "end_turn")
         self.assertIsNone(recovered.model_error)
+
+    def test_profile_changes_inline_tool_result_and_anthropic_request(self):
+        payload = "x" * (30 * 1024)
+
+        @metacodes.tool(description="Return the sample payload.")
+        def sample(_arguments):
+            return payload
+
+        script = [("tool", "sample", {}), ("text", "ok")] * 2
+        with MockProvider(script) as provider, metacodes.Runtime(tools=(), host_tools=[sample]) as runtime:
+            for capabilities in ([], [{"model": "MOCK-MODEL", "max_input_tokens": 1_000_000, "max_tokens": 8192}]):
+                session = self.session(runtime, provider, model_capabilities=capabilities, permission_mode="full_access")
+                self.assertEqual(session.run("get sample").text, "ok")
+        self.assertIn("ReadArtifact", last_tool_result(provider.requests[1]))
+        self.assertEqual(last_tool_result(provider.requests[3]), payload)
+        self.assertEqual(provider.requests[2]["max_tokens"], 8192)
+
+    def test_openai_profile_controls_local_admission_and_output_reserve(self):
+        prompt = "x" * 1_200_000
+        with MockProvider([("text", "accepted")]) as provider, metacodes.Runtime(tools=()) as runtime:
+            options = dict(provider="openai", base_url=provider.openai_url, api_key="k", workspace=str(self.root))
+            original = runtime.session("custom", **options)
+
+            def limits(session):
+                report = session.describe()
+                return tuple(report[key] for key in ("max_input_tokens", "max_tokens", "per_result_bytes", "per_turn_bytes"))
+
+            self.assertEqual(limits(original), (128_000, 4096, 16_000, 153_600))
+            error = original.run(prompt).model_error
+            self.assertEqual(error.category, "context_window")
+            self.assertEqual(error.context_window["origin"], "local")
+            self.assertGreaterEqual(error.context_window["estimated_input_tokens"], 300_000)
+            self.assertEqual(provider.requests, [])
+            for output in (32_000, 800_000):
+                session = runtime.session("custom", model_capabilities=[
+                    {"model": "custom", "max_input_tokens": 1_000_000, "max_tokens": output}], **options)
+                self.assertEqual(limits(session), (1_000_000, output, 65_536, 204_800))
+                result = session.run(prompt)
+                if output == 32_000:
+                    self.assertEqual(result.text, "accepted")
+                else:
+                    self.assertEqual(result.model_error.context_window["origin"], "local")
+            self.assertEqual(len(provider.requests), 1)
+            self.assertIn(prompt, str(provider.requests[0]["messages"]))
+            self.assertNotIn("max_tokens", provider.requests[0])
+            self.assertNotIn("max_completion_tokens", provider.requests[0])
+
+    def test_server_input_limit_survives_reapplying_the_host_profile(self):
+        failure = ("status", 400, {}, {"error": {"type": "invalid_request_error",
+                                                "message": "prompt is too long: 300000 tokens > 64000 maximum"}})
+        profile = [{"model": "mock-model", "max_input_tokens": 1_000_000}]
+        prompt = "x" * 1_200_000
+        with MockProvider([failure]) as provider, metacodes.Runtime(tools=()) as runtime:
+            first = self.session(runtime, provider, model_capabilities=profile)
+            self.assertEqual(first.run(prompt).model_error.context_window["origin"], "provider")
+            second = self.session(runtime, provider, model_capabilities=profile)
+            for session in (first, second):
+                description = session.describe()
+                self.assertEqual(description["max_input_tokens"], 64_000)
+                self.assertEqual(description["per_result_bytes"], 8192)
+                self.assertEqual(description["per_turn_bytes"], 76_800)
+            self.assertEqual(second.run(prompt).model_error.context_window["origin"], "local")
+            self.assertEqual(len(provider.requests), 1)
+
+    def test_recreated_sessions_keep_server_limits_by_full_model_name(self):
+        prefix = "m" * 128
+        long_prefix = prefix + "n" * 127
+        limits = {prefix: 64_000, prefix + "a": 72_000, long_prefix + "a": 80_000, long_prefix + "b": 96_000}
+        profiles = [{"model": name, "max_input_tokens": 1_000_000} for name in limits]
+        failures = [("status", 400, {}, {"error": {
+            "type": "invalid_request_error", "message": f"prompt is too long: 300000 tokens > {limit} maximum",
+        }}) for limit in limits.values()]
+        prompt = "x" * 1_200_000
+        with MockProvider(failures) as provider, metacodes.Runtime(tools=()) as runtime:
+            options = dict(api_key="k", workspace=str(self.root), base_url=provider.base_url, model_capabilities=profiles)
+            for name, limit in limits.items():
+                with runtime.session(name, **options) as session:
+                    self.assertEqual(session.describe()["max_input_tokens"], 1_000_000)
+                    window = session.run(prompt).model_error.context_window
+                    self.assertEqual(window["origin"], "provider")
+                    self.assertEqual(window["server_limit"]["tokens"], limit)
+
+            for name, limit in limits.items():
+                with self.subTest(name=name), runtime.session(name, **options) as session:
+                    self.assertEqual(session.describe()["max_input_tokens"], limit)
+                    error = session.run(prompt).model_error
+                    self.assertEqual(error.category, "context_window")
+                    self.assertEqual(error.context_window["origin"], "local")
+            self.assertEqual([request["model"] for request in provider.requests], list(limits))
+
+    def test_model_profile_requires_a_declaration_and_u32_limits(self):
+        with MockProvider([]) as provider, metacodes.Runtime(tools=()) as runtime:
+            for fields in ({}, {"max_input_tokens": 0}, {"max_tokens": 1 << 32},
+                           {"max_input_tokens": -1}, {"max_tokens": True}):
+                with self.subTest(fields=fields), self.assertRaises(ValueError):
+                    self.session(runtime, provider, model_capabilities=[dict(model="mock-model", **fields)])
 
     def test_local_context_window_block_reaches_the_host_without_a_request(self) -> None:
         with MockProvider([]) as provider, metacodes.Runtime(tools=()) as runtime:

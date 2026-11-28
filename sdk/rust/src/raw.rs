@@ -1135,11 +1135,38 @@ const _: () = {
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
+pub struct metask_agentcore_model_profile_v1 {
+    pub struct_size: u32,
+    pub reserved0: u32,
+    pub max_input_tokens: u64,
+    pub max_tokens: u64,
+    pub reserved: [u64; 6usize],
+}
+#[allow(clippy::unnecessary_operation, clippy::identity_op)]
+const _: () = {
+    ["Size of metask_agentcore_model_profile_v1"]
+        [::std::mem::size_of::<metask_agentcore_model_profile_v1>() - 72usize];
+    ["Alignment of metask_agentcore_model_profile_v1"]
+        [::std::mem::align_of::<metask_agentcore_model_profile_v1>() - 8usize];
+    ["Offset of field: metask_agentcore_model_profile_v1::struct_size"]
+        [::std::mem::offset_of!(metask_agentcore_model_profile_v1, struct_size) - 0usize];
+    ["Offset of field: metask_agentcore_model_profile_v1::reserved0"]
+        [::std::mem::offset_of!(metask_agentcore_model_profile_v1, reserved0) - 4usize];
+    ["Offset of field: metask_agentcore_model_profile_v1::max_input_tokens"]
+        [::std::mem::offset_of!(metask_agentcore_model_profile_v1, max_input_tokens) - 8usize];
+    ["Offset of field: metask_agentcore_model_profile_v1::max_tokens"]
+        [::std::mem::offset_of!(metask_agentcore_model_profile_v1, max_tokens) - 16usize];
+    ["Offset of field: metask_agentcore_model_profile_v1::reserved"]
+        [::std::mem::offset_of!(metask_agentcore_model_profile_v1, reserved) - 24usize];
+};
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
 pub struct metask_agentcore_model_capability_v1 {
     pub struct_size: u32,
     pub image_input_code: u32,
     pub model: metask_agentcore_bytes_view_v1,
-    pub reserved: [u64; 2usize],
+    pub profile: *const metask_agentcore_model_profile_v1,
+    pub reserved1: u64,
 }
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
@@ -1153,8 +1180,10 @@ const _: () = {
         [::std::mem::offset_of!(metask_agentcore_model_capability_v1, image_input_code) - 4usize];
     ["Offset of field: metask_agentcore_model_capability_v1::model"]
         [::std::mem::offset_of!(metask_agentcore_model_capability_v1, model) - 8usize];
-    ["Offset of field: metask_agentcore_model_capability_v1::reserved"]
-        [::std::mem::offset_of!(metask_agentcore_model_capability_v1, reserved) - 24usize];
+    ["Offset of field: metask_agentcore_model_capability_v1::profile"]
+        [::std::mem::offset_of!(metask_agentcore_model_capability_v1, profile) - 24usize];
+    ["Offset of field: metask_agentcore_model_capability_v1::reserved1"]
+        [::std::mem::offset_of!(metask_agentcore_model_capability_v1, reserved1) - 32usize];
 };
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

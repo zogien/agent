@@ -1019,6 +1019,32 @@ test('prompt edits survive replacement and checkpoint restore', { skip }, async 
   assert.doesNotMatch(JSON.stringify(provider.requests[3].system), /second identity/);
 });
 
+test('model changes and checkpoint restore use the current host token limits', { skip }, async t => {
+  const provider = await withProvider(t, []);
+  const root = workspace(t);
+  const options = { workspace: root, baseUrl: provider.baseUrl, apiKey: 'k' };
+  const { runtime, session } = open(t, { tools: [] }, provider, root, {
+    modelCapabilities: [{ model: 'other', maxInputTokens: 900000, maxTokens: 52000 }],
+  });
+  for (const fields of [{}, { maxTokens: 2 ** 32 }, { maxInputTokens: -1 }, { maxTokens: 0.5 }]) {
+    assert.throws(() => runtime.session('other', { ...options, modelCapabilities: [{ model: 'other', ...fields }] }));
+  }
+  assert.equal(session.describe().max_input_tokens, 200000);
+  session.setModel('other');
+  assert.equal(session.describe().max_input_tokens, 900000);
+  await session.run('one');
+  assert.equal(provider.requests[0].max_tokens, 52000);
+  const snapshot = path.join(workspace(t), 'checkpoint');
+  await session.exportCheckpoint(snapshot);
+  session.close();
+  const restored = await runtime.restoreSession(snapshot, { ...options,
+    modelCapabilities: [{ model: 'OTHER', maxTokens: 43000 }],
+  });
+  assert.equal(restored.describe().max_input_tokens, 200000);
+  await restored.run('two');
+  assert.equal(provider.requests[1].max_tokens, 43000);
+});
+
 test('ordered image parts and current host options apply on create and restore', { skip }, async t => {
   const provider = await withProvider(t, []);
   const modelCapabilities = [{ model: 'mock-model', imageInput: true }];

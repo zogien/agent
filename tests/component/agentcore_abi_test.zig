@@ -10166,7 +10166,6 @@ fn modelCapability(model: []const u8, image_input_code: u32) wire.ModelCapabilit
         .struct_size = @sizeOf(wire.ModelCapabilityV1),
         .image_input_code = image_input_code,
         .model = sdk.bytesView(model),
-        .reserved = [_]u64{0} ** 2,
     };
 }
 
@@ -10204,7 +10203,9 @@ test "L2 Revision 21 a Host declaration admits a model no family knows, and the 
 
     // The name is in no built-in family; only the Host knows its route takes
     // images. AgentCore itself is not changed to admit it.
-    const capabilities = [_]wire.ModelCapabilityV1{modelCapability("Vendor-Vision-1", wire.CAPABILITY_SUPPORTED)};
+    const profile: wire.ModelProfileV1 = .{ .max_tokens = 32_123 };
+    var capabilities = [_]wire.ModelCapabilityV1{modelCapability("Vendor-Vision-1", wire.CAPABILITY_SUPPORTED)};
+    capabilities[0].profile = &profile;
     var fixture = try PublicSessionFixture.initCapabilities(root, url, "vendor-vision-1", wire.PROVIDER_ANTHROPIC, wire.PROTOCOL_DEFAULT, &capabilities);
     defer fixture.deinit();
     try expectImageInputDescription(&fixture, true, .host);
@@ -10219,6 +10220,7 @@ test "L2 Revision 21 a Host declaration admits a model no family knows, and the 
     try std.testing.expectEqual(@as(usize, 1), server.requestCount());
     // The image travels as an image block: not dropped, not text.
     const body = (server.lastRequest() orelse return error.MissingRequest).body();
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"max_tokens\":32123") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"type\":\"image\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"media_type\":\"image/png\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, ISSUE_273_IMAGE) != null);
@@ -10384,7 +10386,7 @@ test "Revision 21 Host capability declarations are validated before a Session ex
     const Case = struct { entries: []const wire.ModelCapabilityV1, pointer: bool = true, count: ?u64 = null, status: u32 };
     const long_name = "m" ** (wire.MAX_MODEL_CAPABILITY_MODEL_BYTES_V1 + 1);
     var with_reserved = modelCapability("m", wire.CAPABILITY_SUPPORTED);
-    with_reserved.reserved[1] = 1;
+    with_reserved.reserved1 = 1;
     var short_struct = modelCapability("m", wire.CAPABILITY_SUPPORTED);
     short_struct.struct_size -= 8;
     var many: [wire.MAX_MODEL_CAPABILITIES_V1 + 1]wire.ModelCapabilityV1 = undefined;
@@ -10409,6 +10411,25 @@ test "Revision 21 Host capability declarations are validated before a Session ex
         .{ .entries = &one, .count = 0, .status = wire.STATUS_INVALID_ARGUMENT },
         .{ .entries = &one, .pointer = false, .status = wire.STATUS_INVALID_ARGUMENT },
     };
+    const invalid_profiles = [_]wire.ModelProfileV1{
+        .{},
+        .{ .struct_size = @sizeOf(wire.ModelProfileV1) - 8, .max_tokens = 1 },
+        .{ .struct_size = @sizeOf(wire.ModelProfileV1) + 8, .max_tokens = 1 },
+        .{ .reserved0 = 1, .max_tokens = 1 },
+        .{ .reserved = .{ 0, 0, 0, 0, 0, 1 }, .max_input_tokens = 1 },
+        .{ .max_tokens = 1 << 32 },
+        .{ .max_input_tokens = 1 << 32 },
+    };
+    for (&invalid_profiles) |*profile| {
+        var entry = modelCapability("profile-only", 0);
+        entry.profile = profile;
+        host.model_capabilities = @ptrCast(&entry);
+        host.model_capability_count = 1;
+        var session: ?*wire.SessionHandle = null;
+        try std.testing.expectEqual(wire.STATUS_INVALID_ARGUMENT, api.session().create()(runtime, &config, &callbacks, &session, &diagnostic));
+        try std.testing.expect(session == null);
+        api.bufferRelease()(&diagnostic);
+    }
     for (cases) |case| {
         host.model_capabilities = if (case.pointer) case.entries.ptr else null;
         host.model_capability_count = case.count orelse case.entries.len;
