@@ -14,8 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: python3 scripts/check_binding_parity.py
-      - run: python3 -m unittest scripts.tests.test_binding_parity
+      - run: python3 -X warn_default_encoding -W error::EncodingWarning scripts/check_binding_parity.py
+      - run: python3 -X warn_default_encoding -W error::EncodingWarning -m unittest scripts.tests.test_binding_parity
 
   sdk:
     name: Build SDK (${{ matrix.target }})

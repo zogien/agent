@@ -45,8 +45,8 @@ def scoped(source, prefix):
 
 def typed_binding(root, language, tables, configs, inputs):
     zig = language == "zig"
-    raw = (root / ("sdk/zig/types.zig" if zig else "sdk/rust/src/raw.rs")).read_text()
-    wrapper = (root / ("sdk/zig/root.zig" if zig else "sdk/rust/src/lib.rs")).read_text()
+    raw = (root / ("sdk/zig/types.zig" if zig else "sdk/rust/src/raw.rs")).read_text(encoding="utf-8")
+    wrapper = (root / ("sdk/zig/root.zig" if zig else "sdk/rust/src/lib.rs")).read_text(encoding="utf-8")
     missing = []
     layouts = {**configs, **{table + "_api_v1": fields for table, fields in tables.items()}}
     for name, fields in layouts.items():
@@ -65,7 +65,7 @@ def typed_binding(root, language, tables, configs, inputs):
 
 
 def python_apis(root):
-    source = (root / "sdk/python/src/metacodes/_client.py").read_text()
+    source = (root / "sdk/python/src/metacodes/_client.py").read_text(encoding="utf-8")
     result = set()
     for cls in ast.parse(source).body:
         if not isinstance(cls, ast.ClassDef):
@@ -79,8 +79,8 @@ def python_apis(root):
 
 
 def node_apis(root):
-    source = (root / "sdk/node/index.js").read_text()
-    types = (root / "sdk/node/index.d.ts").read_text()
+    source = (root / "sdk/node/index.js").read_text(encoding="utf-8")
+    types = (root / "sdk/node/index.d.ts").read_text(encoding="utf-8")
     result = set()
     for cls in ("Runtime", "Session"):
         body = scoped(source, "class " + cls)
@@ -93,16 +93,17 @@ def node_apis(root):
 
 
 def check(root=ROOT):
-    tables, configs, inputs = inventory((root / "sdk/metask/agentcore.h").read_text())
+    tables, configs, inputs = inventory((root / "sdk/metask/agentcore.h").read_text(encoding="utf-8"))
     keys = {f"{name}.{field}" for name, fields in {**tables, **configs}.items() for field in fields} | inputs
     errors = []
     for language in ("zig", "rust"):
         errors.extend(f"{language} missing {key}" for key in typed_binding(root, language, tables, configs, inputs))
     for language, apis in (("node", node_apis(root)), ("python", python_apis(root))):
-        source = (root / ("sdk/node/src/addon.c" if language == "node" else "sdk/python/src/metacodes/_client.py")).read_text()
+        source_path = root / ("sdk/node/src/addon.c" if language == "node" else "sdk/python/src/metacodes/_client.py")
+        source = source_path.read_text(encoding="utf-8")
         access = r"g_api->(\w+)->(\w+)\s*\(" if language == "node" else r"\.api\.(\w+)\.contents\.(\w+)\s*\("
         calls = {f"{table}.{field}" for table, field in re.findall(access, source)}
-        manifest = json.loads((root / f"sdk/{language}/abi-coverage.json").read_text())
+        manifest = json.loads((root / f"sdk/{language}/abi-coverage.json").read_text(encoding="utf-8"))
         for key in sorted(keys ^ manifest.keys()):
             errors.append(f"{language} {key}: " + ("missing from manifest" if key in keys else "absent from header"))
         for key, target in manifest.items():
