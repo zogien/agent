@@ -94,3 +94,10 @@ class BindingParityTest(unittest.TestCase):
             manifest["session.run_input"] = "Runtime.run"
             path.write_text(json.dumps(manifest), encoding="utf-8")
             self.assertTrue(any(error.startswith(f"{language} session.run_input: unknown API") for error in check(self.root)))
+
+    def test_node_requires_an_implementation(self):
+        path = self.root / "sdk/node/abi-coverage.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["mcp.refresh"] = {"deferred": "#14"}
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        self.assertTrue(any(error.startswith("node mcp.refresh:") for error in check(self.root)))

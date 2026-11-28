@@ -2044,6 +2044,11 @@ product decision.
 
 ### MCP Runtime catalog and Session view
 
+The Node binding maps these calls to `applyMcpConfiguration`, `refreshMcp`,
+`describeMcp` and `updateMcpSelection`. The Runtime operations return promises
+and the host supplies a stdio command or a connector for each server.
+[Node MCP guide](../sdk/node/README.md#mcp-servers)
+
 Revision 29 supports exact MCP `2026-07-28`, `2025-11-25`, and `2025-06-18`
 connections. Public negotiation codes preserve Revision 6 meanings:
 `auto=1`, `modern_only=2`, and exact `legacy_only=3`; exact
