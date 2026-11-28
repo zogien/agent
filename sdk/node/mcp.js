@@ -2,8 +2,13 @@
 
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
+const { mkdtemp, open, rm, unlink } = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
 
 const MAX_FRAME = 8388608;
+const MAX_TOOL_FRAME = 129 * 1024 * 1024;
+const toolResponseHeader = /^\s*\{\s*(?:"jsonrpc"\s*:\s*"2\.0"\s*,\s*)?"id"\s*:\s*(\d+)\s*,\s*"(?:result|error)"\s*:/;
 const policies = ['auto', 'modern_only', 'legacy_only', 'legacy_2025_06_only'];
 const eras = ['2026-07-28', '2025-11-25', '2025-06-18'];
 const outcomes = ['response', 'timeout', 'network_error', 'auth_error', 'server_error', 'child_exit', 'cancelled', 'indeterminate', 'fatal'];
@@ -14,12 +19,62 @@ function identity(hex) {
   return Buffer.from(hex, 'hex');
 }
 
+function encodedId(body, id) {
+  if (typeof id !== 'number' || Number.isSafeInteger(id)) return JSON.stringify(id);
+  const tokens = /"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g;
+  return JSON.parse(body.toString().replace(tokens, token => token.startsWith('"') ? token : JSON.stringify(token))).id;
+}
+
 function selection(selectors) {
   if (!Array.isArray(selectors) || selectors.length > 1024) throw new RangeError('invalid MCP selection');
   return Array.from(selectors, ({ serverBindingIdentity, toolName }) => {
     if (typeof toolName !== 'string') throw new TypeError('toolName must be a string');
     return { identity: identity(serverBindingIdentity), name: Buffer.from(toolName) };
   });
+}
+
+async function* routeLargeToolFrame(chunks, line, handleInterleaved, requestId) {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'mcp-stdio-'));
+  const filename = path.join(directory, 'frame');
+  try {
+    const envelope = Buffer.allocUnsafe(MAX_FRAME);
+    let length = 0, envelopeLength = 0, depth = 0, quoted = false, escaped = false;
+    async function append(chunk) {
+      length += chunk.length;
+      if (length > MAX_TOOL_FRAME) throw new RangeError('MCP tool frame too large');
+      const text = chunk.toString('latin1');
+      for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+        const outside = depth < 2;
+        if (!quoted && (char === ' ' || char === '\t' || char === '\r')) continue;
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (char === '\\') escaped = true;
+          else if (char === '"') quoted = false;
+        } else if (char === '"') quoted = true;
+        else if (char === '{' || char === '[') depth++;
+        else if (char === '}' || char === ']') depth--;
+        if (outside || depth < 2) {
+          if (envelopeLength === MAX_FRAME) throw new RangeError('MCP control frame too large');
+          envelope[envelopeLength++] = chunk[i];
+        }
+      }
+      await file.writeFile(chunk);
+    }
+    const file = await open(filename, 'wx+', 0o600);
+    try {
+      if (process.platform !== 'win32') await unlink(filename);
+      for (const chunk of chunks) await append(chunk);
+      for await (const chunk of line) await append(chunk);
+      if (await handleInterleaved(envelope.subarray(0, envelopeLength), requestId)) return false;
+      yield* file.createReadStream({ start: 0 });
+      return true;
+    } finally {
+      await file.close();
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 function stdio({ command, args = [], cwd, env }) {
@@ -35,9 +90,9 @@ function stdio({ command, args = [], cwd, env }) {
     }
     const stdout = child.stdout[Symbol.asyncIterator]();
     let tail = Buffer.alloc(0);
+    let toolStream;
     const send = frame => new Promise((resolve, reject) => child.stdin.write(frame + '\n', error => error ? reject(error) : resolve()));
-    async function* exchange(frame) {
-      await send(frame);
+    async function* readLine() {
       for (;;) {
         if (!tail.length) {
           const next = await stdout.next();
@@ -51,23 +106,72 @@ function stdio({ command, args = [], cwd, env }) {
         if (newline >= 0) return;
       }
     }
-    return {
-      async request(frame) {
+    async function handleInterleaved(body, requestId) {
+      let message;
+      try { message = JSON.parse(body); } catch { return false; }
+      if (message?.jsonrpc !== '2.0') return false;
+      if (message.id != null && typeof message.id !== 'number' && typeof message.id !== 'string') return false;
+      const id = encodedId(body, message.id);
+      if (typeof message.method !== 'string') return message.id != null && id !== requestId;
+      if (message.id != null) {
+        const reply = message.method === 'ping' ? '"result":{}' : '"error":{"code":-32601,"message":"Method not found"}';
+        await send('{"jsonrpc":"2.0","id":' + id + ',' + reply + '}');
+      }
+      return true;
+    }
+    async function* exchange(frame, stream) {
+      const requestId = encodedId(frame, JSON.parse(frame).id);
+      await send(frame);
+      frames: for (;;) {
         const chunks = [];
         let size = 0;
-        for await (const chunk of exchange(frame)) {
+        const line = readLine();
+        let discard = false;
+        for await (const chunk of line) {
+          if (discard) continue;
+          if (stream && size < 256) {
+            const prefix = size ? Buffer.concat([...chunks, chunk], Math.min(256, size + chunk.length)) : chunk;
+            const header = toolResponseHeader.exec(prefix.toString('latin1', 0, 256));
+            if (header) {
+              if (header[1] !== requestId) {
+                discard = true;
+                continue;
+              }
+              yield* chunks;
+              yield chunk;
+              yield* line;
+              return;
+            }
+          }
           size += chunk.length;
-          if (size > MAX_FRAME) throw new RangeError('MCP control frame too large');
           chunks.push(chunk);
+          if (size > MAX_FRAME) {
+            if (!stream) throw new RangeError('MCP control frame too large');
+            if (yield* routeLargeToolFrame(chunks, line, handleInterleaved, requestId)) return;
+            continue frames;
+          }
         }
-        return { body: Buffer.concat(chunks, size) };
+        if (discard) continue;
+        const body = Buffer.concat(chunks, size);
+        if (await handleInterleaved(body, requestId)) continue;
+        yield body;
+        return;
+      }
+    }
+    return {
+      async request(frame) {
+        for await (const body of exchange(frame, false)) return { body };
       },
-      requestToolStream: exchange,
+      requestToolStream(frame) {
+        toolStream = exchange(frame, true);
+        return toolStream;
+      },
       notify: send,
-      close() {
+      async close() {
         child.stdin.destroy();
         child.stdout.destroy();
         child.kill('SIGKILL');
+        await toolStream?.return();
       },
     };
   };

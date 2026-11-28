@@ -44,8 +44,7 @@ function open(t, runtimeOptions, provider, root, sessionOptions = {}) {
   return { runtime, session };
 }
 
-test('MCP refresh discovers the live stdio catalog and selections control actual calls', { skip }, async t => {
-  const root = workspace(t);
+function stdioMock(t) {
   const mock = process.env.METACODES_MOCK_MCP_SERVER || path.resolve(__dirname, '../../../zig-out/bin',
     process.platform === 'win32' ? 'mock_mcp_server.exe' : 'mock_mcp_server');
   if (!fs.existsSync(mock) && !process.env.METACODES_MOCK_MCP_SERVER) {
@@ -54,6 +53,84 @@ test('MCP refresh discovers the live stdio catalog and selections control actual
       { cwd: path.resolve(__dirname, '../../..'), stdio: 'inherit' });
   }
   fs.accessSync(mock);
+  return mock;
+}
+
+test('stdio catalog discovery returns the same tools with and without a server ping', { skip }, async t => {
+  const mock = stdioMock(t);
+  if (!mock) return;
+  async function discover(args) {
+    const runtime = new metacodes.Runtime({ tools: [], mcpServers: [{
+      namespace: 'fixture', command: mock, args: ['--version', '2025-06-18', ...args],
+      negotiationPolicy: 'legacy_2025_06_only', serverBindingIdentity: 'ab'.repeat(32),
+      configurationFingerprint: 'cd'.repeat(32),
+    }] });
+    try {
+      const generation = await runtime.refreshMcp();
+      const snapshot = await runtime.describeMcp();
+      assert.equal(snapshot.catalog_generation, generation);
+      assert.deepEqual(snapshot.issues, []);
+      assert.equal(snapshot.servers.length, 1);
+      const names = snapshot.tools.map(tool => tool.canonical_name);
+      assert.equal(names.length, 9);
+      assert.ok(names.includes('echo'));
+      return names;
+    } finally {
+      runtime.close();
+    }
+  }
+  const control = await discover([]);
+  assert.deepEqual(await discover(['--ping']), control);
+});
+
+test('stdio matches the pending response after interleaved frames during discovery and tool calls', { skip }, async t => {
+  function serve() {
+    const send = message => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
+    let pending;
+    require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
+      const { id, method, result } = JSON.parse(line);
+      if (id === undefined) return;
+      if (method === 'initialize') {
+        send({ id, result: { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'test', version: '1' } } });
+      } else if (method === 'tools/list' || method === 'tools/call') {
+        const pingId = method === 'tools/list' ? String(id) : '9007199254740993';
+        pending = { id, method, pingId };
+        process.stdout.write('{"jsonrpc":"2.0","method":"ping","id":' + pingId + '}\n');
+      } else {
+        if (method || line.match(/"id"\s*:\s*(\d+)/)?.[1] !== pending.pingId || JSON.stringify(result) !== '{}') process.exit(1);
+        send({ method: 'notifications/progress', params: { progressToken: 'test', progress: 1 } });
+        send({ id: pending.id + 1, error: { code: -32603, message: 'unrelated response' } });
+        if (pending.method === 'tools/list') {
+          send({ result: { tools: [{ name: 'echo', inputSchema: { type: 'object' } }] }, id: pending.id });
+        } else {
+          send({ result: { content: [{ type: 'text', text: '"{\\}'.repeat(2 * 1024 * 1024) }] }, id: pending.id + 1 });
+          process.stdout.write('{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"matched tool response"}]},' +
+            ' '.repeat(8 * 1024 * 1024) + '"id":' + pending.id + '}\n');
+        }
+        pending = null;
+      }
+    });
+  }
+  const identity = 'ab'.repeat(32);
+  const step = ['tool', '', {}];
+  const provider = await withProvider(t, [step, ['echo']]);
+  const runtime = new metacodes.Runtime({ tools: [], mcpServers: [{
+    namespace: 'fixture', command: process.execPath, args: ['-e', '(' + serve.toString() + ')()'],
+    negotiationPolicy: 'legacy_2025_06_only', serverBindingIdentity: identity, configurationFingerprint: 'cd'.repeat(32),
+  }] });
+  t.after(() => runtime.close());
+  await runtime.refreshMcp();
+  assert.deepEqual((await runtime.describeMcp()).issues, []);
+  const session = runtime.session('mock-model', { apiKey: 'test', baseUrl: provider.baseUrl, workspace: workspace(t),
+    permissionMode: 'full_access', mcpSelection: [{ serverBindingIdentity: identity, toolName: 'echo' }] });
+  step[1] = session.describe().mcp.tools[0].model_name;
+  assert.match((await session.run('call echo')).text, /matched tool response/);
+});
+
+test('MCP refresh discovers the live stdio catalog and selections control actual calls', { skip }, async t => {
+  const mock = stdioMock(t);
+  if (!mock) return;
+  const root = workspace(t);
   const flag = path.join(root, 'paginate');
   const launcher = `const args = ['--version', '2025-06-18'];
     if (require('fs').existsSync(process.argv[2])) args.push('--paginate');
