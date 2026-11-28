@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.check_binding_parity import ROOT, check
+from scripts.check_binding_parity import ROOT, check, inventory
 
 
 class BindingParityTest(unittest.TestCase):
@@ -50,6 +50,19 @@ class BindingParityTest(unittest.TestCase):
         del manifest["mcp.describe"]
         path.write_text(json.dumps(manifest), encoding="utf-8")
         self.assertEqual(check(self.root), ["node mcp.describe: missing from manifest"])
+
+    def test_every_run_options_field_is_required(self):
+        header = (self.root / "sdk/metask/agentcore.h").read_text(encoding="utf-8")
+        _, configs, _ = inventory(header)
+        for language in ("node", "python"):
+            path = self.root / f"sdk/{language}/abi-coverage.json"
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            for field in configs["run_options_v1"]:
+                key = f"run_options_v1.{field}"
+                with self.subTest(language=language, key=key):
+                    path.write_text(json.dumps({k: v for k, v in manifest.items() if k != key}), encoding="utf-8")
+                    self.assertEqual(check(self.root), [f"{language} {key}: missing from manifest"])
+            path.write_text(json.dumps(manifest), encoding="utf-8")
 
     def assert_new_team_entry_is_missing(self, declaration):
         path = self.root / "sdk/metask/agentcore.h"

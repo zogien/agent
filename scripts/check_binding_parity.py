@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIGS = ("runtime_config_v1", "session_host_config_v1", "session_create_config_v1")
+CONFIGS = ("runtime_config_v1", "session_host_config_v1", "session_create_config_v1", "run_options_v1", "run_input_v1")
 
 
 def inventory(header):
@@ -85,10 +85,11 @@ def node_apis(root):
     for cls in ("Runtime", "Session"):
         body = scoped(source, "class " + cls)
         result.update(f"{cls}.{method}" for method in re.findall(r"^  (?:async )?(\w+)\(", body, re.M))
-        options = cls + "Options"
-        for field in re.findall(r"^  (\w+)\??:", scoped(types, "export interface " + options), re.M):
-            if re.search(r"\b" + field + r"\b", body):
-                result.add(f"{options}.{field}")
+        options_types = ("RuntimeOptions",) if cls == "Runtime" else ("SessionOptions", "RunOptions")
+        for options in options_types:
+            for field in re.findall(r"^  (\w+)\??:", scoped(types, "export interface " + options), re.M):
+                if re.search(r"\b" + field + r"\b", body):
+                    result.add(f"{options}.{field}")
     return result
 
 

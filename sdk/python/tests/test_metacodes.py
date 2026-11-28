@@ -46,6 +46,41 @@ class PythonSdkTest(unittest.TestCase):
         options.setdefault("api_key", "test-key")
         return runtime.session("mock-model", base_url=provider.base_url, **options)
 
+    def test_run_and_stream_time_context(self):
+        with MockProvider([("text", "ok")] * 2) as provider, metacodes.Runtime(tools=()) as runtime:
+            session = self.session(runtime, provider)
+            for mode, offset in (("utc_offset", -841), ("utc_offset", 841), ("off", 1), ("system", -1)):
+                with self.assertRaises(ValueError):
+                    session.run("invalid", time_context=mode, utc_offset_minutes=offset)
+            session.run("one", time_context="off")
+            self.assertNotIn("# currentDate", str(provider.requests[0]))
+            list(session.stream("two", time_context="utc_offset", utc_offset_minutes=345,
+                                context_blocks=[{"label": "Review", "text": "requested change"}]))
+            user = str(provider.requests[1]["messages"][-1])
+            self.assertIn("UTC+05:45", user)
+            self.assertIn("requested change", user)
+            self.assertEqual(len(provider.requests), 2)
+
+    def test_goal_lifecycle_and_continuation(self):
+        with MockProvider([("text", "progress")]) as provider, metacodes.Runtime(tools=()) as runtime:
+            session = self.session(runtime, provider)
+            budget = (1 << 63) + 1
+            self.assertIsNone(session.get_goal())
+            session.set_goal("first", budget)
+            self.assertEqual(session.get_goal()["token_budget"], budget)
+            session.update_goal(objective="Review <changes>", token_budget=budget + 1)
+            session.run({"type": "goal_continuation"})
+            self.assertIn("Review &lt;changes&gt;", str(provider.requests[0]["messages"]))
+            goal = session.get_goal()
+            self.assertEqual(goal["token_budget"], budget + 1)
+            self.assertGreater(goal["tokens_used"], 0)
+            session.update_goal(action="pause")
+            with self.assertRaisesRegex(metacodes.AgentCoreError, "GOAL_CONFLICT"):
+                session.run({"type": "goal_continuation"})
+            self.assertEqual(len(provider.requests), 1)
+            session.clear_goal()
+            self.assertIsNone(session.get_goal())
+
     def test_prompt_profile_applies_and_clears(self):
         def profile(text):
             return [{"op": "replace", "id": "metacodes:identity", "text": text}]

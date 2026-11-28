@@ -188,6 +188,12 @@ static int get_property_u32(napi_env env, napi_value object, const char *name, u
     return napi_get_value_uint32(env, value, out) == napi_ok;
 }
 
+static int get_property_i32(napi_env env, napi_value object, const char *name, int32_t *out) {
+    napi_value value;
+    return napi_get_named_property(env, object, name, &value) == napi_ok &&
+        napi_get_value_int32(env, value, out) == napi_ok;
+}
+
 /* A list of strings kept alive together with the views that borrow them. */
 typedef struct {
     owned_t *items;
@@ -463,27 +469,27 @@ typedef struct session_s {
     int destroyed;
     int running;
     uint64_t run_id;
-    owned_t text;
+    metask_agentcore_run_input_v1 input;
     metask_agentcore_run_input_part_v1 *parts;
-    uint32_t part_count;
     uint64_t compact_id;
-    uint32_t max_turns;
-    uint32_t stream_retry_budget;
+    metask_agentcore_run_options_v1 options;
     metask_agentcore_context_block_v1 *blocks;
     uint32_t block_count;
 } session_t;
 
 static void release_input(session_t *session) {
-    for (uint32_t i = 0; i < session->part_count; i++) {
+    for (uint32_t i = 0; i < session->input.part_count; i++) {
         free((void *)session->parts[i].text.ptr);
         free((void *)session->parts[i].media_type.ptr);
         free((void *)session->parts[i].data.ptr);
     }
     free(session->parts);
     session->parts = NULL;
-    session->part_count = 0;
-    free(session->text.ptr);
-    session->text = (owned_t){0};
+    free((void *)session->input.text.ptr);
+    free((void *)session->input.skill_id.ptr);
+    free((void *)session->input.catalog_revision.ptr);
+    free((void *)session->input.arguments_json.ptr);
+    session->input = (metask_agentcore_run_input_v1){0};
     for (uint32_t i = 0; i < session->block_count; i++) {
         free((void *)session->blocks[i].label.ptr);
         free((void *)session->blocks[i].text.ptr);
@@ -501,15 +507,35 @@ static int copy_view(napi_env env, napi_value item, const char *key, metask_agen
 }
 
 static int copy_input(napi_env env, session_t *session, napi_value value) {
+    metask_agentcore_run_input_v1 *input = &session->input;
+    input->struct_size = sizeof(*input);
     bool is_array;
     if (napi_is_array(env, value, &is_array) != napi_ok) return 0;
-    if (!is_array) return get_string(env, value, &session->text);
+    if (!is_array) {
+        napi_valuetype type;
+        if (napi_typeof(env, value, &type) != napi_ok) return 0;
+        if (type == napi_string) {
+            owned_t text;
+            if (!get_string(env, value, &text)) return 0;
+            input->kind_code = METASK_AGENTCORE_RUN_INPUT_TEXT;
+            input->text = view_of(&text);
+            return 1;
+        }
+        if (!get_property_u32(env, value, "kind", &input->kind_code)) return 0;
+        if (input->kind_code == METASK_AGENTCORE_RUN_INPUT_GOAL_CONTINUATION) return 1;
+        return input->kind_code == METASK_AGENTCORE_RUN_INPUT_SKILL &&
+            copy_view(env, value, "skillId", &input->skill_id) &&
+            copy_view(env, value, "catalogRevision", &input->catalog_revision) &&
+            copy_view(env, value, "argumentsJson", &input->arguments_json);
+    }
     uint32_t count;
     if (napi_get_array_length(env, value, &count) != napi_ok || !count || count > METASK_AGENTCORE_MAX_RUN_INPUT_PARTS_V1)
         return 0;
     session->parts = calloc(count, sizeof(*session->parts));
     if (!session->parts) return 0;
-    session->part_count = count;
+    input->kind_code = METASK_AGENTCORE_RUN_INPUT_MULTIMODAL;
+    input->parts = session->parts;
+    input->part_count = count;
     for (uint32_t i = 0; i < count; i++) {
         napi_value item;
         metask_agentcore_run_input_part_v1 *part = &session->parts[i];
@@ -864,6 +890,151 @@ static int buffer_view(napi_env env, napi_value item, const char *key, metask_ag
     return 1;
 }
 
+typedef struct {
+    runtime_t *runtime;
+    metask_agentcore_skill_catalog *handle;
+} catalog_t;
+
+static void catalog_finalize(napi_env env, void *data, void *hint) {
+    catalog_t *catalog = data;
+    if (catalog->handle) {
+        metask_agentcore_owned_bytes_v1 diagnostic = {0};
+        g_api->skill->release_catalog(catalog->handle, &diagnostic);
+        g_api->buffer_release(&diagnostic);
+    }
+    release_runtime(catalog->runtime);
+    free(catalog);
+}
+
+static int read_catalog_query(napi_env env, napi_value cfg, metask_agentcore_skill_catalog_query_v1 *query,
+                              metask_agentcore_skill_source_v1 *sources) {
+    napi_value array;
+    uint32_t count;
+    if (!buffer_view(env, cfg, "workspace", &query->workspace_root) ||
+        !buffer_view(env, cfg, "workspaceHome", &query->workspace_home) ||
+        !buffer_view(env, cfg, "workspaceEpoch", &query->workspace_epoch) ||
+        !get_property_i32(env, cfg, "defaultUserSourcePriority", &query->default_user_source_priority) ||
+        !get_property_i32(env, cfg, "defaultWorkspaceSourcePriority", &query->default_workspace_source_priority) ||
+        napi_get_named_property(env, cfg, "sources", &array) != napi_ok ||
+        napi_get_array_length(env, array, &count) != napi_ok || count > METASK_AGENTCORE_MAX_SKILL_SOURCES_V1) return 0;
+    for (uint32_t i = 0; i < count; i++) {
+        napi_value item;
+        sources[i].struct_size = sizeof(sources[i]);
+        if (napi_get_element(env, array, i, &item) != napi_ok ||
+            !get_property_u32(env, item, "scope", &sources[i].scope_code) ||
+            !buffer_view(env, item, "root", &sources[i].root) ||
+            !buffer_view(env, item, "id", &sources[i].source_instance_id) ||
+            !get_property_i32(env, item, "priority", &sources[i].priority)) return 0;
+    }
+    query->additional_sources = count ? sources : NULL;
+    query->additional_source_count = count;
+    return 1;
+}
+
+static napi_value resolve_catalog(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2], result, external, json;
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    runtime_t *runtime = get_runtime(env, argv[0]);
+    if (!runtime) return NULL;
+    metask_agentcore_skill_source_v1 sources[METASK_AGENTCORE_MAX_SKILL_SOURCES_V1] = {0};
+    metask_agentcore_skill_catalog_query_v1 query = {.struct_size = sizeof(query)};
+    if (argc != 2 || !read_catalog_query(env, argv[1], &query, sources)) {
+        napi_throw_type_error(env, NULL, "invalid catalog query");
+        return NULL;
+    }
+    catalog_t *catalog = calloc(1, sizeof(*catalog));
+    if (!catalog) {
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    metask_agentcore_owned_bytes_v1 descriptor = {0}, diagnostic = {0};
+    uint32_t status = g_api->skill->resolve_catalog(runtime->handle, &query, &catalog->handle, &descriptor, &diagnostic);
+    if (status) {
+        free(catalog);
+        g_api->buffer_release(&descriptor);
+        throw_status(env, "skill.resolve_catalog", status, &diagnostic);
+        return NULL;
+    }
+    g_api->buffer_release(&diagnostic);
+    catalog->runtime = runtime;
+    atomic_fetch_add(&runtime->refs, 1);
+    napi_status created = napi_create_string_utf8(env, (const char *)descriptor.ptr, descriptor.len, &json);
+    g_api->buffer_release(&descriptor);
+    if (created != napi_ok || napi_create_object(env, &result) != napi_ok ||
+        napi_create_external(env, catalog, catalog_finalize, NULL, &external) != napi_ok) {
+        catalog_finalize(env, catalog, NULL);
+        napi_throw_error(env, NULL, "cannot create skill catalog");
+        return NULL;
+    }
+    if (!node_set_field(env, result, "handle", external) || !node_set_field(env, result, "json", json)) {
+        napi_throw_error(env, NULL, "cannot return skill catalog");
+        return NULL;
+    }
+    return result;
+}
+
+static catalog_t *get_catalog(napi_env env, napi_value value) {
+    void *data = NULL;
+    if (napi_get_value_external(env, value, &data) != napi_ok || !data || !((catalog_t *)data)->handle) {
+        napi_throw_type_error(env, NULL, "expected a live skill catalog");
+        return NULL;
+    }
+    return data;
+}
+
+static napi_value release_catalog(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    catalog_t *catalog = get_catalog(env, argv[0]);
+    if (!catalog) return NULL;
+    metask_agentcore_owned_bytes_v1 diagnostic = {0};
+    uint32_t status = g_api->skill->release_catalog(catalog->handle, &diagnostic);
+    if (status) throw_status(env, "skill.release_catalog", status, &diagnostic);
+    else {
+        g_api->buffer_release(&diagnostic);
+        catalog->handle = NULL;
+    }
+    return NULL;
+}
+
+static int read_skill_binding(napi_env env, napi_value cfg, string_list_t *grants,
+                              metask_agentcore_skill_policy_v1 *policy, metask_agentcore_skill_catalog **handle) {
+    napi_value value;
+    napi_valuetype type;
+    if (napi_get_named_property(env, cfg, "catalog", &value) != napi_ok || napi_typeof(env, value, &type) != napi_ok) return 0;
+    if (!get_string_list(env, cfg, "grants", grants)) return 0;
+    policy->struct_size = sizeof(*policy);
+    policy->granted_skill_ids = grants->views;
+    policy->granted_skill_id_count = grants->count;
+    if (type != napi_null) {
+        catalog_t *catalog = get_catalog(env, value);
+        if (!catalog) return 0;
+        *handle = catalog->handle;
+    }
+    return 1;
+}
+
+static napi_value bind_policy(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    session_t *session = get_session(env, argv[0]);
+    if (!session) return NULL;
+    string_list_t grants = {0};
+    metask_agentcore_skill_policy_v1 policy = {0};
+    metask_agentcore_skill_catalog *catalog = NULL;
+    if (read_skill_binding(env, argv[1], &grants, &policy, &catalog)) {
+        metask_agentcore_owned_bytes_v1 diagnostic = {0};
+        uint32_t status = g_api->skill->bind_policy(session->handle, catalog, &policy, &diagnostic);
+        if (status) throw_status(env, "skill.bind_policy", status, &diagnostic);
+        else g_api->buffer_release(&diagnostic);
+    }
+    free_list(&grants);
+    return NULL;
+}
+
 static int read_profile(napi_env env, napi_value array, profile_t *out) {
     uint32_t count;
     if (napi_get_array_length(env, array, &count) != napi_ok || count > METASK_AGENTCORE_MAX_PROMPT_PROFILE_SECTIONS_V1) return 0;
@@ -961,6 +1132,8 @@ static napi_value session_create(napi_env env, napi_callback_info info) {
     permission_rules_t rules = {0};
     profile_t profile = {0};
     host_options_t host_options = {0};
+    metask_agentcore_skill_policy_v1 skill_policy = {0};
+    string_list_t grants = {0};
     napi_value sections;
     metask_agentcore_session_host_config_v1 host;
     memset(&host, 0, sizeof(host));
@@ -992,6 +1165,8 @@ static napi_value session_create(napi_env env, napi_callback_info info) {
         napi_throw_type_error(env, NULL, "invalid session options");
         goto done;
     }
+    if (!read_skill_binding(env, cfg, &grants, &skill_policy, &host.skill_catalog)) goto done;
+    if (host.skill_catalog) host.skill_policy = &skill_policy;
     if (rules.allow.count || rules.ask.count || rules.deny.count) host.permission_rules = &rules.rules;
     metask_agentcore_session_create_config_v1 config;
     memset(&config, 0, sizeof(config));
@@ -1076,26 +1251,8 @@ done:
     free(model.ptr);
     free_list(&tools);
     free_rules(&rules);
+    free_list(&grants);
     return external;
-}
-
-static uint32_t run_sync(session_t *session, metask_agentcore_run_result_v1 *result, metask_agentcore_owned_bytes_v1 *diagnostic) {
-    metask_agentcore_run_input_v1 input;
-    memset(&input, 0, sizeof(input));
-    input.struct_size = (uint32_t)sizeof(input);
-    input.kind_code = session->part_count ? METASK_AGENTCORE_RUN_INPUT_MULTIMODAL : METASK_AGENTCORE_RUN_INPUT_TEXT;
-    input.parts = session->parts;
-    input.part_count = session->part_count;
-    input.text = view_of(&session->text);
-    metask_agentcore_run_options_v1 options;
-    memset(&options, 0, sizeof(options));
-    options.struct_size = (uint32_t)sizeof(options);
-    options.max_turns = session->max_turns;
-    options.stream_retry_budget = session->stream_retry_budget;
-    options.context_blocks = session->blocks;
-    options.context_block_count = session->block_count;
-    result->struct_size = sizeof(*result);
-    return g_api->session->run_input(session->handle, session->run_id, &input, &options, result, diagnostic);
 }
 
 static THREAD_RESULT session_thread(void *arg) {
@@ -1108,7 +1265,9 @@ static THREAD_RESULT session_thread(void *arg) {
         message->status = g_api->session_control->compact(session->handle, session->compact_id, &message->compact, &diagnostic);
     } else {
         message->kind = MSG_DONE;
-        message->status = run_sync(session, &message->result, &diagnostic);
+        message->result.struct_size = sizeof(message->result);
+        message->status = g_api->session->run_input(session->handle, session->run_id, &session->input,
+            &session->options, &message->result, &diagnostic);
     }
     message->data = copy_bytes(diagnostic.ptr, (size_t)diagnostic.len);
     g_api->buffer_release(&diagnostic);
@@ -1144,9 +1303,24 @@ static napi_value start_thread(napi_env env, session_t *session) {
     return NULL;
 }
 
+static bool read_time_context(napi_env env, napi_value cfg, metask_agentcore_run_options_v1 *options) {
+    napi_value value;
+    double offset;
+    if (!get_property_u32(env, cfg, "timeCode", &options->time_context_code) ||
+        napi_get_named_property(env, cfg, "utcOffsetMinutes", &value) != napi_ok ||
+        napi_get_value_double(env, value, &offset) != napi_ok ||
+        !(offset >= METASK_AGENTCORE_MIN_UTC_OFFSET_MINUTES_V1 && offset <= METASK_AGENTCORE_MAX_UTC_OFFSET_MINUTES_V1) ||
+        (int32_t)offset != offset || (offset != 0 && options->time_context_code != METASK_AGENTCORE_TIME_CONTEXT_UTC_OFFSET)) {
+        napi_throw_range_error(env, NULL, "invalid utcOffsetMinutes for timeContext");
+        return false;
+    }
+    options->utc_offset_minutes = (int32_t)offset;
+    return true;
+}
+
 static napi_value session_run(napi_env env, napi_callback_info info) {
-    size_t argc = 6;
-    napi_value argv[6];
+    size_t argc = 4;
+    napi_value argv[4], blocks;
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     session_t *session = get_session(env, argv[0]);
     if (session == NULL) return NULL;
@@ -1155,11 +1329,12 @@ static napi_value session_run(napi_env env, napi_callback_info info) {
         return NULL;
     }
     uint64_t run_id = 0;
-    uint32_t max_turns = 0;
-    uint32_t stream_retry_budget = 0;
-    if (argc < 6 || !get_id(env, argv[1], &run_id) ||
-        napi_get_value_uint32(env, argv[3], &max_turns) != napi_ok ||
-        napi_get_value_uint32(env, argv[4], &stream_retry_budget) != napi_ok) {
+    metask_agentcore_run_options_v1 options = {.struct_size = sizeof(options)};
+    if (argc != 4 || !get_id(env, argv[1], &run_id) ||
+        !get_property_u32(env, argv[3], "turns", &options.max_turns) ||
+        !get_property_u32(env, argv[3], "budget", &options.stream_retry_budget) ||
+        !read_time_context(env, argv[3], &options) ||
+        napi_get_named_property(env, argv[3], "blocks", &blocks) != napi_ok) {
         bool pending = false;
         napi_is_exception_pending(env, &pending);
         if (!pending) napi_throw_type_error(env, NULL, "invalid Run arguments");
@@ -1167,13 +1342,14 @@ static napi_value session_run(napi_env env, napi_callback_info info) {
     }
     session->compact_id = 0;
     session->run_id = (uint64_t)run_id;
-    if (!copy_input(env, session, argv[2]) || !copy_blocks(env, session, argv[5])) {
+    if (!copy_input(env, session, argv[2]) || !copy_blocks(env, session, blocks)) {
         release_input(session);
         napi_throw_error(env, NULL, "cannot copy Run input");
         return NULL;
     }
-    session->max_turns = max_turns;
-    session->stream_retry_budget = stream_retry_budget;
+    options.context_blocks = session->blocks;
+    options.context_block_count = session->block_count;
+    session->options = options;
     return start_thread(env, session);
 }
 
@@ -1291,17 +1467,18 @@ static napi_value session_update_credential(napi_env env, napi_callback_info inf
     return NULL;
 }
 
-static napi_value session_describe(napi_env env, napi_callback_info info) {
+static napi_value session_document(napi_env env, napi_callback_info info, bool goal) {
     size_t argc = 1;
     napi_value argv[1];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     session_t *session = get_session(env, argv[0]);
     if (session == NULL) return NULL;
     metask_agentcore_owned_bytes_v1 output = {NULL, 0}, diagnostic = {NULL, 0};
-    uint32_t status = g_api->session_control->describe(session->handle, &output, &diagnostic);
+    uint32_t status = goal ? g_api->goal->get(session->handle, &output, &diagnostic)
+        : g_api->session_control->describe(session->handle, &output, &diagnostic);
     if (status != METASK_AGENTCORE_STATUS_OK) {
         g_api->buffer_release(&output);
-        throw_status(env, "session.describe", status, &diagnostic);
+        throw_status(env, goal ? "goal.get" : "session.describe", status, &diagnostic);
         return NULL;
     }
     g_api->buffer_release(&diagnostic);
@@ -1309,6 +1486,67 @@ static napi_value session_describe(napi_env env, napi_callback_info info) {
     napi_create_string_utf8(env, output.ptr ? (const char *)output.ptr : "", (size_t)output.len, &value);
     g_api->buffer_release(&output);
     return value;
+}
+
+static napi_value session_describe(napi_env env, napi_callback_info info) {
+    return session_document(env, info, false);
+}
+
+static napi_value get_goal(napi_env env, napi_callback_info info) {
+    return session_document(env, info, true);
+}
+
+static bool read_goal_values(napi_env env, napi_value cfg, metask_agentcore_bytes_view_v1 *objective, uint64_t *budget) {
+    napi_value value;
+    bool lossless;
+    if (buffer_view(env, cfg, "objective", objective) &&
+        napi_get_named_property(env, cfg, "tokenBudget", &value) == napi_ok &&
+        napi_get_value_bigint_uint64(env, value, budget, &lossless) == napi_ok && lossless) return true;
+    napi_throw_type_error(env, NULL, "invalid goal fields");
+    return false;
+}
+
+static napi_value set_goal(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    session_t *session = get_session(env, argv[0]);
+    metask_agentcore_goal_set_v1 goal = {.struct_size = sizeof(goal)};
+    if (!session || !read_goal_values(env, argv[1], &goal.objective, &goal.token_budget)) return NULL;
+    metask_agentcore_owned_bytes_v1 diagnostic = {0};
+    uint32_t status = g_api->goal->set(session->handle, &goal, &diagnostic);
+    if (status) throw_status(env, "goal.set", status, &diagnostic);
+    else g_api->buffer_release(&diagnostic);
+    return NULL;
+}
+
+static napi_value update_goal(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    session_t *session = get_session(env, argv[0]);
+    metask_agentcore_goal_update_v1 update = {.struct_size = sizeof(update)};
+    if (!session || !read_goal_values(env, argv[1], &update.objective, &update.token_budget) ||
+        !get_property_u32(env, argv[1], "fields", &update.fields) ||
+        !get_property_u32(env, argv[1], "action", &update.action_code)) return NULL;
+    metask_agentcore_owned_bytes_v1 diagnostic = {0};
+    uint32_t status = g_api->goal->update(session->handle, &update, &diagnostic);
+    if (status) throw_status(env, "goal.update", status, &diagnostic);
+    else g_api->buffer_release(&diagnostic);
+    return NULL;
+}
+
+static napi_value clear_goal(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    session_t *session = get_session(env, argv[0]);
+    if (!session) return NULL;
+    metask_agentcore_owned_bytes_v1 diagnostic = {0};
+    uint32_t status = g_api->goal->clear(session->handle, &diagnostic);
+    if (status) throw_status(env, "goal.clear", status, &diagnostic);
+    else g_api->buffer_release(&diagnostic);
+    return NULL;
 }
 
 static napi_value session_set_profile(napi_env env, napi_callback_info info) {
@@ -1603,6 +1841,9 @@ NAPI_MODULE_INIT() {
     EXPORT("project", project_protocol);
     EXPORT("runtimeCreate", runtime_create);
     EXPORT("runtimeDestroy", runtime_destroy);
+    EXPORT("resolveCatalog", resolve_catalog);
+    EXPORT("releaseCatalog", release_catalog);
+    EXPORT("bindPolicy", bind_policy);
     EXPORT("sessionCreate", session_create);
     EXPORT("sessionExport", session_export);
     EXPORT("sessionRun", session_run);
@@ -1612,6 +1853,10 @@ NAPI_MODULE_INIT() {
     EXPORT("sessionSubmit", session_submit);
     EXPORT("sessionUpdateCredential", session_update_credential);
     EXPORT("sessionDescribe", session_describe);
+    EXPORT("getGoal", get_goal);
+    EXPORT("setGoal", set_goal);
+    EXPORT("updateGoal", update_goal);
+    EXPORT("clearGoal", clear_goal);
     EXPORT("sessionSetPromptProfile", session_set_profile);
     EXPORT("sessionUpdatePermissionRules", session_update_rules);
     EXPORT("sessionSetModel", session_set_model);

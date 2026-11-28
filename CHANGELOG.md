@@ -25,6 +25,13 @@ must do about it under `### Migration`.
 
 ### Added
 
+- Node hosts can resolve workspace skill catalogs, grant and rebind skills, and
+  invoke them through ordinary or streaming Runs. Node and Python expose
+  Session goals and goal-continuation Runs, along with per-Run time zones or
+  suppression of the date block. Python also accepts per-Run context blocks.
+  Node includes the goal in Session descriptions and preserves 64-bit fields
+  as `bigint`.
+
 - Node and Python sessions accept ordered text and image input, prompt section
   edits, model capabilities, durable budgets and journal modes. Hosts can
   replace the prompt profile and permission rules between Runs. Node also

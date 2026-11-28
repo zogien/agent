@@ -145,6 +145,16 @@ function copyBudget(budget) {
 }
 
 function copyInput(prompt) {
+  if (prompt?.type === 'goal_continuation') return { kind: 4 };
+  if (prompt?.type === 'skill') {
+    const { skillId, catalogRevision, values = [] } = prompt;
+    if (typeof skillId !== 'string' || typeof catalogRevision !== 'string' ||
+        !Array.isArray(values) || values.length > 64 || !Array.from(values).every(v => typeof v === 'string'))
+      throw new TypeError('invalid skill invocation');
+    const argumentsJson = JSON.stringify({ values });
+    if (Buffer.byteLength(argumentsJson) > 1048576) throw new RangeError('skill arguments exceed the byte limit');
+    return { kind: 2, skillId, catalogRevision, argumentsJson };
+  }
   if (!Array.isArray(prompt)) return String(prompt);
   if (!prompt.length || prompt.length > 64) throw new RangeError('multimodal input requires 1 to 64 parts');
   return Array.from(prompt, part => {
@@ -269,7 +279,18 @@ class AgentCoreError extends Error {
   }
 }
 
+function copyGrants(policy) {
+  if (!Array.isArray(policy) || policy.length > 1024)
+    throw new TypeError('skillPolicy must be an array of granted skill IDs');
+  return Array.from(policy, id => {
+    if (typeof id !== 'string') throw new TypeError('each granted skill ID must be a string');
+    return id;
+  });
+}
+
 class Runtime {
+  #catalogs = new Map();
+
   /**
    * @param {{tools?: string[], hostTools?: object[], library?: string, preview?: boolean}} [options]
    */
@@ -295,6 +316,45 @@ class Runtime {
     this._handle = this._native.runtimeCreate(this.tools, specs, preview);
   }
 
+  resolveWorkspaceSkillCatalog({ workspace = '.', workspaceHome = workspace, workspaceEpoch = '',
+    additionalSources = [], defaultUserSourcePriority = 0, defaultWorkspaceSourcePriority = 0 } = {}) {
+    function priority(value = 0) {
+      if (!Number.isInteger(value) || value < -2147483648 || value > 2147483647)
+        throw new RangeError('skill source priority must fit int32');
+      return value;
+    }
+    if (!Array.isArray(additionalSources) || additionalSources.length > 64) throw new RangeError('additionalSources allows up to 64 sources');
+    if (typeof workspaceEpoch !== 'string') throw new TypeError('workspaceEpoch must be a string');
+    const query = {
+      workspace: Buffer.from(path.resolve(workspace)), workspaceHome: Buffer.from(path.resolve(workspaceHome)),
+      workspaceEpoch: Buffer.from(workspaceEpoch), defaultUserSourcePriority: priority(defaultUserSourcePriority),
+      defaultWorkspaceSourcePriority: priority(defaultWorkspaceSourcePriority),
+      sources: Array.from(additionalSources, source => {
+        const scope = ['user', 'workspace'].indexOf(source.scope) + 1;
+        if (!scope || typeof source.sourceInstanceId !== 'string') throw new TypeError('invalid skill source');
+        return { scope, root: Buffer.from(path.resolve(source.root)), id: Buffer.from(source.sourceInstanceId),
+          priority: priority(source.priority) };
+      }),
+    };
+    const { handle, json } = this._native.resolveCatalog(this._handle, query);
+    try {
+      const catalog = decode(5, json);
+      this.#catalogs.set(catalog, handle);
+      return catalog;
+    } catch (error) { this._native.releaseCatalog(handle); throw error; }
+  }
+
+  _catalogHandle(catalog) {
+    const handle = this.#catalogs.get(catalog);
+    if (!handle) throw new Error('skill catalog was released or belongs to another runtime');
+    return handle;
+  }
+
+  releaseCatalog(catalog) {
+    this._native.releaseCatalog(this._catalogHandle(catalog));
+    this.#catalogs.delete(catalog);
+  }
+
   /** Create a Session; see README.md for the options. */
   session(model, options = {}) {
     const session = new Session(this, model, options);
@@ -318,6 +378,7 @@ class Runtime {
     if (!this._handle) return;
     if (this._restores) throw new Error('session restore in progress');
     for (const session of [...this.sessions]) session.close();
+    for (const catalog of this.#catalogs.keys()) this.releaseCatalog(catalog);
     this._native.runtimeDestroy(this._handle);
     this._handle = null;
   }
@@ -378,7 +439,11 @@ class Session {
     const journal = ['ephemeral', 'durable_workspace'].indexOf(options.runJournalMode ?? 'ephemeral');
     if (journal < 0) throw new TypeError('invalid runJournalMode');
     if (readCheckpoint && options.promptProfile != null) throw new TypeError('restore uses the checkpoint prompt profile');
+    const { skillCatalog, skillPolicy } = options;
+    const bindSkills = skillCatalog !== undefined || skillPolicy !== undefined;
     const config = {
+      grants: bindSkills ? copyGrants(skillPolicy) : null,
+      catalog: bindSkills ? runtime._catalogHandle(skillCatalog) : null,
       promptProfile: copyProfile(options.promptProfile),
       modelCapabilities: copyCapabilities(options.modelCapabilities),
       durableBudget: copyBudget(options.durableBudget),
@@ -525,7 +590,7 @@ class Session {
    * `thinking_discarded` event and is announced by `retry_notice`.
    * @returns {Promise<{runId: bigint, text: string, stopReason: string, turns: number, toolCalls: number, usage: object, segments: object[]}>}
    */
-  run(prompt, { maxTurns, streamRetryBudget = 0, onEvent, contextBlocks = [] } = {}) {
+  run(prompt, { maxTurns, streamRetryBudget = 0, onEvent, contextBlocks = [], timeContext = 'system', utcOffsetMinutes = 0 } = {}) {
     if (!this._handle) return Promise.reject(new Error('session is closed'));
     if (this._exporting) return Promise.reject(new Error('checkpoint export in progress'));
     if (this._compact) return Promise.reject(new Error('compaction in progress'));
@@ -539,10 +604,14 @@ class Session {
       return Promise.reject(new RangeError(`streamRetryBudget must be between 0 and ${MAX_STREAM_RETRY_BUDGET}`));
     }
     return new Promise((resolve, reject) => {
+      const timeCode = ['system', 'utc_offset', 'off'].indexOf(timeContext);
+      if (timeCode < 0) throw new TypeError('invalid timeContext');
       const runId = this._nextRunId++;
       this._active = { runId, state: new RunState(), onEvent, resolve, reject, error: null, calls: new Map() };
       try {
-        this._native.sessionRun(this._handle, runId, copyInput(prompt), turns, budget, copyContextBlocks(contextBlocks));
+        this._native.sessionRun(this._handle, runId, copyInput(prompt), {
+          turns, budget, timeCode, utcOffsetMinutes, blocks: copyContextBlocks(contextBlocks),
+        });
       } catch (error) {
         this._active = null;
         reject(error);
@@ -618,7 +687,48 @@ class Session {
   }
 
   describe() {
-    return decode(2, this._native.sessionDescribe(this._handle));
+    const description = decode(2, this._native.sessionDescribe(this._handle));
+    description.goal = this.getGoal();
+    return description;
+  }
+
+  getGoal() {
+    return decode(4, this._native.getGoal(this._handle)).goal;
+  }
+
+  setGoal(objective, tokenBudget = 0n) {
+    this._requireIdle();
+    if (typeof objective !== 'string') throw new TypeError('objective must be a string');
+    this._native.setGoal(this._handle, { objective: Buffer.from(objective), tokenBudget: integer64(tokenBudget, false) });
+  }
+
+  updateGoal({ objective, tokenBudget, action }) {
+    this._requireIdle();
+    const fields = (objective !== undefined ? 1 : 0) | (tokenBudget !== undefined ? 2 : 0) | (action !== undefined ? 4 : 0);
+    const actionCode = ['pause', 'activate', 'complete', 'block'].indexOf(action) + 1;
+    if (!fields || (objective !== undefined && typeof objective !== 'string') || (action !== undefined && !actionCode))
+      throw new TypeError('invalid goal update');
+    this._native.updateGoal(this._handle, { fields, objective: Buffer.from(objective ?? ''),
+      tokenBudget: integer64(tokenBudget === undefined ? 0n : tokenBudget, false), action: actionCode });
+  }
+
+  clearGoal() {
+    this._requireIdle();
+    this._native.clearGoal(this._handle);
+  }
+
+  continueGoal(options) {
+    return this.run({ type: 'goal_continuation' }, options);
+  }
+
+  runSkill(input, options) {
+    return this.run({ ...input, type: 'skill' }, options);
+  }
+
+  bindPolicy(catalog, grantedSkillIds) {
+    this._requireIdle();
+    const grants = copyGrants(grantedSkillIds);
+    this._native.bindPolicy(this._handle, { grants, catalog: catalog === null ? null : this.runtime._catalogHandle(catalog) });
   }
 
   async exportCheckpoint(directory) {

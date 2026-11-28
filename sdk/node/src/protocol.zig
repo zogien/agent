@@ -74,6 +74,17 @@ fn decode(env: Env, kind: u32, bytes: []const u8, js: Value) !void {
             defer report.deinit();
             _ = try project(env, js, report.value);
         },
+        4 => {
+            var arena = std.heap.ArenaAllocator.init(gpa);
+            defer arena.deinit();
+            const goal = try protocol.decodeGoalDocument(arena.allocator(), bytes);
+            _ = try project(env, js, goal);
+        },
+        5 => {
+            var catalog = try protocol.decodeSkillCatalog(gpa, bytes);
+            defer catalog.deinit();
+            _ = try project(env, js, catalog.value);
+        },
         else => return error.InvalidKind,
     }
 }
