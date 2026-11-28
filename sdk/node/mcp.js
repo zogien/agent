@@ -2,7 +2,7 @@
 
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
-const { mkdtemp, open, rm, unlink } = require('node:fs/promises');
+const { mkdtemp, open, rm, stat, unlink } = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 
@@ -77,15 +77,74 @@ async function* routeLargeToolFrame(chunks, line, handleInterleaved, requestId) 
   }
 }
 
+async function resolveWindowsCommand(command, cwd, env) {
+  const extension = path.extname(command);
+  if (extension && !/^\.(cmd|bat)$/i.test(extension)) return command;
+  const keys = Object.keys(env).sort();
+  const lookup = name => env[keys.find(key => key.toUpperCase() === name) ?? name];
+  const searchPath = lookup('PATH') ?? process.env.PATH ?? '';
+  const directories = /[\\/:]/.test(command) ? [''] : searchPath.split(';');
+  const pathExt = lookup('PATHEXT') ?? process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD';
+  const suffixes = extension ? [''] : pathExt.split(';').filter(suffix => /^\.[\w-]+$/.test(suffix));
+  for (const directory of directories) {
+    const base = path.resolve(cwd, directory.replace(/^"(.*)"$/, '$1'), command);
+    for (const suffix of suffixes) {
+      const candidate = base + suffix;
+      try {
+        if ((await stat(candidate)).isFile()) return candidate;
+      } catch (error) {
+        if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
+      }
+    }
+  }
+  if (!extension) return command;
+  throw Object.assign(new Error('MCP batch launcher not found'), { code: 'ENOENT' });
+}
+
+function quoteBatchArgument(value) {
+  if (/[\0\r\n]/.test(value)) throw new TypeError('MCP batch arguments must fit on one command line');
+  const quoted = value.replace(/\\+|"/g, (token, offset) => {
+    if (token === '"') return '""';
+    const next = value[offset + token.length];
+    return next === undefined || next === '"' ? token.repeat(2) : token;
+  });
+  return '"' + quoted + '"';
+}
+
+async function stdioLaunch(command, args, options) {
+  if (process.platform !== 'win32') return { command, args, options };
+  const env = options.env ?? process.env;
+  const file = await resolveWindowsCommand(command, options.cwd ?? process.cwd(), env);
+  if (!/\.(cmd|bat)$/i.test(file)) return { command: file, args, options };
+  let line = [file, ...args].map(quoteBatchArgument).join(' ');
+  let batchEnv = env;
+  if (line.includes('%')) {
+    let percentKey = 'MCP_LITERAL_PERCENT';
+    const keys = new Set(Object.keys(env).map(key => key.toUpperCase()));
+    while (keys.has(percentKey)) percentKey += '_';
+    line = line.replaceAll('%', '%' + percentKey + '%');
+    batchEnv = { ...env, [percentKey]: '%' };
+  }
+  const shell = path.join(process.env.SystemRoot, 'System32', 'cmd.exe');
+  return {
+    command: shell, args: ['/d', '/v:off', '/s', '/c', '"' + line + '"'],
+    options: { ...options, env: batchEnv, windowsVerbatimArguments: true },
+  };
+}
+
 function stdio({ command, args = [], cwd, env }) {
   if (typeof command !== 'string' || !command || !Array.isArray(args) || args.some(arg => typeof arg !== 'string'))
     throw new TypeError('MCP stdio requires a command and string arguments');
   const argv = [...args];
   const environment = env && { ...env };
   return async function open() {
-    const child = spawn(command, argv, { cwd, env: environment, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
-    child.stdin.on('error', () => {});
-    try { await once(child, 'spawn'); } catch (cause) {
+    let child;
+    try {
+      const launch = await stdioLaunch(command, argv, { cwd, env: environment, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+      child = spawn(launch.command, launch.args, launch.options);
+      child.stdin.on('error', () => {});
+      await once(child, 'spawn');
+    } catch (cause) {
       throw Object.assign(new Error('MCP server failed to start', { cause }), { code: 'child_exit' });
     }
     const stdout = child.stdout[Symbol.asyncIterator]();

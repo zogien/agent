@@ -288,9 +288,17 @@ replace its selection with `updateMcpSelection`. Its description lists the
 selected tools and the names sent to the model.
 
 The stdio connector launches `command` with `args`, optional `cwd` and optional
-`env`. It uses the host environment by default. To own the connection, supply
-`open({ purpose, era, timeoutMs })` and choose `stdio` or `streamable_http` as
-the transport. Each open returns a fresh connection with `request`, `notify`,
+`env`. It uses the host environment by default. On Windows, a bare name such as
+`npx` is looked up in `PATH` order, trying the `PATHEXT` extensions in each
+directory. Relative paths such as `.\bin\server.cmd` start at `cwd`. A resolved
+`.cmd` or `.bat` runs through the system `cmd.exe` with delayed expansion
+disabled. Pass each argument as a separate string, including spaces and
+literal quotes. Windows executables and commands on other platforms launch
+directly.
+
+For a launcher that needs a different interpreter or custom argument
+processing, supply `open({ purpose, era, timeoutMs })` and choose `stdio` or
+`streamable_http` as the transport. Each open returns a fresh connection with `request`, `notify`,
 `requestToolStream` and `close`. Control requests return the body and, for
 HTTP, the HTTP status. The tool stream yields chunks of the complete JSON-RPC
 response from its first byte. Honor the per-call timeout and abort signal.

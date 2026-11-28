@@ -56,31 +56,78 @@ function stdioMock(t) {
   return mock;
 }
 
+async function discoverStdio(server) {
+  const runtime = new metacodes.Runtime({ tools: [], mcpServers: [{
+    namespace: 'fixture', negotiationPolicy: 'legacy_2025_06_only',
+    serverBindingIdentity: 'ab'.repeat(32), configurationFingerprint: 'cd'.repeat(32), ...server,
+  }] });
+  try {
+    const generation = await runtime.refreshMcp();
+    const snapshot = await runtime.describeMcp();
+    assert.equal(snapshot.catalog_generation, generation);
+    assert.deepEqual(snapshot.issues, []);
+    assert.equal(snapshot.servers.length, 1);
+    const names = snapshot.tools.map(tool => tool.canonical_name);
+    assert.equal(names.length, 9);
+    assert.ok(names.includes('echo'));
+    return names;
+  } finally {
+    runtime.close();
+  }
+}
+
 test('stdio catalog discovery returns the same tools with and without a server ping', { skip }, async t => {
+  const command = stdioMock(t);
+  if (!command) return;
+  const args = ['--version', '2025-06-18'];
+  const control = await discoverStdio({ command, args });
+  assert.deepEqual(await discoverStdio({ command, args: [...args, '--ping'] }), control);
+});
+
+const windowsStdio = { skip: process.platform !== 'win32' ? 'requires Windows cmd.exe' : skip };
+
+function batchDirectory(t) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp launcher & '));
+  t.after(() => fs.promises.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+  return dir;
+}
+
+test('Windows MCP stdio discovers tools through an explicit .cmd launcher', windowsStdio, async t => {
   const mock = stdioMock(t);
   if (!mock) return;
-  async function discover(args) {
-    const runtime = new metacodes.Runtime({ tools: [], mcpServers: [{
-      namespace: 'fixture', command: mock, args: ['--version', '2025-06-18', ...args],
-      negotiationPolicy: 'legacy_2025_06_only', serverBindingIdentity: 'ab'.repeat(32),
-      configurationFingerprint: 'cd'.repeat(32),
-    }] });
-    try {
-      const generation = await runtime.refreshMcp();
-      const snapshot = await runtime.describeMcp();
-      assert.equal(snapshot.catalog_generation, generation);
-      assert.deepEqual(snapshot.issues, []);
-      assert.equal(snapshot.servers.length, 1);
-      const names = snapshot.tools.map(tool => tool.canonical_name);
-      assert.equal(names.length, 9);
-      assert.ok(names.includes('echo'));
-      return names;
-    } finally {
-      runtime.close();
-    }
-  }
-  const control = await discover([]);
-  assert.deepEqual(await discover(['--ping']), control);
+  const command = path.join(batchDirectory(t), 'fixture ^ %MCP_WORD%!.cmd');
+  fs.writeFileSync(command, '@"%MCP_MOCK%" %*\r\n');
+  await discoverStdio({ command, args: ['--version', '2025-06-18'], env: { ...process.env, MCP_MOCK: mock, MCP_WORD: 'expanded' } });
+});
+
+test('Windows MCP stdio resolves an extensionless launcher through PATH and PATHEXT', windowsStdio, async t => {
+  const mock = stdioMock(t);
+  if (!mock) return;
+  const dir = batchDirectory(t);
+  fs.writeFileSync(path.join(dir, 'mcp-test.cmd'), '@"%MCP_MOCK%" %*\r\n');
+  fs.writeFileSync(path.join(dir, 'mcp-test.bat'), '@exit /b 7\r\n');
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(path|pathext)$/i.test(key)));
+  await discoverStdio({ command: 'mcp-test', args: ['--version', '2025-06-18'],
+    env: { ...env, Path: '"' + dir + '"', PathExt: '.CMD;.BAT', MCP_MOCK: mock } });
+});
+
+test('Windows MCP stdio forwards literal .bat arguments without executing extra commands', windowsStdio, async t => {
+  const mock = stdioMock(t);
+  if (!mock) return;
+  const dir = batchDirectory(t);
+  const cwd = path.join(dir, 'cwd');
+  fs.mkdirSync(cwd);
+  const command = path.join(dir, 'record.bat');
+  fs.writeFileSync(command, '@"%MCP_NODE%" "%~dp0record.cjs" %*\r\n@"%MCP_MOCK%" --version 2025-06-18\r\n');
+  const log = path.join(dir, 'argv.jsonl');
+  fs.writeFileSync(path.join(dir, 'record.cjs'),
+    "require('node:fs').appendFileSync(process.env.MCP_LOG, JSON.stringify(process.argv.slice(2)) + '\\n');");
+  const args = ['', 'two words', 'a"b', 'left&right', 'left|right', 'in<file', 'out>file',
+    'a^b', '%MCP_WORD%', '!MCP_WORD!', 'backslash\\"quote', 'trailing\\', '"& | < > ^ % !"'];
+  await discoverStdio({ command, cwd, args, env: { ...process.env, MCP_NODE: process.execPath, MCP_MOCK: mock,
+    MCP_LOG: log, MCP_WORD: 'expanded' } });
+  assert.deepEqual(fs.readFileSync(log, 'utf8').trimEnd().split('\n').map(line => JSON.parse(line)), [args]);
+  assert.deepEqual(fs.readdirSync(cwd), []);
 });
 
 test('stdio matches the pending response after interleaved frames during discovery and tool calls', { skip }, async t => {
