@@ -1167,8 +1167,9 @@ Whether a model takes image input is answered, strongest first, by:
 Each `ModelCapabilityV1` names one model (non-empty UTF-8, at most
 `MAX_MODEL_CAPABILITY_MODEL_BYTES_V1` = 256 bytes, matched against the model
 a request names ignoring case) and sets `image_input_code` to
-`CAPABILITY_SUPPORTED` (1) or `CAPABILITY_UNSUPPORTED` (2). Zero is not a
-declaration: leave a model out to make no statement. At most
+`CAPABILITY_SUPPORTED` (1), `CAPABILITY_UNSUPPORTED` (2), or zero to leave
+image support undeclared. Each entry must declare image support or at least
+one nonzero token limit. At most
 `MAX_MODEL_CAPABILITIES_V1` = 256 entries; null with a zero count is none; a
 pointer with a zero count, a count with a null pointer, two entries naming the
 same model, an unknown code, a wrong `struct_size`, or non-zero reserved words
@@ -1179,6 +1180,32 @@ exists. The array is borrowed for `create` or `restore` and copied; the
 declarations then hold for the Session's model, every `set_model` target, and
 the Session's tool-scoped providers. Checkpoints carry none: a restore uses
 the declarations of the Host config it is given.
+
+In this fork of revision 29, the 40-byte capability has a nullable
+`const metask_agentcore_model_profile_v1 *profile` at offset 24 and a
+zero `uint64_t reserved1` at offset 32. The profile represents one internal
+model catalog entry. Set its `struct_size` to exactly 72 and zero its
+`reserved0` and six reserved words. Future model information can use those
+words. The upstream revision 29 library treats the profile pointer as a
+reserved word and rejects session creation with a non-null pointer. When
+merging a future upstream ABI revision, migrate this fork extension to the
+upstream layout.
+
+The profile's `max_input_tokens` and `max_tokens` each accept 0 through
+4,294,967,295. Zero leaves that field undeclared. Each declared limit
+takes precedence over the built-in model table and protocol fallback.
+`max_input_tokens` is the input window. If the gateway quotes a combined
+input and output limit, subtract its maximum output before declaring the
+window. Anthropic sends `max_tokens` in the request. OpenAI-compatible
+requests omit it and use the value locally for output reservation.
+A lower input cap learned from a rejection on the same endpoint and model
+continues to bound the host declaration.
+
+`describe` also returns the current `max_input_tokens` and `max_tokens` in
+tokens and the derived `per_result_bytes` and `per_turn_bytes` inline tool
+result budgets in bytes. With no declaration, an unknown OpenAI-compatible
+model starts at 128,000 and 4,096 tokens, with budgets of 16,000 and 153,600
+bytes respectively.
 
 A declaration is the Host's statement about its route, not a probe. A model
 the Host declares able to take images still receives the request even if the

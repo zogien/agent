@@ -81,6 +81,9 @@ table, holds across `set_model` and restore, and `describe` reports the answer
 with its source. An image Run for a model nothing covers is refused as
 `IMAGE_INPUT_CAPABILITY_UNKNOWN` (29), distinct from `IMAGE_INPUT_UNSUPPORTED`
 (28).
+In this fork of revision 29 the optional model `profile` also accepts
+`max_input_tokens` and `max_tokens`. A restored Session uses the current Host's
+limits. See the [model capability layout](../doc/AGENTCORE_BINARY_ABI.md#model-capabilities).
 The `goal` table gives a Session one objective with an optional token budget:
 `get` writes it as JSON, `set` replaces it, `update` changes objective, budget
 and status together or not at all, and `clear` removes it. A

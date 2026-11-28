@@ -25,6 +25,10 @@ must do about it under `### Migration`.
 
 ### Added
 
+- Hosts can declare per-model input and output token limits through an optional
+  model profile in the fork’s revision 29 ABI. Session descriptions expose
+  both limits and the per-result and per-turn inline tool budgets in bytes.
+
 - Node hosts can discover and replace MCP server catalogs, select tools per
   Session and stream tool responses from host-owned connections. Node and Python
   hosts can open team leads and members, inspect the roster and drain the lead's
