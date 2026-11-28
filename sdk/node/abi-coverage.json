@@ -17,15 +17,9 @@
   "session_control.set_prompt_profile": "Session.setPromptProfile",
   "session_control.update_permission_mode": "Session.setPermissionMode",
   "session_control.update_permission_rules": "Session.updatePermissionRules",
-  "skill.bind_policy": {
-    "deferred": "#14"
-  },
-  "skill.release_catalog": {
-    "deferred": "#14"
-  },
-  "skill.resolve_catalog": {
-    "deferred": "#14"
-  },
+  "skill.bind_policy": "Session.bindPolicy",
+  "skill.release_catalog": "Runtime.releaseCatalog",
+  "skill.resolve_catalog": "Runtime.resolveWorkspaceSkillCatalog",
   "mcp.apply_configuration": {
     "deferred": "#14"
   },
@@ -38,18 +32,10 @@
   "mcp.update_selection": {
     "deferred": "#14"
   },
-  "goal.clear": {
-    "deferred": "#14"
-  },
-  "goal.get": {
-    "deferred": "#14"
-  },
-  "goal.set": {
-    "deferred": "#14"
-  },
-  "goal.update": {
-    "deferred": "#14"
-  },
+  "goal.clear": "Session.clearGoal",
+  "goal.get": "Session.getGoal",
+  "goal.set": "Session.setGoal",
+  "goal.update": "Session.updateGoal",
   "team.describe": {
     "deferred": "#14"
   },
@@ -92,12 +78,8 @@
   "session_host_config_v1.provider_kind_code": "SessionOptions.provider",
   "session_host_config_v1.run_journal_mode_code": "SessionOptions.runJournalMode",
   "session_host_config_v1.shell_policy_code": "SessionOptions.shell",
-  "session_host_config_v1.skill_catalog": {
-    "deferred": "#14"
-  },
-  "session_host_config_v1.skill_policy": {
-    "deferred": "#14"
-  },
+  "session_host_config_v1.skill_catalog": "SessionOptions.skillCatalog",
+  "session_host_config_v1.skill_policy": "SessionOptions.skillPolicy",
   "session_host_config_v1.struct_size": "Session.constructor",
   "session_host_config_v1.team": {
     "deferred": "#14"
@@ -110,14 +92,27 @@
   "session_create_config_v1.reserved": "Session.constructor",
   "session_create_config_v1.reserved0": "Session.constructor",
   "session_create_config_v1.struct_size": "Session.constructor",
-  "RUN_INPUT_GOAL_CONTINUATION": {
-    "deferred": "#14"
-  },
+  "run_options_v1.context_block_count": "RunOptions.contextBlocks",
+  "run_options_v1.context_blocks": "RunOptions.contextBlocks",
+  "run_options_v1.max_turns": "RunOptions.maxTurns",
+  "run_options_v1.reserved0": "Session.run",
+  "run_options_v1.stream_retry_budget": "RunOptions.streamRetryBudget",
+  "run_options_v1.struct_size": "Session.run",
+  "run_options_v1.time_context_code": "RunOptions.timeContext",
+  "run_options_v1.utc_offset_minutes": "RunOptions.utcOffsetMinutes",
+  "run_input_v1.arguments_json": "Session.runSkill",
+  "run_input_v1.catalog_revision": "Session.runSkill",
+  "run_input_v1.kind_code": "Session.run",
+  "run_input_v1.part_count": "Session.run",
+  "run_input_v1.parts": "Session.run",
+  "run_input_v1.reserved": "Session.run",
+  "run_input_v1.skill_id": "Session.runSkill",
+  "run_input_v1.struct_size": "Session.run",
+  "run_input_v1.text": "Session.run",
+  "RUN_INPUT_GOAL_CONTINUATION": "Session.continueGoal",
   "RUN_INPUT_MULTIMODAL": "Session.run",
   "RUN_INPUT_PART_IMAGE": "Session.run",
   "RUN_INPUT_PART_TEXT": "Session.run",
-  "RUN_INPUT_SKILL": {
-    "deferred": "#14"
-  },
+  "RUN_INPUT_SKILL": "Session.runSkill",
   "RUN_INPUT_TEXT": "Session.run"
 }
