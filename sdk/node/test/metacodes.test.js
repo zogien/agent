@@ -621,6 +621,120 @@ test('allow and deny rules decide without asking', { skip, timeout: TIMEOUT }, a
   assert.deepEqual(asked, []);
 });
 
+test('replacement rules govern the next tool decision', { skip }, async t => {
+  const root = workspace(t);
+  const provider = await withProvider(t, ['allowed', 'denied', 'asked'].flatMap(name => writeScript(root, name)));
+  let questions = 0;
+  const { session } = open(t, { tools: ['Write'] }, provider, root, {
+    onUiRequest: request => { questions++; return request.allowOnce(); },
+  });
+  for (const action of ['allow', 'deny', 'ask']) {
+    session.updatePermissionRules({ [action]: ['Write'] });
+    await session.run('write');
+  }
+  assert.equal(questions, 1);
+  assert.equal(fs.existsSync(path.join(root, 'allowed')), true);
+  assert.equal(fs.existsSync(path.join(root, 'denied')), false);
+  assert.equal(fs.existsSync(path.join(root, 'asked')), true);
+});
+
+test('prompt edits survive replacement and checkpoint restore', { skip }, async t => {
+  const provider = await withProvider(t, []);
+  const profile = text => [{ op: 'replace', id: 'metacodes:identity', text }];
+  const { runtime, session } = open(t, { tools: [] }, provider, workspace(t), { promptProfile: profile('first identity') });
+  await session.run('one');
+  assert.match(JSON.stringify(provider.requests[0].system), /first identity/);
+  session.setPromptProfile(profile('second identity'));
+  for (const edits of [Array(65).fill(profile('x')[0]), profile('界'.repeat(21846)), Array(5).fill(profile('x'.repeat(65536))[0])])
+    assert.throws(() => session.setPromptProfile(edits), RangeError);
+  await session.run('two');
+  assert.match(JSON.stringify(provider.requests[1].system), /second identity/);
+  assert.doesNotMatch(JSON.stringify(provider.requests[1].system), /first identity/);
+  const snapshot = path.join(workspace(t), 'checkpoint');
+  await session.exportCheckpoint(snapshot);
+  session.close();
+  const restored = await runtime.restoreSession(snapshot, { workspace: workspace(t), baseUrl: provider.baseUrl, apiKey: 'k' });
+  await restored.run('three');
+  assert.match(JSON.stringify(provider.requests[2].system), /second identity/);
+  restored.setPromptProfile(null);
+  await restored.run('four');
+  assert.doesNotMatch(JSON.stringify(provider.requests[3].system), /second identity/);
+});
+
+test('ordered image parts and current host options apply on create and restore', { skip }, async t => {
+  const provider = await withProvider(t, []);
+  const modelCapabilities = [{ model: 'mock-model', imageInput: true }];
+  const options = { modelCapabilities, runJournalMode: 'durable_workspace', workspaceHome: workspace(t) };
+  const { runtime, session } = open(t, { tools: [] }, provider, workspace(t), options);
+  const image = { type: 'image', mediaType: 'image/png', data: 'UE5HREFUQQ==' };
+  const parts = [{ type: 'text', text: 'before' }, image, { type: 'text', text: 'after' }];
+  for (const invalid of [[], Array(65).fill(parts[0]), [{ ...image, data: 'A'.repeat(5000001) }]])
+    await assert.rejects(session.run(invalid), RangeError);
+  await session.stream(parts).result;
+  const content = provider.requests[0].messages.at(-1).content;
+  assert.deepEqual(content.slice(-3), [parts[0],
+    { type: 'image', source: { type: 'base64', media_type: 'image/png', data: image.data } }, parts[2]]);
+  const journal = path.join('.metacodes', 'agentcore', 'sessions', session.describe().session_id, 'tool-observations.jsonl');
+  assert.match(fs.readFileSync(path.join(options.workspaceHome, journal), 'utf8'), /provider_attempt/);
+  const snapshot = path.join(workspace(t), 'checkpoint');
+  await session.exportCheckpoint(snapshot);
+  session.close();
+  const home = workspace(t);
+  const restored = await runtime.restoreSession(snapshot, { ...options, workspaceHome: home, workspace: workspace(t),
+    apiKey: 'k', baseUrl: provider.baseUrl, modelCapabilities: [{ model: 'mock-model', imageInput: false }],
+    durableBudget: { hardBytes: 64 << 20, softBytes: 48 << 20, inputCapBytes: 1024n, providerRequestCapBytes: 16 << 20,
+      providerResultCapBytes: 4 << 20, toolResultCapBytes: 2 << 20, mcpResultCapBytes: 2 << 20,
+      auditReserveBytes: 4096, terminalReserveBytes: 1024 },
+  });
+  await assert.rejects(restored.run(parts), { code: 'IMAGE_INPUT_UNSUPPORTED' });
+  await assert.rejects(restored.run('x'.repeat(2048)), { code: 'CHECKPOINT_BUDGET_REQUIRED' });
+  assert.equal(provider.requests.length, 1);
+  restored.rewindToUserMessage(1);
+  assert.equal((await restored.run('continue')).stopReason, 'end_turn');
+  assert.match(fs.readFileSync(path.join(home, journal), 'utf8'), /provider_attempt/);
+});
+
+const HISTORY_RUNS = 12;
+
+async function compactableSession(t, summary) {
+  const provider = await withProvider(t, [...Array(HISTORY_RUNS).fill(['text', 'answer']), summary, ['text', 'continued']]);
+  const { session } = open(t, { tools: [] }, provider, workspace(t));
+  await session.run('A'.repeat(8192));
+  for (let i = 1; i < HISTORY_RUNS; i++) await session.run('recent context');
+  return { session, provider };
+}
+
+test('compact summarizes prior messages on a worker thread', { skip, timeout: TIMEOUT }, async t => {
+  const { session, provider } = await compactableSession(t, ['text', 'short summary']);
+  const result = await session.compact();
+  assert.equal(result.outcome, 'compacted');
+  assert.ok(result.beforeContextTokens > result.afterContextTokens && result.afterContextTokens > 0n);
+  for (const count of [result.beforeContextTokens, result.afterContextTokens, ...Object.values(result.usage)])
+    assert.equal(typeof count, 'bigint');
+  assert.ok(result.usage.input_tokens > 0n && result.usage.output_tokens > 0n);
+  assert.match(JSON.stringify(provider.requests[HISTORY_RUNS].messages), /A{128}/);
+  await session.run('next');
+  assert.ok(provider.requests.at(-1).messages.length < provider.requests[HISTORY_RUNS - 1].messages.length);
+  assert.match(JSON.stringify(provider.requests.at(-1).messages), /short summary/);
+  assert.doesNotMatch(JSON.stringify(provider.requests.at(-1).messages), /A{128}/);
+});
+
+test('abortCompact cancels a pending summary while JS remains responsive', { skip, timeout: TIMEOUT }, async t => {
+  let received, release;
+  const started = new Promise(resolve => { received = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  const { session } = await compactableSession(t, ['hold', 'late summary', () => { received(); return held; }]);
+  const pending = session.compact();
+  try {
+    await started;
+    assert.throws(() => session.close(), { code: 'BUSY' });
+    await assert.rejects(session.run('busy'), /compaction/);
+    await session.abortCompact();
+  } finally { release(); }
+  assert.equal((await pending).outcome, 'aborted');
+  assert.equal((await session.run('next')).text, 'continued');
+});
+
 test('setPermissionMode applies to the next Run', { skip, timeout: TIMEOUT }, async (t) => {
   const root = workspace(t);
   const provider = await withProvider(t, [...writeScript(root, 'first.txt'), ...writeScript(root, 'second.txt')]);

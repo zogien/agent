@@ -36,6 +36,48 @@ opts in and includes the `ExecuteCode` JavaScript orchestration tool; Session
 tool selection and ordinary permission checks still apply. Selecting
 `ExecuteCode` with preview disabled is rejected. This requires AgentCore ABI revision 29.
 
+## Session configuration and input
+
+Pass a section edit list as `promptProfile` when creating a Session. Each edit
+names an `id` and an `op`. Use `add` for a new `host:<name>` section with
+`text` and a signed `order`, `replace` for a built-in section's text, or
+`remove` for a removable section. Set `interpolate: true` to expand
+`{{model}}`, `{{workspace_root}}` and `{{platform}}`. A profile admits 64
+sections, 64 KiB of UTF-8 text per section and 256 KiB of text in total.
+
+```js
+session.setPromptProfile([{ op: 'replace', id: 'metacodes:identity', text: 'You are a shopkeeper.' }]);
+session.updatePermissionRules({ allow: ['Read'], ask: ['Write'], deny: ['Bash'] });
+await session.run([
+  { type: 'text', text: 'Describe this image.' },
+  { type: 'image', mediaType: 'image/png', data: pngBytes.toString('base64') },
+]);
+```
+
+Both setters require an idle Session. The next Run uses the new profile and
+rules. A checkpoint preserves the profile. Pass `null` to `setPromptProfile`
+to restore the kernel prompt. Each rules update replaces all three lists.
+`run` and `stream` accept 1–64 ordered parts. Image data uses standard base64
+with a limit of 5,000,000 encoded bytes per image.
+
+Creation and restore both accept these host options.
+
+- `modelCapabilities` takes entries such as `{ model: 'vision-model', imageInput: true }`.
+  Set `imageInput: false` to reject image input for that model.
+- `runJournalMode` defaults to `'ephemeral'`. Choose `'durable_workspace'` to write
+  the Session's run journal below `workspaceHome`.
+- `durableBudget` takes a complete byte budget. Supply `hardBytes`, `softBytes`,
+  `inputCapBytes`, `providerRequestCapBytes`, `providerResultCapBytes`,
+  `toolResultCapBytes`, `mcpResultCapBytes`, `auditReserveBytes` and
+  `terminalReserveBytes` as unsigned bigints or safe integers. Omit the
+  profile to use AgentCore defaults.
+
+`await session.compact()` summarizes eligible history on a separate thread.
+The result contains `outcome` (`compacted`, `no_change`, `degraded` or `aborted`),
+`beforeContextTokens`, `afterContextTokens` and provider `usage`.
+All token counts are bigints. Call `await session.abortCompact()` to request
+cancellation and await the original compact promise for the outcome.
+
 ## Tools written in JavaScript
 
 ```js
