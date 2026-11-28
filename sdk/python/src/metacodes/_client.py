@@ -10,9 +10,46 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, TypedDict, Union
 
 from . import _native as n
+
+
+class _ModelCapabilityName(TypedDict):
+    model: str
+
+
+class ModelCapability(_ModelCapabilityName, total=False):
+    image_input: bool
+    max_input_tokens: int
+    max_tokens: int
+
+
+class SessionDescription(TypedDict, total=False):
+    session_id: str
+    model: str
+    max_input_tokens: int
+    max_tokens: int
+    per_result_bytes: int
+    per_turn_bytes: int
+    image_input: dict
+    schema: str
+    origin: str
+    lifecycle: str
+    registered: bool
+    last_run_id: int
+    last_compact_id: int
+    checkpoint_generation: int
+    policy_generation: int
+    permission_mode: str
+    catalog_generation: int
+    conversation: dict
+    skill: dict
+    mcp: dict
+    budget: dict
+    restore: dict
+    prompt: dict
+
 
 DEFAULT_TOOLS = ("Read", "Glob", "Grep")
 # The CLI agent loop's own default (src/core/agent_loop.zig Options.max_turns).
@@ -557,7 +594,7 @@ class Session:
         shell: str = "disabled",
         openai_protocol: Optional[str] = None,
         prompt_profile: Optional[Sequence[dict]] = None,
-        model_capabilities: Sequence[dict] = (),
+        model_capabilities: Sequence[ModelCapability] = (),
         durable_budget: Optional[dict] = None,
         run_journal_mode: str = "ephemeral",
         team: Optional[dict] = None,
@@ -637,9 +674,21 @@ class Session:
             for target, source in zip(models, model_capabilities):
                 target.struct_size = ctypes.sizeof(n.ModelCapability)
                 target.model = arena.view(_string(source["model"]))
-                if type(source["image_input"]) is not bool:
-                    raise TypeError("image_input must be a bool")
-                target.image_input_code = 1 if source["image_input"] else 2
+                if "image_input" in source:
+                    if type(source["image_input"]) is not bool:
+                        raise TypeError("image_input must be a bool")
+                    target.image_input_code = 1 if source["image_input"] else 2
+                input_limit = source.get("max_input_tokens", 0)
+                output_limit = source.get("max_tokens", 0)
+                for limit in (input_limit, output_limit):
+                    if type(limit) is not int or not 0 <= limit < (1 << 32):
+                        raise ValueError("model token limits must be unsigned 32-bit integers")
+                if input_limit or output_limit:
+                    profile = n.ModelProfile(struct_size=ctypes.sizeof(n.ModelProfile),
+                                             max_input_tokens=input_limit, max_tokens=output_limit)
+                    target.profile = ctypes.pointer(arena.keep(profile))
+                elif not target.image_input_code:
+                    raise ValueError("model capability requires image_input or a nonzero token limit")
             host.model_capabilities, host.model_capability_count = models, len(models)
         if durable_budget is not None:
             budget = n.DurableBudget(struct_size=ctypes.sizeof(n.DurableBudget))
@@ -925,7 +974,7 @@ class Session:
             )
         self._lib.check("session.update_credential", status, diagnostic)
 
-    def describe(self) -> Dict[str, Any]:
+    def describe(self) -> SessionDescription:
         """The Session's description as AgentCore reports it (JSON)."""
         output = n.OwnedBytes()
         diagnostic = n.OwnedBytes()

@@ -1295,6 +1295,7 @@ static int read_profile(napi_env env, napi_value array, profile_t *out) {
 
 typedef struct {
     metask_agentcore_model_capability_v1 models[METASK_AGENTCORE_MAX_MODEL_CAPABILITIES_V1];
+    metask_agentcore_model_profile_v1 profiles[METASK_AGENTCORE_MAX_MODEL_CAPABILITIES_V1];
     metask_agentcore_durable_budget_profile_v1 budget;
     metask_agentcore_team_config_v1 team;
     metask_agentcore_mcp_selection_v1 selection;
@@ -1343,9 +1344,19 @@ static int read_host_options(napi_env env, napi_value cfg, host_options_t *stora
     for (uint32_t i = 0; i < count; i++) {
         napi_value item;
         metask_agentcore_model_capability_v1 *model = &storage->models[i];
+        uint32_t input, output;
         model->struct_size = sizeof(*model);
         if (napi_get_element(env, array, i, &item) != napi_ok || !buffer_view(env, item, "model", &model->model) ||
-            !get_property_u32(env, item, "imageInput", &model->image_input_code)) return 0;
+            !get_property_u32(env, item, "imageInput", &model->image_input_code) ||
+            !get_property_u32(env, item, "maxInputTokens", &input) ||
+            !get_property_u32(env, item, "maxTokens", &output)) return 0;
+        if (input || output) {
+            metask_agentcore_model_profile_v1 *profile = &storage->profiles[i];
+            profile->struct_size = sizeof(*profile);
+            profile->max_input_tokens = input;
+            profile->max_tokens = output;
+            model->profile = profile;
+        }
     }
     host->model_capabilities = count ? storage->models : NULL;
     host->model_capability_count = count;

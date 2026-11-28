@@ -138,7 +138,7 @@ export interface SessionOptions {
   skillCatalog?: SkillCatalog;
   skillPolicy?: readonly string[];
   promptProfile?: readonly PromptSection[] | null;
-  modelCapabilities?: readonly { model: string; imageInput: boolean }[];
+  modelCapabilities?: readonly { model: string; imageInput?: boolean; maxInputTokens?: number; maxTokens?: number }[];
   durableBudget?: DurableBudget;
   runJournalMode?: 'ephemeral' | 'durable_workspace';
   provider?: 'anthropic' | 'openai' | 'gemini';
@@ -179,6 +179,10 @@ export interface SessionDescription extends Record<string, unknown> {
   goal: Goal | null;
   session_id: string;
   model: string;
+  max_input_tokens?: number;
+  max_tokens?: number;
+  per_result_bytes?: number;
+  per_turn_bytes?: number;
   last_run_id: bigint;
   last_compact_id: bigint;
   checkpoint_generation: bigint;
