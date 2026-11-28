@@ -118,8 +118,26 @@ export interface EventStream extends AsyncIterable<AgentEvent> {
   abort(): Promise<CancelResult>;
 }
 
+export interface SessionDescription extends Record<string, unknown> {
+  session_id: string;
+  model: string;
+  last_run_id: bigint;
+  last_compact_id: bigint;
+  checkpoint_generation: bigint;
+  policy_generation: bigint;
+  catalog_generation: bigint;
+  conversation: { message_count: bigint; compact_boundary: bigint };
+}
+
+export interface RestoreReport extends Record<string, unknown> {
+  session_id: string;
+  checkpoint_generation: bigint;
+  policy_generation: bigint;
+  catalog_generation: bigint;
+}
+
 export class Session {
-  readonly restoreReport: (Record<string, unknown> & { session_id: string; policy_generation: bigint }) | null;
+  readonly restoreReport: RestoreReport | null;
   exportCheckpoint(directory: string): Promise<void>;
   readonly runtime: Runtime;
   model: string;
@@ -129,7 +147,7 @@ export class Session {
   submit(text: string): number;
   /** Revision 25: replace the provider credential in place, also mid-Run. */
   updateCredential(apiKey: string): void;
-  describe(): Record<string, unknown>;
+  describe(): SessionDescription;
   setModel(model: string): void;
   setPermissionMode(mode: NonNullable<SessionOptions['permissionMode']>): void;
   /** Revision 27: drop the user message at a 1-based position and everything after it. */

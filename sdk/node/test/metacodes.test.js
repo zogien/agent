@@ -12,11 +12,12 @@ const { Worker } = require('node:worker_threads');
 const { once } = require('node:events');
 const { createHash } = require('node:crypto');
 
-const metacodes = require('..');
+const sdkName = process.env.AGENT_SDK_TEST_INSTALLED ? '@zogien/agent-sdk' : '..';
+const metacodes = require(sdkName);
 const { startMockProvider } = require('./mock_provider');
 
 const addon = path.join(__dirname, '..', 'prebuilds', `${process.platform}-${process.arch}`, 'metacodes.node');
-const available = fs.existsSync(addon) && metacodes.candidateLibraryPaths().some((candidate) => fs.existsSync(candidate));
+const available = !!process.env.AGENT_SDK_TEST_INSTALLED || (fs.existsSync(addon) && metacodes.candidateLibraryPaths().some((candidate) => fs.existsSync(candidate)));
 const skip = !available && process.env.METACODES_NODE_SDK_REQUIRE_LIB !== '1'
   ? 'addon or AgentCore library not built; see README.md'
   : false;
@@ -237,7 +238,8 @@ test('Runtime points RG_BIN at the ripgrep staged beside the library', { skip },
   t.after(() => { if (saved === undefined) delete process.env.RG_BIN; else process.env.RG_BIN = saved; });
   const runtime = new metacodes.Runtime({ tools: ['Grep'] });
   t.after(() => runtime.close());
-  const staged = path.join(__dirname, '..', 'prebuilds', `${process.platform}-${process.arch}`, process.platform === 'win32' ? 'rg.exe' : 'rg');
+  const bin = metacodes.resolve ? metacodes.resolve().binDir : path.join(__dirname, '..', 'prebuilds', `${process.platform}-${process.arch}`);
+  const staged = path.join(bin, process.platform === 'win32' ? 'rg.exe' : 'rg');
   if (!fs.existsSync(staged)) return t.skip('no ripgrep staged');
   assert.ok(process.env.RG_BIN && fs.realpathSync(process.env.RG_BIN) === fs.realpathSync(staged));
 });
@@ -499,7 +501,7 @@ test('terminating Workers with pending host callbacks leaves the process usable'
       return new Promise(() => {});
     } });
     new Runtime({ tools: [], hostTools: [wait] }).session('mock-model', workerData.options).run('go');
-  `, { eval: true, workerData: { sdk: require.resolve('..'), options: {
+  `, { eval: true, workerData: { sdk: require.resolve(sdkName), options: {
     baseUrl: provider.baseUrl, workspace: workspace(t), apiKey: 'test', permissionMode: 'full_access',
   } } }));
   t.after(() => Promise.all(workers.map(w => w.terminate())));

@@ -1,5 +1,6 @@
 const std = @import("std");
 const protocol = @import("protocol");
+pub const panic = std.debug.simple_panic;
 const Env = *anyopaque;
 const Value = *anyopaque;
 

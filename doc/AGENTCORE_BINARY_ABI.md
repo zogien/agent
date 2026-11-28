@@ -1,5 +1,12 @@
 # AgentCore binary library ABI v1
 
+The [Node SDK](../sdk/node/README.md) maps revision 29 to Node-API 8. Known
+protocol `u64` and `i64` fields are JavaScript `bigint`, including IDs in
+callbacks and permission replies. A portable Node checkpoint directory carries
+the ABI checkpoint stream and the logical Session's content-addressed tool
+results. The host supplies workspace, credentials, permissions and tool
+registrations on restore. These operations use the revision 29 tables.
+
 The AgentCore bundle is a thin binary facade over the existing internal
 execution engine. Consumers do not add implementation source to their build
 graph, and the Host owns all UI. AgentCore is versioned and distributed as an

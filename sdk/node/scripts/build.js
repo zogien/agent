@@ -1,17 +1,5 @@
 #!/usr/bin/env node
 'use strict';
-// Build the native addon for this platform and stage it with an AgentCore bundle:
-//
-//   zig build agentcore:bundle -Dtarget=<target> -Doptimize=ReleaseSafe
-//   node sdk/node/scripts/build.js --bundle zig-out/agentcore/<resolved-target>
-//
-// Output: sdk/node/prebuilds/<platform>-<arch>/{metacodes.node, metacodes-LICENSE,
-// libmetask_agentcore.*, rg, ripgrep-LICENSE-MIT}.
-// The addon is compiled with `zig cc` against this Node's own Node-API headers
-// (<node prefix>/include/node, or NODE_INCLUDE_DIR) and the repository's
-// sdk/metask/agentcore.h. Without --bundle only the addon is built. A bundle must
-// be the AgentCore release this package declares (scripts/verify_bundle.js), and
-// --release refuses a development one, before anything is compiled.
 
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
@@ -41,10 +29,17 @@ if (artifact) {
   if (roots.length !== 1) throw new Error('Expected one built SDK bundle for ' + platform.target);
   bundle = roots[0];
 }
+let manifest;
 if (bundle) {
   const { verifyBundle } = require('./verify_bundle.js');
   try {
-    verifyBundle(bundle, { release: process.argv.includes('--release') });
+    manifest = verifyBundle(bundle, { release: process.argv.includes('--release') });
+    if (manifest.target.id !== platform.target) throw new Error('SDK and addon targets differ');
+    if (artifact && manifest.source.commit !== execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim())
+      throw new Error('SDK and addon source commits differ');
+    if (artifact && process.argv.includes('--release') && (manifest.source.dirty ||
+        execFileSync('git', ['status', '--porcelain'], { cwd: repo, encoding: 'utf8' }).trim()))
+      throw new Error('release requires clean SDK and addon sources');
   } catch (error) {
     console.error(`metacodes: cannot package ${bundle}: ${error.message}`);
     process.exit(1);
@@ -60,11 +55,12 @@ if (!fs.existsSync(path.join(nodeInclude, 'node_api.h'))) {
 
 fs.mkdirSync(out, { recursive: true });
 const codec = path.join(out, 'protocol.o');
-execFileSync(zig, ['build-obj', '-O', 'ReleaseFast', '-target', platform.target, '-fPIC', '-lc',
+const target = manifest?.target.zig_target || platform.target;
+execFileSync(zig, ['build-obj', '-O', 'ReleaseSafe', '-target', target, '-fPIC', '-lc',
   '--dep', 'protocol', '-Mroot=' + path.join(here, 'src/protocol.zig'),
   '-Mprotocol=' + path.join(repo, 'sdk/zig/protocol.zig'), '-femit-bin=' + codec], { stdio: 'inherit' });
 const args = [
-  'cc', '-shared', '-target', platform.target, '-O2', '-std=c11',
+  'cc', '-shared', '-target', target, '-O2', '-std=c11',
   '-Wall', '-Wextra', '-Wno-unused-parameter',
   '-I', nodeInclude,
   '-I', path.join(repo, 'sdk'),
@@ -99,8 +95,6 @@ execFileSync(zig, args, { stdio: 'inherit' });
 fs.copyFileSync(path.join(repo, 'LICENSE'), path.join(out, 'metacodes-LICENSE'));
 
 if (bundle) {
-  const manifest = JSON.parse(fs.readFileSync(path.join(bundle, 'manifest.json'), 'utf8'));
-  if (manifest.target.id !== platform.target) throw new Error('SDK and addon targets differ');
   if (artifact) {
     fs.mkdirSync(artifact, { recursive: true });
     const file = path.join(artifact, platform.target + '.node');

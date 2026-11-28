@@ -12,6 +12,19 @@ must do about it under `### Migration`.
 
 ## Unreleased
 
+### Added
+
+- Node.js and Electron hosts can use `Runtime`, `Session` and JavaScript tools
+  directly from `@zogien/agent-sdk`. The six platform packages include a
+  prebuilt binding. Runs accept labelled context and expose cancellable tool
+  calls. Portable checkpoints preserve conversation state and tool artifacts.
+
+### Migration
+
+- Source users of `sdk/node` now receive JavaScript `bigint` for protocol
+  64-bit fields, including token counts, Run IDs and conversation positions.
+  Await `abort()` for the cancellation outcome.
+
 ## 0.16.0 — 2026-11-20
 
 ### Changed

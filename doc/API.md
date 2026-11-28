@@ -22,7 +22,7 @@ helper contract and the current network-policy limits.
 | Zig source API | `@import("metacodes-core")` | experimental | pin repository commit and Zig toolchain |
 | AgentCore C ABI | `metask_agentcore_get_api(1)` | experimental rev 29 | exact root/child layouts and bundle manifest |
 | Python package | `import metacodes` ([sdk/python](../sdk/python/README.md)) | experimental, unpublished | speaks exactly the AgentCore ABI revision it was built for and refuses any other |
-| Node package | `require('metacodes')` ([sdk/node](../sdk/node/README.md)) | experimental, unpublished; macOS and Linux | same exact-revision rule; the addon is rebuilt per platform |
+| Node package | `require('@zogien/agent-sdk')` ([Node SDK](../sdk/node/README.md)) | Node and Electron main, Windows/macOS/GNU Linux x64 and ARM64 | platform package pairs the prebuilt Node-API 8 addon with its exact AgentCore ABI revision |
 | Process plugins | strict manifest + stdio protocol | versioned v1 | reject unknown fields and digest drift |
 | Plugin inventory | `--dump-plugins`, Zig | versioned v1 | additive observation fields only where specified |
 | TinyKG executable distribution | `vendor/tinykg/manifest.json` | bundle v1 | exact target, format, source commit, and SHA-256 pinning |

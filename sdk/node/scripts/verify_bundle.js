@@ -26,7 +26,8 @@ function verifyBundle(bundle, { release = false, packageRoot = path.resolve(__di
   if (release && BUILT_DEV.test(manifest.version)) {
     throw new Error(`development version ${manifest.version} cannot go into a formal release package`);
   }
-  if (declared !== expected) {
+  const forkDev = !release && BUILT_DEV.test(manifest.version) && FORK.test(declared) && declared.split('-')[0] === expected.split('-')[0];
+  if (declared !== expected && !forkDev) {
     throw new Error(`the bundle is AgentCore ${manifest.version} (package version ${expected}), but package.json says ${declared}`);
   }
   const speaks = /^const ABI_REVISION = (\d+);$/m.exec(fs.readFileSync(path.join(packageRoot, 'index.js'), 'utf8'));
