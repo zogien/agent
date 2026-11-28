@@ -251,10 +251,80 @@ atomically. An active goal can also be continued with
 input, accounts for usage and preserves the goal across checkpoint restore.
 Use `clearGoal()` to remove it.
 
+## MCP servers
+
+Configure a server with its stable 32-byte binding identity and configuration
+fingerprint, each encoded as 64 hex digits. The fingerprint identifies the
+endpoint and authenticated principal. Change it when either changes. Keep it
+when rotating a credential for the same principal.
+
+```js
+const runtime = new Runtime({
+  mcpServers: [{ namespace: 'inventory', command, args, serverBindingIdentity, configurationFingerprint }],
+  mcpCatalogLimits: { maxServers: 8, maxNamespaceBytes: 24, maxIssues: 32 },
+});
+try {
+  await runtime.refreshMcp();
+  const catalog = await runtime.describeMcp();
+  const tool = catalog.tools.find(entry => entry.canonical_name === 'lookup');
+  if (!tool) throw new Error('lookup unavailable');
+  const session = runtime.session(model, { workspace, mcpSelection: [
+    { serverBindingIdentity: tool.server_binding_identity, toolName: tool.canonical_name },
+  ] });
+  await session.run('Look up the stock count');
+  session.updateMcpSelection([]);
+} finally {
+  runtime.close();
+}
+```
+
+`refreshMcp()` discovers the current tools and returns the catalog generation
+as a `bigint`. Inspect the catalog from `describeMcp()` for server issues and negotiated
+versions. `applyMcpConfiguration({ desiredRevision, servers })` reconciles a
+complete replacement set. Its report includes the disposition (`applied`,
+`superseded` or `rejected`), desired and active revisions, and catalog generation.
+Await outstanding operations before closing the Runtime. An idle Session can
+replace its selection with `updateMcpSelection`. Its description lists the
+selected tools and the names sent to the model.
+
+The stdio connector launches `command` with `args`, optional `cwd` and optional
+`env`. It uses the host environment by default. On Windows, a bare name such as
+`npx` is looked up in `PATH` order, trying the `PATHEXT` extensions in each
+directory. Relative paths such as `.\bin\server.cmd` start at `cwd`. A resolved
+`.cmd` or `.bat` runs through the system `cmd.exe` with delayed expansion
+disabled. Pass each argument as a separate string, including spaces and
+literal quotes. Windows executables and commands on other platforms launch
+directly.
+
+For a launcher that needs a different interpreter or custom argument
+processing, supply `open({ purpose, era, timeoutMs })` and choose `stdio` or
+`streamable_http` as the transport. Each open returns a fresh connection with `request`, `notify`,
+`requestToolStream` and `close`. Control requests return the body and, for
+HTTP, the HTTP status. The tool stream yields chunks of the complete JSON-RPC
+response from its first byte. Honor the per-call timeout and abort signal.
+Keep HTTP protocol versions and session IDs local to each connection. A
+connector can throw an error with a `code` of `timeout`, `network_error`,
+`auth_error`, `server_error`, `child_exit`, `cancelled`, `indeterminate` or
+`fatal`. Use `indeterminate` if a tool invocation may have reached the server.
+See the [connector contract](../../doc/AGENTCORE_BINARY_ABI.md#mcp-runtime-catalog-and-session-view).
+
+## Host-scheduled teams
+
+Create a Runtime with `enableTeams: true`. Give the lead Session
+`team: { role: 'lead' }` and select its team tools in the Session's `tools`.
+After `TeamCreate` and `SpawnTeammate`, `lead.describeTeam().pending_spawns`
+contains the work for the host to schedule. Open the member in the same
+workspace home with `team: { role: 'member', teamName, memberName,
+leadSessionId, memberLease }`. Use `lead.describe().session_id` and a fresh
+24-digit lowercase hex lease. A member with `SendMessage` can reply to
+`team-lead`. Both Sessions can inspect the roster with `describeTeam()`.
+`lead.pollTeam()` takes unread messages as input for the next Run and returns
+`null` when the inbox is empty. Member polling also returns `null`.
+
 ## Building and testing
 
 ```sh
-zig build agentcore:bundle -Dtarget=aarch64-macos -Doptimize=ReleaseSafe
+zig build agentcore:bundle test:harness -Dtarget=aarch64-macos -Doptimize=ReleaseSafe
 npm ci --prefix sdk/node --ignore-scripts
 node sdk/node/scripts/build.js --bundle zig-out/agentcore/<resolved-target>
 node --test sdk/node/test/metacodes.test.js

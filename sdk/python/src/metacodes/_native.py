@@ -252,6 +252,14 @@ class RunInputPart(ctypes.Structure):
     ]
 
 
+class TeamConfig(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32), ("role_code", ctypes.c_uint32), ("team_name", BytesView),
+        ("member_name", BytesView), ("lead_session_id", BytesView), ("member_lease", BytesView),
+        ("reserved", ctypes.c_uint64 * 2),
+    ]
+
+
 class SessionHostConfig(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -273,7 +281,7 @@ class SessionHostConfig(ctypes.Structure):
         ("protocol_kind_code", ctypes.c_uint32),
         ("model_capabilities", ctypes.POINTER(ModelCapability)),
         ("model_capability_count", ctypes.c_uint64),
-        ("team", ctypes.c_void_p),
+        ("team", ctypes.POINTER(TeamConfig)),
     ]
 
 
@@ -478,7 +486,13 @@ def _slot_table(name: str, slots: int) -> type:
 # slots exactly like the header's metask_agentcore_api_v1_is_compatible.
 SkillApi = _slot_table("SkillApi", 3)
 McpApi = _slot_table("McpApi", 4)
-TeamApi = _slot_table("TeamApi", 2)
+
+
+class TeamApi(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32), ("reserved0", ctypes.c_uint32),
+        ("describe", SessionDescribeFn), ("poll", SessionDescribeFn),
+    ]
 
 
 class ApiV1(ctypes.Structure):

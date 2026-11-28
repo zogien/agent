@@ -133,6 +133,8 @@ export interface CompactResult {
 }
 
 export interface SessionOptions {
+  mcpSelection?: readonly McpSelector[];
+  team?: TeamConfig;
   skillCatalog?: SkillCatalog;
   skillPolicy?: readonly string[];
   promptProfile?: readonly PromptSection[] | null;
@@ -172,6 +174,8 @@ export interface EventStream extends AsyncIterable<AgentEvent> {
 }
 
 export interface SessionDescription extends Record<string, unknown> {
+  mcp: { selection_fingerprint: string; tools: { model_name: string; namespace: string; canonical_name: string;
+    server_binding_identity: string; schema_fingerprint: string; permission_binding: string; negotiated_protocol: string }[] };
   goal: Goal | null;
   session_id: string;
   model: string;
@@ -195,6 +199,9 @@ export interface RestoreReport extends Record<string, unknown> {
 }
 
 export class Session {
+  updateMcpSelection(selectors: readonly McpSelector[]): void;
+  describeTeam(): TeamDescription | null;
+  pollTeam(): string | null;
   readonly restoreReport: RestoreReport | null;
   exportCheckpoint(directory: string): Promise<CheckpointExport>;
   readonly runtime: Runtime;
@@ -225,10 +232,66 @@ export class Session {
 }
 
 export interface RuntimeOptions {
+  enableTeams?: boolean;
+  mcpServers?: readonly McpServer[];
+  mcpCatalogLimits?: { maxServers: number; maxNamespaceBytes: number; maxIssues: number };
   tools?: string[];
   hostTools?: Tool<any>[];
   library?: string;
   preview?: boolean;
+}
+
+export type TeamConfig = { role: 'lead'; teamName?: string } | {
+  role: 'member'; teamName: string; memberName: string; leadSessionId: string; memberLease: string;
+};
+
+export interface TeamDescription {
+  name: string;
+  role: 'lead' | 'member';
+  members: { name: string; session_id: string; lease_id: string; status: 'active' | 'idle' }[];
+  pending_spawns: { name: string; prompt: string; agent_type: string | null; effort: string | null }[];
+}
+
+export interface McpSelector {
+  serverBindingIdentity: string;
+  toolName: string;
+}
+
+export interface McpExchangeOptions { timeoutMs: number; signal: AbortSignal }
+export interface McpConnection {
+  request(frame: string, options: McpExchangeOptions):
+    { httpStatus?: number; body: string | Uint8Array } | Promise<{ httpStatus?: number; body: string | Uint8Array }>;
+  requestToolStream(frame: string, options: McpExchangeOptions): AsyncIterable<Uint8Array> | Promise<AsyncIterable<Uint8Array>>;
+  notify(frame: string, options: McpExchangeOptions): void | Promise<void>;
+  close(): void | Promise<void>;
+}
+
+export type McpServer = {
+  namespace: string;
+  serverBindingIdentity: string;
+  configurationFingerprint: string;
+  protocolLimits?: { maxFrameBytes: number; maxTools: number; maxToolNameBytes: number; maxTextBytes: number;
+    maxSchemaBytes: number; maxJsonDepth: number; maxJsonNodes: number; maxCursorBytes: number; maxVersions: number };
+  timeoutMs?: number;
+  negotiationPolicy?: 'auto' | 'modern_only' | 'legacy_only' | 'legacy_2025_06_only';
+  clientName?: string;
+  clientVersion?: string;
+} & ({
+  transport?: 'stdio'; command: string; args?: readonly string[]; cwd?: string; env?: Record<string, string>;
+} | {
+  transport: 'stdio' | 'streamable_http';
+  open(context: { purpose: 'probe' | 'actual'; era: '2026-07-28' | '2025-11-25' | '2025-06-18'; timeoutMs: number }):
+    McpConnection | Promise<McpConnection>;
+});
+
+export interface McpCatalog {
+  schema: string;
+  catalog_generation: bigint;
+  catalog_fingerprint: string;
+  servers: { server_binding_identity: string; namespace: string; negotiated_protocol: string; server_fingerprint: string;
+    cache_scope: string; fresh: boolean; ttl_remaining_ms: bigint; tool_offset: number; tool_count: number }[];
+  tools: { server_binding_identity: string; canonical_name: string; schema_fingerprint: string; permission_binding: string }[];
+  issues: { issue_id: string; server_binding_identity: string; tool_name: string | null; kind: string; detail: string }[];
 }
 
 export interface Goal {
@@ -270,6 +333,10 @@ export interface SkillCatalog {
 }
 
 export class Runtime {
+  applyMcpConfiguration(config: { desiredRevision: number | bigint; servers: readonly McpServer[] }):
+    Promise<{ disposition: 'applied' | 'superseded' | 'rejected'; desiredRevision: bigint; activeRevision: bigint; catalogGeneration: bigint }>;
+  refreshMcp(): Promise<bigint>;
+  describeMcp(): Promise<McpCatalog>;
   constructor(options?: RuntimeOptions);
   readonly tools: string[];
   readonly hostTools: Tool<any>[];

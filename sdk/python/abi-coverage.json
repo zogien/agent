@@ -35,42 +35,36 @@
     "deferred": "The Python binding needs runtime-owned catalog handles, paired policy binding and release before it can invoke a skill."
   },
   "mcp.apply_configuration": {
-    "deferred": "mcp APIs are scheduled for a later binding milestone."
+    "deferred": "Python needs a ctypes connector that retains connections across callbacks, handles cancellation and streams tool results before it can publish or select an MCP catalog."
   },
   "mcp.describe": {
-    "deferred": "mcp APIs are scheduled for a later binding milestone."
+    "deferred": "Python needs a ctypes connector that retains connections across callbacks, handles cancellation and streams tool results before it can publish or select an MCP catalog."
   },
   "mcp.refresh": {
-    "deferred": "mcp APIs are scheduled for a later binding milestone."
+    "deferred": "Python needs a ctypes connector that retains connections across callbacks, handles cancellation and streams tool results before it can publish or select an MCP catalog."
   },
   "mcp.update_selection": {
-    "deferred": "mcp APIs are scheduled for a later binding milestone."
+    "deferred": "Python needs a ctypes connector that retains connections across callbacks, handles cancellation and streams tool results before it can publish or select an MCP catalog."
   },
   "goal.clear": "Session.clear_goal",
   "goal.get": "Session.get_goal",
   "goal.set": "Session.set_goal",
   "goal.update": "Session.update_goal",
-  "team.describe": {
-    "deferred": "team APIs are scheduled for a later binding milestone."
-  },
-  "team.poll": {
-    "deferred": "team APIs are scheduled for a later binding milestone."
-  },
+  "team.describe": "Session.describe_team",
+  "team.poll": "Session.poll_team",
   "runtime_config_v1.builtin_tool_count": "Runtime.__init__.tools",
   "runtime_config_v1.builtin_tools": "Runtime.__init__.tools",
-  "runtime_config_v1.enable_teams": {
-    "deferred": "enable_teams depends on the later team binding milestone."
-  },
+  "runtime_config_v1.enable_teams": "Runtime.__init__.enable_teams",
   "runtime_config_v1.host_tool_count": "Runtime.__init__.host_tools",
   "runtime_config_v1.host_tools": "Runtime.__init__.host_tools",
   "runtime_config_v1.mcp_catalog_limits": {
-    "deferred": "mcp_catalog_limits depends on the later mcp binding milestone."
+    "deferred": "Python needs a ctypes connector that retains connections across callbacks, handles cancellation and streams tool results before it can publish or select an MCP catalog."
   },
   "runtime_config_v1.mcp_server_count": {
-    "deferred": "mcp_server_count depends on the later mcp binding milestone."
+    "deferred": "Python needs a ctypes connector that retains connections across callbacks, handles cancellation and streams tool results before it can publish or select an MCP catalog."
   },
   "runtime_config_v1.mcp_servers": {
-    "deferred": "mcp_servers depends on the later mcp binding milestone."
+    "deferred": "Python needs a ctypes connector that retains connections across callbacks, handles cancellation and streams tool results before it can publish or select an MCP catalog."
   },
   "runtime_config_v1.preview": "Runtime.__init__.preview",
   "runtime_config_v1.reserved": "Runtime.__init__",
@@ -82,7 +76,7 @@
   "session_host_config_v1.base_url": "Session.__init__.base_url",
   "session_host_config_v1.durable_budget": "Session.__init__.durable_budget",
   "session_host_config_v1.mcp_selection": {
-    "deferred": "mcp_selection depends on the later mcp binding milestone."
+    "deferred": "Python needs a ctypes connector that retains connections across callbacks, handles cancellation and streams tool results before it can publish or select an MCP catalog."
   },
   "session_host_config_v1.model_capabilities": "Session.__init__.model_capabilities",
   "session_host_config_v1.model_capability_count": "Session.__init__.model_capabilities",
@@ -99,9 +93,7 @@
     "deferred": "The Python binding needs runtime-owned catalog handles, paired policy binding and release before it can invoke a skill."
   },
   "session_host_config_v1.struct_size": "Session.__init__",
-  "session_host_config_v1.team": {
-    "deferred": "team depends on the later team binding milestone."
-  },
+  "session_host_config_v1.team": "Session.__init__.team",
   "session_host_config_v1.workspace_home": "Session.__init__.workspace_home",
   "session_host_config_v1.workspace_root": "Session.__init__.workspace",
   "session_create_config_v1.host": "Session.__init__",

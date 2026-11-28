@@ -25,6 +25,11 @@ must do about it under `### Migration`.
 
 ### Added
 
+- Node hosts can discover and replace MCP server catalogs, select tools per
+  Session and stream tool responses from host-owned connections. Node and Python
+  hosts can open team leads and members, inspect the roster and drain the lead's
+  inbox.
+
 - Node hosts can resolve workspace skill catalogs, grant and rebind skills, and
   invoke them through ordinary or streaming Runs. Node and Python expose
   Session goals and goal-continuation Runs, along with per-Run time zones or

@@ -110,9 +110,7 @@ def check(root=ROOT):
         for key, target in manifest.items():
             if isinstance(target, dict) and set(target) == {"deferred"}:
                 reason = target["deferred"]
-                if (language == "node" and reason == "#14") or (
-                    language == "python" and isinstance(reason, str) and reason.strip() and reason != "#14"
-                ):
+                if language == "python" and isinstance(reason, str) and reason.strip() and reason != "#14":
                     continue
             if not isinstance(target, str) or target not in apis:
                 errors.append(f"{language} {key}: unknown API or invalid deferral {target!r}")

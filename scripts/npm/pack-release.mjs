@@ -172,7 +172,9 @@ function packMain(work) {
   for (const file of ["index.js", "index.d.ts", "location.js", "README.md"]) {
     copyFileSync(new URL(`./main/${file}`, import.meta.url), path.join(root, file));
   }
-  copyFileSync(new URL("../../sdk/node/checkpoint.js", import.meta.url), path.join(root, "checkpoint.js"));
+  for (const file of ["checkpoint.js", "mcp.js"]) {
+    copyFileSync(new URL(`../../sdk/node/${file}`, import.meta.url), path.join(root, file));
+  }
   for (const extension of ["js", "d.ts"]) {
     copyFileSync(new URL(`../../sdk/node/index.${extension}`, import.meta.url), path.join(root, `binding.${extension}`));
   }
@@ -187,7 +189,7 @@ function packMain(work) {
       ".": { types: "./index.d.ts", default: "./index.js" },
       "./package.json": "./package.json",
     },
-    files: ["index.js", "index.d.ts", "location.js", "binding.js", "binding.d.ts", "checkpoint.js", "platforms.json"],
+    files: ["index.js", "index.d.ts", "location.js", "binding.js", "binding.d.ts", "checkpoint.js", "mcp.js", "platforms.json"],
     keywords: ["agent", "agent-runtime", "agentcore", "sdk", "c-abi", "zig"],
     ...repositoryMetadata,
     engines: { node: ">=18" },

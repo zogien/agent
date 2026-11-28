@@ -60,6 +60,17 @@ restore. Use `continueGoal()` or stream a `goal_continuation` input to advance
 an active goal. Both `run` and `stream` accept `timeContext` and
 `utcOffsetMinutes` for the current Run's date block. [Node SDK guide](../sdk/node/README.md#goals)
 
+Pass `mcpServers` and optional `mcpCatalogLimits` to the Runtime. Await
+`refreshMcp()`, inspect the catalog with `describeMcp()` and use
+`applyMcpConfiguration()` to replace the server set. A Session chooses tools
+with `mcpSelection` and replaces its selection with `updateMcpSelection()`.
+[Node MCP guide](../sdk/node/README.md#mcp-servers)
+
+With `enableTeams: true`, the host opens lead and member Sessions using the
+`team` option. `describeTeam()` returns the roster and pending spawns.
+`pollTeam()` drains the lead's inbox into input for its next Run.
+[Node team guide](../sdk/node/README.md#host-scheduled-teams)
+
 ## Preview features
 
 Preview features default to disabled, and each has its own switch:

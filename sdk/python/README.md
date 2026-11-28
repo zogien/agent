@@ -173,6 +173,27 @@ session = runtime.session("…", on_ui_request=approve, allow=["Read"], deny=["B
 `full_access`; `shell` is `disabled`, `sandboxed` or `unrestricted`. `allow`,
 `ask` and `deny` take rules in the `Tool(specifier)` syntax.
 
+## Host-scheduled teams
+
+Use `Runtime(enable_teams=True)` and open the lead with `team={"role": "lead"}`.
+Select `TeamCreate` and `SpawnTeammate` in its Session tools. Read
+`lead.describe_team()["pending_spawns"]` to get the member name and prompt.
+To fulfill a spawn, open a Session in the same workspace home:
+
+```python
+import secrets
+
+member = runtime.session(model, workspace_home=home, workspace=workspace,
+    tools=["SendMessage"], team={"role": "member", "team_name": team_name,
+        "member_name": member_name, "lead_session_id": lead.describe()["session_id"],
+        "member_lease": secrets.token_hex(12)})
+```
+
+Use a fresh lease per spawn. `member.describe_team()` returns the roster.
+After the member sends a message to `team-lead`, `lead.poll_team()` takes the
+unread messages as a string suitable for its next Run. An empty inbox or a
+member Session returns `None`.
+
 ## Where the native library comes from
 
 Platform wheels carry `libmetask_agentcore` and ripgrep inside the package.
@@ -202,5 +223,7 @@ network, no API key. Without a library they skip, unless
 
 Experimental, like the AgentCore ABI it wraps: the package pins one exact ABI
 revision and follows it. Not yet published to PyPI; build the wheel as above.
-Windows is not covered by CI. Manual compaction, skills, MCP, checkpoints and teams exist in
-the ABI but are not wrapped yet; contributions welcome.
+The [coverage manifest](abi-coverage.json) records the remaining Python gaps.
+MCP needs a connector that retains connections across ctypes callbacks, handles
+cancellation and streams tool results. Manual compaction, skills and checkpoint
+transfer also have outstanding ownership or I/O requirements.

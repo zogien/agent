@@ -20,44 +20,24 @@
   "skill.bind_policy": "Session.bindPolicy",
   "skill.release_catalog": "Runtime.releaseCatalog",
   "skill.resolve_catalog": "Runtime.resolveWorkspaceSkillCatalog",
-  "mcp.apply_configuration": {
-    "deferred": "#14"
-  },
-  "mcp.describe": {
-    "deferred": "#14"
-  },
-  "mcp.refresh": {
-    "deferred": "#14"
-  },
-  "mcp.update_selection": {
-    "deferred": "#14"
-  },
+  "mcp.apply_configuration": "Runtime.applyMcpConfiguration",
+  "mcp.describe": "Runtime.describeMcp",
+  "mcp.refresh": "Runtime.refreshMcp",
+  "mcp.update_selection": "Session.updateMcpSelection",
   "goal.clear": "Session.clearGoal",
   "goal.get": "Session.getGoal",
   "goal.set": "Session.setGoal",
   "goal.update": "Session.updateGoal",
-  "team.describe": {
-    "deferred": "#14"
-  },
-  "team.poll": {
-    "deferred": "#14"
-  },
+  "team.describe": "Session.describeTeam",
+  "team.poll": "Session.pollTeam",
   "runtime_config_v1.builtin_tool_count": "RuntimeOptions.tools",
   "runtime_config_v1.builtin_tools": "RuntimeOptions.tools",
-  "runtime_config_v1.enable_teams": {
-    "deferred": "#14"
-  },
+  "runtime_config_v1.enable_teams": "RuntimeOptions.enableTeams",
   "runtime_config_v1.host_tool_count": "RuntimeOptions.hostTools",
   "runtime_config_v1.host_tools": "RuntimeOptions.hostTools",
-  "runtime_config_v1.mcp_catalog_limits": {
-    "deferred": "#14"
-  },
-  "runtime_config_v1.mcp_server_count": {
-    "deferred": "#14"
-  },
-  "runtime_config_v1.mcp_servers": {
-    "deferred": "#14"
-  },
+  "runtime_config_v1.mcp_catalog_limits": "RuntimeOptions.mcpCatalogLimits",
+  "runtime_config_v1.mcp_server_count": "RuntimeOptions.mcpServers",
+  "runtime_config_v1.mcp_servers": "RuntimeOptions.mcpServers",
   "runtime_config_v1.preview": "RuntimeOptions.preview",
   "runtime_config_v1.reserved": "Runtime.constructor",
   "runtime_config_v1.reserved0": "Runtime.constructor",
@@ -67,9 +47,7 @@
   "session_host_config_v1.api_key": "SessionOptions.apiKey",
   "session_host_config_v1.base_url": "SessionOptions.baseUrl",
   "session_host_config_v1.durable_budget": "SessionOptions.durableBudget",
-  "session_host_config_v1.mcp_selection": {
-    "deferred": "#14"
-  },
+  "session_host_config_v1.mcp_selection": "SessionOptions.mcpSelection",
   "session_host_config_v1.model_capabilities": "SessionOptions.modelCapabilities",
   "session_host_config_v1.model_capability_count": "SessionOptions.modelCapabilities",
   "session_host_config_v1.permission_mode_code": "SessionOptions.permissionMode",
@@ -81,9 +59,7 @@
   "session_host_config_v1.skill_catalog": "SessionOptions.skillCatalog",
   "session_host_config_v1.skill_policy": "SessionOptions.skillPolicy",
   "session_host_config_v1.struct_size": "Session.constructor",
-  "session_host_config_v1.team": {
-    "deferred": "#14"
-  },
+  "session_host_config_v1.team": "SessionOptions.team",
   "session_host_config_v1.workspace_home": "SessionOptions.workspaceHome",
   "session_host_config_v1.workspace_root": "SessionOptions.workspace",
   "session_create_config_v1.host": "Session.constructor",

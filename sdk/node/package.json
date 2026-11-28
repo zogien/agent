@@ -24,6 +24,7 @@
     "index.js",
     "location.js",
     "checkpoint.js",
+    "mcp.js",
     "index.d.ts",
     "src/",
     "scripts/",

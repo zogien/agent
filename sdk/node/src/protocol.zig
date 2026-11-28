@@ -85,6 +85,11 @@ fn decode(env: Env, kind: u32, bytes: []const u8, js: Value) !void {
             defer catalog.deinit();
             _ = try project(env, js, catalog.value);
         },
+        6 => {
+            var catalog = try protocol.decodeMcpCatalog(gpa, bytes);
+            defer catalog.deinit();
+            _ = try project(env, js, catalog.value);
+        },
         else => return error.InvalidKind,
     }
 }

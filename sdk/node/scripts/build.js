@@ -69,7 +69,7 @@ const args = [
   codec,
 ];
 if (platform.os === 'win32') {
-  const source = fs.readFileSync(path.join(here, 'src', 'addon.c'), 'utf8');
+  const source = ['addon.c', 'mcp_bridge.h'].map(file => fs.readFileSync(path.join(here, 'src', file), 'utf8')).join('\n');
   const symbols = [...new Set(Array.from(source.matchAll(/\b(napi_\w+)\s*\(/g), m => m[1]))].sort();
   fs.writeFileSync(path.join(out, 'host_api.h'), [
     ...symbols.map(name => `static __typeof__(&${name}) host_${name};`),

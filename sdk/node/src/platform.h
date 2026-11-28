@@ -16,6 +16,8 @@ typedef CONDITION_VARIABLE cond_t;
 #define mutex_destroy(m) ((void)(m))
 #define cond_init(c) InitializeConditionVariable(c)
 #define cond_wait(c,m) SleepConditionVariableSRW(c,m,INFINITE,0)
+static uint64_t monotonic_ms(void) { return GetTickCount64(); }
+static void cond_wait_ms(cond_t *c, mutex_t *m, unsigned ms) { SleepConditionVariableSRW(c, m, ms, 0); }
 #define cond_wake(c) WakeConditionVariable(c)
 #define cond_destroy(c) ((void)(c))
 #define THREAD_RESULT unsigned __stdcall
@@ -78,6 +80,7 @@ static void unlock_path(path_lock_t lock, const char *path) {
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <time.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -90,6 +93,19 @@ typedef pthread_cond_t cond_t;
 #define mutex_destroy(m) pthread_mutex_destroy(m)
 #define cond_init(c) pthread_cond_init(c,NULL)
 #define cond_wait(c,m) pthread_cond_wait(c,m)
+static uint64_t monotonic_ms(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+static void cond_wait_ms(cond_t *c, mutex_t *m, unsigned ms) {
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_nsec += (long)ms * 1000000;
+    until.tv_sec += until.tv_nsec / 1000000000;
+    until.tv_nsec %= 1000000000;
+    pthread_cond_timedwait(c, m, &until);
+}
 #define cond_wake(c) pthread_cond_signal(c)
 #define cond_destroy(c) pthread_cond_destroy(c)
 #define THREAD_RESULT void *
