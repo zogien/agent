@@ -32,3 +32,10 @@ jobs:
           version: 0.16.0
       - name: Build SDK archive
         run: zig build archive -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+      - run: npm ci --prefix sdk/node --ignore-scripts
+      - name: Build and test the native Node binding
+        env:
+          METACODES_NODE_SDK_REQUIRE_LIB: '1'
+        run: |
+          node sdk/node/scripts/build.js --target ${{ matrix.target }} --artifact zig-out/node-addons
+          node --test sdk/node/test/metacodes.test.js

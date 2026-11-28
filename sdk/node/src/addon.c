@@ -1,33 +1,42 @@
-/* Node-API bridge to the AgentCore C ABI (sdk/metask/agentcore.h).
- *
- * The addon loads libmetask_agentcore at run time (dlopen), validates the
- * exact ABI revision with the header's own compatibility check, and exposes
- * a small set of functions that index.js wraps into the public API.
- *
- * Threading: a Run executes on a dedicated thread (never the libuv pool, which
- * a long agent Run would starve). AgentCore callbacks arrive on AgentCore
- * threads and are forwarded to JavaScript through one thread-safe function per
- * Session (events, UI requests, Run completion: one queue, so every event of a
- * Run reaches JavaScript before its completion) and one per Runtime (host tool
- * calls). Tool calls and UI requests block their AgentCore thread until
- * JavaScript answers through completeCall(); the JavaScript thread itself never
- * blocks on a Run.
- *
- * POSIX only for now (dlopen, pthreads); Windows is not supported yet. */
 
+#define _GNU_SOURCE
 #define NAPI_VERSION 8
 #include <node_api.h>
 
 #include <metask/agentcore.h>
 
-#include <dlfcn.h>
-#include <pthread.h>
+#include "platform.h"
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static const metask_agentcore_api_v1 *g_api = NULL;
+
+napi_value node_field(napi_env env, napi_value object, const char *name) {
+    napi_value out;
+    return napi_get_named_property(env, object, name, &out) == napi_ok ? out : NULL;
+}
+napi_value node_element(napi_env env, napi_value array, uint32_t index) {
+    napi_value out;
+    return napi_get_element(env, array, index, &out) == napi_ok ? out : NULL;
+}
+bool node_set_field(napi_env env, napi_value object, const char *name, napi_value value) {
+    return napi_set_named_property(env, object, name, value) == napi_ok;
+}
+bool node_set_element(napi_env env, napi_value array, uint32_t index, napi_value value) {
+    return napi_set_element(env, array, index, value) == napi_ok;
+}
+napi_value node_unsigned(napi_env env, uint64_t x) {
+    napi_value out;
+    return napi_create_bigint_uint64(env, x, &out) == napi_ok ? out : NULL;
+}
+napi_value node_signed(napi_env env, int64_t x) {
+    napi_value out;
+    return napi_create_bigint_int64(env, x, &out) == napi_ok ? out : NULL;
+}
+extern const char *node_project(napi_env env, uint32_t kind, const uint8_t *ptr, size_t len, napi_value js);
 
 /* ---------- small helpers ---------- */
 
@@ -145,6 +154,30 @@ static int get_property_string(napi_env env, napi_value object, const char *name
     return get_string(env, value, out);
 }
 
+static napi_value project_protocol(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    uint32_t kind;
+    owned_t bytes;
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (argc != 3 || napi_get_value_uint32(env, argv[0], &kind) != napi_ok ||
+        !get_string(env, argv[1], &bytes)) return NULL;
+    const char *failure = bytes.ptr ? node_project(env, kind, bytes.ptr, bytes.len, argv[2]) : "empty JSON";
+    free(bytes.ptr);
+    if (failure) {
+        napi_throw_error(env, "INVALID_PROTOCOL", failure);
+        return NULL;
+    }
+    return argv[2];
+}
+
+static int get_id(napi_env env, napi_value value, uint64_t *id) {
+    bool lossless = false;
+    if (napi_get_value_bigint_uint64(env, value, id, &lossless) == napi_ok && lossless && *id) return 1;
+    napi_throw_range_error(env, NULL, "expected a nonzero uint64 bigint");
+    return 0;
+}
+
 static int get_property_u32(napi_env env, napi_value object, const char *name, uint32_t *out) {
     napi_value value;
     napi_valuetype type;
@@ -207,59 +240,34 @@ static int get_string_list(napi_env env, napi_value object, const char *name, st
 
 /* ---------- blocking calls into JavaScript (tool calls, UI requests) ---------- */
 
-typedef struct {
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
+typedef struct pending_s {
+    struct pending_s *next;
+    uint64_t id;
+    cond_t cond;
     int done;
     uint32_t status;
     owned_t result;
 } pending_t;
 
-static void pending_init(pending_t *pending) {
-    pthread_mutex_init(&pending->mutex, NULL);
-    pthread_cond_init(&pending->cond, NULL);
-    pending->done = 0;
-    pending->status = 0;
-    pending->result.ptr = NULL;
-    pending->result.len = 0;
-}
-
-static void pending_finish(pending_t *pending, uint32_t status, owned_t result) {
-    pthread_mutex_lock(&pending->mutex);
-    if (!pending->done) {
-        pending->status = status;
-        pending->result = result;
-        pending->done = 1;
-        result.ptr = NULL;
-    }
-    pthread_cond_signal(&pending->cond);
-    pthread_mutex_unlock(&pending->mutex);
-    free(result.ptr);
-}
-
-static void pending_wait(pending_t *pending) {
-    pthread_mutex_lock(&pending->mutex);
-    while (!pending->done) pthread_cond_wait(&pending->cond, &pending->mutex);
-    pthread_mutex_unlock(&pending->mutex);
-    pthread_mutex_destroy(&pending->mutex);
-    pthread_cond_destroy(&pending->cond);
-}
+static mutex_t gate = MUTEX_INITIALIZER;
 
 enum message_kind { MSG_EVENT = 1, MSG_UI = 2, MSG_DONE = 3, MSG_TOOL = 4 };
 
 typedef struct {
     enum message_kind kind;
     owned_t data;           /* event JSON, UI request JSON, tool arguments */
-    pending_t *pending;     /* MSG_UI, MSG_TOOL */
+    uint64_t call_id;
+    uint64_t run_id;
+    owned_t session_id;
     uint32_t tool_index;    /* MSG_TOOL */
     uint32_t status;        /* MSG_DONE */
     metask_agentcore_run_result_v1 result; /* MSG_DONE */
 } message_t;
 
-static napi_value make_external_pending(napi_env env, pending_t *pending) {
-    napi_value external = NULL;
-    napi_create_external(env, pending, NULL, NULL, &external);
-    return external;
+static void free_message(message_t *message) {
+    free(message->data.ptr);
+    free(message->session_id.ptr);
+    free(message);
 }
 
 static napi_value make_string(napi_env env, const owned_t *bytes) {
@@ -279,7 +287,8 @@ typedef struct {
 
 typedef struct runtime_s {
     metask_agentcore_runtime *handle;
-    napi_threadsafe_function tsfn;
+    struct session_s *sessions;
+    atomic_uint refs;
     tool_ctx_t *tool_contexts;
     owned_t *tool_strings; /* 3 per tool: name, description, schema */
     uint32_t tool_count;
@@ -287,30 +296,7 @@ typedef struct runtime_s {
 } runtime_t;
 
 static uint32_t host_execute(void *ctx, const metask_agentcore_run_context_v1 *run,
-                             metask_agentcore_bytes_view_v1 arguments,
-                             metask_agentcore_owned_bytes_v1 *out) {
-    (void)run;
-    tool_ctx_t *tool = (tool_ctx_t *)ctx;
-    out->ptr = NULL;
-    out->len = 0;
-    pending_t pending;
-    pending_init(&pending);
-    message_t *message = (message_t *)calloc(1, sizeof(message_t));
-    if (message == NULL) return METASK_AGENTCORE_HOST_FAILED;
-    message->kind = MSG_TOOL;
-    message->data = copy_bytes(arguments.ptr, (size_t)arguments.len);
-    message->pending = &pending;
-    message->tool_index = tool->index;
-    if (napi_call_threadsafe_function(tool->runtime->tsfn, message, napi_tsfn_blocking) != napi_ok) {
-        free(message->data.ptr);
-        free(message);
-        pending_finish(&pending, METASK_AGENTCORE_HOST_FAILED, copy_bytes("runtime is closing", 18));
-    }
-    pending_wait(&pending);
-    out->ptr = pending.result.ptr;
-    out->len = pending.result.len;
-    return pending.status;
-}
+                             metask_agentcore_bytes_view_v1 arguments, metask_agentcore_owned_bytes_v1 *out);
 
 static void host_release(void *ctx, metask_agentcore_owned_bytes_v1 *owned) {
     (void)ctx;
@@ -319,38 +305,21 @@ static void host_release(void *ctx, metask_agentcore_owned_bytes_v1 *owned) {
     owned->len = 0;
 }
 
-static void runtime_call_js(napi_env env, napi_value callback, void *context, void *data) {
-    (void)context;
-    message_t *message = (message_t *)data;
-    if (env == NULL) {
-        if (message->pending) pending_finish(message->pending, METASK_AGENTCORE_HOST_FAILED, copy_bytes("runtime closed", 14));
-        free(message->data.ptr);
-        free(message);
-        return;
+static void release_runtime(runtime_t *runtime) {
+    if (atomic_fetch_sub(&runtime->refs, 1) != 1) return;
+    if (runtime->handle) {
+        metask_agentcore_owned_bytes_v1 diagnostic = {0};
+        g_api->runtime->destroy(runtime->handle, &diagnostic);
+        g_api->buffer_release(&diagnostic);
     }
-    napi_value argv[4];
-    napi_value undefined;
-    napi_get_undefined(env, &undefined);
-    napi_create_string_utf8(env, "tool", NAPI_AUTO_LENGTH, &argv[0]);
-    argv[1] = make_external_pending(env, message->pending);
-    napi_create_uint32(env, message->tool_index, &argv[2]);
-    argv[3] = make_string(env, &message->data);
-    if (napi_call_function(env, undefined, callback, 4, argv, NULL) != napi_ok) {
-        /* The JS wrapper never throws synchronously; if it does, fail the call. */
-        napi_value ignored;
-        napi_get_and_clear_last_exception(env, &ignored);
-        pending_finish(message->pending, METASK_AGENTCORE_HOST_FAILED, copy_bytes("tool dispatch failed", 20));
-    }
-    free(message->data.ptr);
-    free(message);
+    for (uint32_t i = 0; i < runtime->tool_count * 3; i++) free(runtime->tool_strings[i].ptr);
+    free(runtime->tool_strings);
+    free(runtime->tool_contexts);
+    free(runtime);
 }
 
 static void runtime_finalize(napi_env env, void *data, void *hint) {
-    (void)env;
-    (void)hint;
-    runtime_t *runtime = (runtime_t *)data;
-    if (!runtime->destroyed) return; /* still referenced by native state; leaked by design */
-    free(runtime);
+    release_runtime(data);
 }
 
 static runtime_t *get_runtime(napi_env env, napi_value value) {
@@ -367,13 +336,12 @@ static runtime_t *get_runtime(napi_env env, napi_value value) {
     return runtime;
 }
 
-/* runtimeCreate(tools: string[], hostTools: {name, description, schema}[], dispatch, preview) */
 static napi_value runtime_create(napi_env env, napi_callback_info info) {
     size_t argc = 4;
     napi_value argv[4];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     bool preview = false;
-    if (argc >= 4 && napi_get_value_bool(env, argv[3], &preview) != napi_ok) {
+    if (argc >= 3 && napi_get_value_bool(env, argv[2], &preview) != napi_ok) {
         napi_throw_type_error(env, NULL, "preview must be a boolean");
         return NULL;
     }
@@ -424,14 +392,7 @@ static napi_value runtime_create(napi_env env, napi_callback_info info) {
         host_tools[i].release_result = host_release;
     }
 
-    napi_value resource_name;
-    napi_create_string_utf8(env, "metacodes.runtime", NAPI_AUTO_LENGTH, &resource_name);
-    if (napi_create_threadsafe_function(env, argv[2], NULL, resource_name, 0, 1, NULL, NULL,
-                                        runtime, runtime_call_js, &runtime->tsfn) != napi_ok) {
-        napi_throw_error(env, NULL, "cannot create the tool dispatcher");
-        goto fail;
-    }
-    napi_unref_threadsafe_function(env, runtime->tsfn);
+    atomic_init(&runtime->refs, 1);
 
     metask_agentcore_runtime_config_v1 config;
     memset(&config, 0, sizeof(config));
@@ -447,8 +408,6 @@ static napi_value runtime_create(napi_env env, napi_callback_info info) {
     free(host_tools);
     host_tools = NULL;
     if (status != METASK_AGENTCORE_STATUS_OK) {
-        napi_release_threadsafe_function(runtime->tsfn, napi_tsfn_abort);
-        runtime->tsfn = NULL;
         throw_status(env, "runtime.create", status, &diagnostic);
         goto fail_after_list;
     }
@@ -483,18 +442,21 @@ static napi_value runtime_destroy(napi_env env, napi_callback_info info) {
     g_api->buffer_release(&diagnostic);
     runtime->destroyed = 1;
     runtime->handle = NULL;
-    napi_release_threadsafe_function(runtime->tsfn, napi_tsfn_release);
-    for (uint32_t i = 0; i < runtime->tool_count * 3; i++) free(runtime->tool_strings[i].ptr);
-    free(runtime->tool_strings);
-    free(runtime->tool_contexts);
-    runtime->tool_strings = NULL;
-    runtime->tool_contexts = NULL;
     return NULL;
 }
 
 /* ---------- Session ---------- */
 
-typedef struct {
+typedef struct session_s {
+    struct session_s *next;
+    runtime_t *runtime;
+    atomic_uint refs;
+    pending_t *pending;
+    uint64_t next_call;
+    int cancel_requested;
+    int detached;
+    int native_running;
+    message_t *completion;
     metask_agentcore_session *handle;
     napi_threadsafe_function tsfn;
     int destroyed;
@@ -503,47 +465,144 @@ typedef struct {
     owned_t text;
     uint32_t max_turns;
     uint32_t stream_retry_budget;
+    metask_agentcore_context_block_v1 *blocks;
+    uint32_t block_count;
 } session_t;
+
+static void release_input(session_t *session) {
+    free(session->text.ptr);
+    session->text = (owned_t){0};
+    for (uint32_t i = 0; i < session->block_count; i++) {
+        free((void *)session->blocks[i].label.ptr);
+        free((void *)session->blocks[i].text.ptr);
+    }
+    free(session->blocks);
+    session->blocks = NULL;
+    session->block_count = 0;
+}
+
+static int copy_blocks(napi_env env, session_t *session, napi_value array) {
+    uint32_t count;
+    if (napi_get_array_length(env, array, &count) != napi_ok || count > 32) return 0;
+    if (count == 0) return 1;
+    session->blocks = calloc(count, sizeof(*session->blocks));
+    if (!session->blocks) return 0;
+    session->block_count = count;
+    for (uint32_t i = 0; i < count; i++) {
+        napi_value item;
+        owned_t label, text;
+        if (napi_get_element(env, array, i, &item) != napi_ok || !get_property_string(env, item, "label", &label)) return 0;
+        session->blocks[i].struct_size = sizeof(*session->blocks);
+        session->blocks[i].label = view_of(&label);
+        if (!get_property_string(env, item, "text", &text)) return 0;
+        session->blocks[i].text = view_of(&text);
+    }
+    return 1;
+}
+
+static void wake_pending(session_t *session) {
+    for (pending_t *p = session->pending; p; p = p->next) {
+        if (!p->done) {
+            p->done = 1;
+            cond_wake(&p->cond);
+        }
+    }
+}
+
+static uint32_t request_abort(session_t *session, metask_agentcore_owned_bytes_v1 *diagnostic) {
+    uint32_t status = g_api->session->abort(session->handle, session->run_id, METASK_AGENTCORE_ABORT_USER_REQUEST, diagnostic);
+    if (status == METASK_AGENTCORE_STATUS_OK || status == METASK_AGENTCORE_STATUS_STALE_RUN ||
+        status == METASK_AGENTCORE_STATUS_TOO_LATE) session->cancel_requested = 1;
+    if (status == METASK_AGENTCORE_STATUS_OK || session->detached) wake_pending(session);
+    return status;
+}
+
+static int enqueue(session_t *session, message_t *message) {
+    if (!session->detached && napi_call_threadsafe_function(session->tsfn, message, napi_tsfn_nonblocking) == napi_ok) return 1;
+    free_message(message);
+    return 0;
+}
 
 static uint32_t session_on_event(void *ctx, const metask_agentcore_run_context_v1 *run,
                                  metask_agentcore_bytes_view_v1 event_json) {
-    (void)run;
-    session_t *session = (session_t *)ctx;
-    message_t *message = (message_t *)calloc(1, sizeof(message_t));
-    if (message == NULL) return METASK_AGENTCORE_EVENT_CONTINUE; /* observation only */
-    message->kind = MSG_EVENT;
-    message->data = copy_bytes(event_json.ptr, (size_t)event_json.len);
-    if (napi_call_threadsafe_function(session->tsfn, message, napi_tsfn_blocking) != napi_ok) {
-        free(message->data.ptr);
-        free(message);
+    session_t *session = ctx;
+    mutex_lock(&gate);
+    if (session->cancel_requested) {
+        metask_agentcore_owned_bytes_v1 diagnostic = {0};
+        request_abort(session, &diagnostic);
+        g_api->buffer_release(&diagnostic);
     }
+    message_t *message = calloc(1, sizeof(*message));
+    if (message) {
+        message->kind = MSG_EVENT;
+        message->data = copy_bytes(event_json.ptr, event_json.len);
+        enqueue(session, message);
+    }
+    mutex_unlock(&gate);
     return METASK_AGENTCORE_EVENT_CONTINUE;
 }
 
-static uint32_t session_on_ui_request(void *ctx, const metask_agentcore_run_context_v1 *run,
-                                      metask_agentcore_bytes_view_v1 request_json,
-                                      metask_agentcore_owned_bytes_v1 *out) {
-    (void)run;
-    session_t *session = (session_t *)ctx;
-    out->ptr = NULL;
-    out->len = 0;
-    pending_t pending;
-    pending_init(&pending);
-    message_t *message = (message_t *)calloc(1, sizeof(message_t));
-    if (message == NULL) return METASK_AGENTCORE_UI_UNAVAILABLE;
-    message->kind = MSG_UI;
-    message->data = copy_bytes(request_json.ptr, (size_t)request_json.len);
-    message->pending = &pending;
-    if (napi_call_threadsafe_function(session->tsfn, message, napi_tsfn_blocking) != napi_ok) {
-        free(message->data.ptr);
-        free(message);
-        owned_t none = {NULL, 0};
-        pending_finish(&pending, METASK_AGENTCORE_UI_UNAVAILABLE, none);
-    }
-    pending_wait(&pending);
+static uint32_t dispatch_request(session_t *session, const metask_agentcore_run_context_v1 *run,
+                                 enum message_kind kind, uint32_t index, metask_agentcore_bytes_view_v1 input,
+                                 metask_agentcore_owned_bytes_v1 *out) {
+    uint32_t unavailable = kind == MSG_UI ? METASK_AGENTCORE_UI_UNAVAILABLE : METASK_AGENTCORE_HOST_FAILED;
+    *out = (metask_agentcore_owned_bytes_v1){0};
+    if (!session || session->detached || session->cancel_requested || session->next_call == UINT64_MAX) return unavailable;
+    message_t *message = calloc(1, sizeof(*message));
+    if (!message) return unavailable;
+    pending_t pending = {.id = ++session->next_call, .status = unavailable, .next = session->pending};
+    message->kind = kind;
+    message->tool_index = index;
+    message->run_id = run->run_id;
+    message->call_id = pending.id;
+    message->session_id = copy_bytes(run->session_id.ptr, run->session_id.len);
+    message->data = copy_bytes(input.ptr, input.len);
+    if (!enqueue(session, message)) return unavailable;
+    session->pending = &pending;
+    cond_init(&pending.cond);
+    while (!pending.done) cond_wait(&pending.cond, &gate);
+    pending_t **link = &session->pending;
+    while (*link != &pending) link = &(*link)->next;
+    *link = pending.next;
+    cond_destroy(&pending.cond);
     out->ptr = pending.result.ptr;
     out->len = pending.result.len;
     return pending.status;
+}
+
+static uint32_t host_execute(void *ctx, const metask_agentcore_run_context_v1 *run,
+                             metask_agentcore_bytes_view_v1 arguments, metask_agentcore_owned_bytes_v1 *out) {
+    tool_ctx_t *tool = ctx;
+    mutex_lock(&gate);
+    session_t *session = tool->runtime->sessions;
+    while (session && session->handle != run->session) session = session->next;
+    uint32_t status = dispatch_request(session, run, MSG_TOOL, tool->index, arguments, out);
+    mutex_unlock(&gate);
+    return status;
+}
+
+static uint32_t session_on_ui_request(void *ctx, const metask_agentcore_run_context_v1 *run,
+                                      metask_agentcore_bytes_view_v1 request_json, metask_agentcore_owned_bytes_v1 *out) {
+    mutex_lock(&gate);
+    uint32_t status = dispatch_request(ctx, run, MSG_UI, 0, request_json, out);
+    mutex_unlock(&gate);
+    return status;
+}
+
+static void answer(session_t *session, uint64_t id, uint32_t status, owned_t text) {
+    mutex_lock(&gate);
+    for (pending_t *p = session->pending; p; p = p->next) {
+        if (p->id == id && !p->done) {
+            p->result = text;
+            text.ptr = NULL;
+            p->status = status;
+            p->done = 1;
+            cond_wake(&p->cond);
+            break;
+        }
+    }
+    mutex_unlock(&gate);
+    free(text.ptr);
 }
 
 static void session_release_response(void *ctx, metask_agentcore_owned_bytes_v1 *owned) {
@@ -557,33 +616,29 @@ static void session_call_js(napi_env env, napi_value callback, void *context, vo
     session_t *session = (session_t *)context;
     message_t *message = (message_t *)data;
     if (env == NULL) {
-        if (message->pending) {
-            owned_t none = {NULL, 0};
-            pending_finish(message->pending, METASK_AGENTCORE_UI_UNAVAILABLE, none);
-        }
-        free(message->data.ptr);
-        free(message);
+        free_message(message);
         return;
     }
     napi_value undefined;
     napi_get_undefined(env, &undefined);
-    napi_value argv[3];
+    napi_value argv[6];
     size_t argc = 0;
     if (message->kind == MSG_EVENT) {
         napi_create_string_utf8(env, "event", NAPI_AUTO_LENGTH, &argv[0]);
         argv[1] = make_string(env, &message->data);
         argc = 2;
-    } else if (message->kind == MSG_UI) {
-        napi_create_string_utf8(env, "ui", NAPI_AUTO_LENGTH, &argv[0]);
-        argv[1] = make_external_pending(env, message->pending);
+    } else if (message->kind == MSG_UI || message->kind == MSG_TOOL) {
+        napi_create_string_utf8(env, message->kind == MSG_UI ? "ui" : "tool", NAPI_AUTO_LENGTH, &argv[0]);
+        argv[1] = node_unsigned(env, message->call_id);
         argv[2] = make_string(env, &message->data);
-        argc = 3;
+        napi_create_uint32(env, message->tool_index, &argv[3]);
+        argv[4] = node_unsigned(env, message->run_id);
+        argv[5] = make_string(env, &message->session_id);
+        argc = 6;
     } else {
         session->running = 0;
         napi_unref_threadsafe_function(env, session->tsfn);
-        free(session->text.ptr);
-        session->text.ptr = NULL;
-        session->text.len = 0;
+        release_input(session);
         napi_value result, value;
         napi_create_object(env, &result);
         napi_create_uint32(env, message->status, &value);
@@ -608,21 +663,52 @@ static void session_call_js(napi_env env, napi_value callback, void *context, vo
     if (napi_call_function(env, undefined, callback, argc, argv, NULL) != napi_ok) {
         napi_value ignored;
         napi_get_and_clear_last_exception(env, &ignored);
-        if (message->kind == MSG_UI) {
-            owned_t none = {NULL, 0};
-            pending_finish(message->pending, METASK_AGENTCORE_UI_UNAVAILABLE, none);
-        }
+        if (message->call_id) answer(session, message->call_id,
+            message->kind == MSG_UI ? METASK_AGENTCORE_UI_UNAVAILABLE : METASK_AGENTCORE_HOST_FAILED, (owned_t){0});
     }
-    free(message->data.ptr);
-    free(message);
+    free_message(message);
+}
+
+static void release_session(session_t *session) {
+    if (atomic_fetch_sub(&session->refs, 1) == 1) free(session);
 }
 
 static void session_finalize(napi_env env, void *data, void *hint) {
-    (void)env;
-    (void)hint;
-    session_t *session = (session_t *)data;
-    if (!session->destroyed) return; /* an open Session is owned by AgentCore; leak rather than free */
-    free(session);
+    release_session(data);
+}
+
+static void unlink_session(session_t *session) {
+    runtime_t *runtime = session->runtime;
+    mutex_lock(&gate);
+    session_t **link = &runtime->sessions;
+    while (*link != session) link = &(*link)->next;
+    *link = session->next;
+    mutex_unlock(&gate);
+    release_input(session);
+    release_runtime(runtime);
+    release_session(session);
+}
+
+static void destroy_detached(session_t *session) {
+    metask_agentcore_owned_bytes_v1 diagnostic = {0};
+    g_api->session->destroy(session->handle, &diagnostic);
+    g_api->buffer_release(&diagnostic);
+    unlink_session(session);
+}
+
+static void cleanup_session(void *data) {
+    session_t *session = data;
+    mutex_lock(&gate);
+    session->detached = 1;
+    int running = session->native_running;
+    if (running) {
+        metask_agentcore_owned_bytes_v1 diagnostic = {0};
+        request_abort(session, &diagnostic);
+        g_api->buffer_release(&diagnostic);
+    }
+    napi_release_threadsafe_function(session->tsfn, napi_tsfn_abort);
+    mutex_unlock(&gate);
+    if (!running) destroy_detached(session);
 }
 
 static session_t *get_session(napi_env env, napi_value value) {
@@ -639,10 +725,72 @@ static session_t *get_session(napi_env env, napi_value value) {
     return session;
 }
 
-/* sessionCreate(runtime, config, dispatch) */
+typedef struct {
+    napi_env env;
+    napi_value callback;
+    napi_value buffer;
+    uint8_t *bytes;
+} checkpoint_io;
+
+static const metask_agentcore_checkpoint_limits_v1 limits = {
+    .struct_size = sizeof(limits), .hard_bytes = 64u << 20, .max_section_bytes = 64u << 20,
+    .max_string_bytes = 16u << 20, .max_messages = 1000000, .max_blocks_per_message = 4096, .chunk_bytes = 65536
+};
+
+static uint32_t transfer(checkpoint_io *io, uint32_t capacity, uint32_t *count) {
+    napi_handle_scope scope;
+    if (napi_open_handle_scope(io->env, &scope) != napi_ok) return 1;
+    napi_value receiver, args[2] = {io->buffer}, result;
+    napi_get_undefined(io->env, &receiver);
+    napi_create_uint32(io->env, capacity, &args[1]);
+    int failed = napi_call_function(io->env, receiver, io->callback, 2, args, &result) != napi_ok ||
+        napi_get_value_uint32(io->env, result, count) != napi_ok || *count > capacity;
+    napi_close_handle_scope(io->env, scope);
+    return failed;
+}
+
+static uint32_t write_checkpoint(void *ctx, metask_agentcore_bytes_view_v1 chunk) {
+    checkpoint_io *io = ctx;
+    for (uint64_t offset = 0; offset < chunk.len;) {
+        uint32_t length = chunk.len - offset > limits.chunk_bytes ? limits.chunk_bytes : (uint32_t)(chunk.len - offset);
+        memcpy(io->bytes, chunk.ptr + offset, length);
+        uint32_t count;
+        if (transfer(io, length, &count) || !count) return 1;
+        offset += count;
+    }
+    return 0;
+}
+
+static uint32_t read_checkpoint(void *ctx, uint8_t *dest, uint64_t capacity, uint64_t *read) {
+    checkpoint_io *io = ctx;
+    uint32_t count;
+    if (transfer(io, capacity > limits.chunk_bytes ? limits.chunk_bytes : (uint32_t)capacity, &count)) return 1;
+    memcpy(dest, io->bytes, count);
+    *read = count;
+    return 0;
+}
+
+static napi_value session_export(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    session_t *session = get_session(env, argv[0]);
+    if (!session) return NULL;
+    checkpoint_io io = {.env = env, .callback = argv[1]};
+    if (napi_create_buffer(env, limits.chunk_bytes, (void **)&io.bytes, &io.buffer) != napi_ok) return NULL;
+    metask_agentcore_checkpoint_sink_v1 sink = {.struct_size = sizeof(sink), .ctx = &io, .write = write_checkpoint};
+    metask_agentcore_checkpoint_export_config_v1 config = {.struct_size = sizeof(config), .sink = &sink, .limits = &limits};
+    metask_agentcore_checkpoint_export_result_v1 result = {.struct_size = sizeof(result)};
+    metask_agentcore_owned_bytes_v1 diagnostic = {0};
+    uint32_t status = g_api->session_control->export_checkpoint(session->handle, &config, &result, &diagnostic);
+    if (status) throw_status(env, "session.export_checkpoint", status, &diagnostic);
+    else g_api->buffer_release(&diagnostic);
+    return NULL;
+}
+
 static napi_value session_create(napi_env env, napi_callback_info info) {
-    size_t argc = 3;
-    napi_value argv[3];
+    size_t argc = 4;
+    napi_value argv[4];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     runtime_t *runtime = get_runtime(env, argv[0]);
     if (runtime == NULL) return NULL;
@@ -719,16 +867,49 @@ static napi_value session_create(napi_env env, napi_callback_info info) {
     callbacks.on_ui_request = session_on_ui_request;
     callbacks.release_response = session_release_response;
     metask_agentcore_owned_bytes_v1 diagnostic = {NULL, 0};
-    uint32_t status = g_api->session->create(runtime->handle, &config, &callbacks, &session->handle, &diagnostic);
+    uint32_t status;
+    if (argc == 4) {
+        checkpoint_io io = {.env = env, .callback = argv[3]};
+        metask_agentcore_checkpoint_source_v1 source = {.struct_size = sizeof(source), .ctx = &io, .read = read_checkpoint};
+        metask_agentcore_session_restore_config_v1 restore = {.struct_size = sizeof(restore), .host = &host, .source = &source, .limits = &limits};
+        metask_agentcore_owned_bytes_v1 report = {0};
+        status = napi_create_buffer(env, limits.chunk_bytes, (void **)&io.bytes, &io.buffer) == napi_ok
+            ? g_api->session_control->restore(runtime->handle, &restore, &callbacks, &session->handle, &report, &diagnostic)
+            : METASK_AGENTCORE_STATUS_OUT_OF_MEMORY;
+        if (!status) {
+            owned_t bytes = {report.ptr, report.len};
+            napi_set_named_property(env, cfg, "restoreReport", make_string(env, &bytes));
+        }
+        g_api->buffer_release(&report);
+    } else {
+        status = g_api->session->create(runtime->handle, &config, &callbacks, &session->handle, &diagnostic);
+    }
     if (status != METASK_AGENTCORE_STATUS_OK) {
         napi_release_threadsafe_function(session->tsfn, napi_tsfn_abort);
         free(session);
         session = NULL;
-        throw_status(env, "session.create", status, &diagnostic);
+        throw_status(env, argc == 4 ? "session.restore" : "session.create", status, &diagnostic);
         goto done;
     }
     g_api->buffer_release(&diagnostic);
-    napi_create_external(env, session, session_finalize, NULL, &external);
+    session->runtime = runtime;
+    atomic_init(&session->refs, 1);
+    atomic_fetch_add(&runtime->refs, 1);
+    mutex_lock(&gate);
+    session->next = runtime->sessions;
+    runtime->sessions = session;
+    mutex_unlock(&gate);
+    if (napi_add_env_cleanup_hook(env, cleanup_session, session) != napi_ok) {
+        cleanup_session(session);
+        napi_throw_error(env, NULL, "cannot register session cleanup");
+        goto done;
+    }
+    if (napi_create_external(env, session, session_finalize, NULL, &external) != napi_ok) {
+        napi_remove_env_cleanup_hook(env, cleanup_session, session);
+        cleanup_session(session);
+        goto done;
+    }
+    atomic_fetch_add(&session->refs, 1);
 
 done:
     free(api_key.ptr);
@@ -743,7 +924,7 @@ done:
     return external;
 }
 
-static void *run_thread(void *arg) {
+static THREAD_RESULT run_thread(void *arg) {
     session_t *session = (session_t *)arg;
     metask_agentcore_run_input_v1 input;
     memset(&input, 0, sizeof(input));
@@ -755,33 +936,27 @@ static void *run_thread(void *arg) {
     options.struct_size = (uint32_t)sizeof(options);
     options.max_turns = session->max_turns;
     options.stream_retry_budget = session->stream_retry_budget;
-    message_t *message = (message_t *)calloc(1, sizeof(message_t));
-    metask_agentcore_run_result_v1 local_result;
-    metask_agentcore_run_result_v1 *result = message ? &message->result : &local_result;
-    memset(result, 0, sizeof(*result));
-    result->struct_size = (uint32_t)sizeof(*result);
-    metask_agentcore_owned_bytes_v1 diagnostic = {NULL, 0};
-    uint32_t status = g_api->session->run_input(session->handle, session->run_id, &input, &options, result, &diagnostic);
-    if (message == NULL) {
-        g_api->buffer_release(&diagnostic);
-        return NULL; /* out of memory: the Promise cannot be settled */
-    }
+    options.context_blocks = session->blocks;
+    options.context_block_count = session->block_count;
+    message_t *message = session->completion;
+    message->result.struct_size = sizeof(message->result);
+    metask_agentcore_owned_bytes_v1 diagnostic = {0};
+    message->status = g_api->session->run_input(session->handle, session->run_id, &input, &options, &message->result, &diagnostic);
     message->kind = MSG_DONE;
-    message->status = status;
     message->data = copy_bytes(diagnostic.ptr, (size_t)diagnostic.len);
     g_api->buffer_release(&diagnostic);
-    if (napi_call_threadsafe_function(session->tsfn, message, napi_tsfn_blocking) != napi_ok) {
-        free(message->data.ptr);
-        free(message);
-    }
-    return NULL;
+    mutex_lock(&gate);
+    session->native_running = 0;
+    int detached = session->detached;
+    enqueue(session, message);
+    mutex_unlock(&gate);
+    if (detached) destroy_detached(session);
+    return THREAD_DONE;
 }
 
-/* sessionRun(session, runId, text, maxTurns, streamRetryBudget): starts the Run;
- * completion is a "done" dispatch. */
 static napi_value session_run(napi_env env, napi_callback_info info) {
-    size_t argc = 5;
-    napi_value argv[5];
+    size_t argc = 6;
+    napi_value argv[6];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     session_t *session = get_session(env, argv[0]);
     if (session == NULL) return NULL;
@@ -789,11 +964,11 @@ static napi_value session_run(napi_env env, napi_callback_info info) {
         napi_throw_error(env, "BUSY", "a Run is already active on this session");
         return NULL;
     }
-    int64_t run_id = 0;
+    uint64_t run_id = 0;
     uint32_t max_turns = 0;
     uint32_t stream_retry_budget = 0;
     owned_t text;
-    if (argc < 5 || napi_get_value_int64(env, argv[1], &run_id) != napi_ok || run_id <= 0 ||
+    if (argc < 6 || !get_id(env, argv[1], &run_id) ||
         napi_get_value_uint32(env, argv[3], &max_turns) != napi_ok ||
         napi_get_value_uint32(env, argv[4], &stream_retry_budget) != napi_ok || !get_string(env, argv[2], &text)) {
         bool pending = false;
@@ -803,22 +978,30 @@ static napi_value session_run(napi_env env, napi_callback_info info) {
     }
     session->run_id = (uint64_t)run_id;
     session->text = text;
+    if (!copy_blocks(env, session, argv[5])) {
+        release_input(session);
+        napi_throw_error(env, NULL, "cannot copy context blocks");
+        return NULL;
+    }
     session->max_turns = max_turns;
     session->stream_retry_budget = stream_retry_budget;
+    session->completion = calloc(1, sizeof(*session->completion));
+    if (!session->completion) {
+        release_input(session);
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    session->cancel_requested = 0;
+    session->native_running = 1;
     session->running = 1;
     napi_ref_threadsafe_function(env, session->tsfn);
-    pthread_t thread;
-    pthread_attr_t attributes;
-    pthread_attr_init(&attributes);
-    pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
-    pthread_attr_setstacksize(&attributes, 8 * 1024 * 1024);
-    int failed = pthread_create(&thread, &attributes, run_thread, session);
-    pthread_attr_destroy(&attributes);
+    int failed = spawn_thread(run_thread, session);
     if (failed) {
+        free(session->completion);
+        session->native_running = 0;
         session->running = 0;
         napi_unref_threadsafe_function(env, session->tsfn);
-        free(session->text.ptr);
-        session->text.ptr = NULL;
+        release_input(session);
         napi_throw_error(env, NULL, "cannot start the Run thread");
     }
     return NULL;
@@ -830,10 +1013,17 @@ static napi_value session_abort(napi_env env, napi_callback_info info) {
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     session_t *session = get_session(env, argv[0]);
     if (session == NULL) return NULL;
-    int64_t run_id = 0;
-    napi_get_value_int64(env, argv[1], &run_id);
+    uint64_t run_id = 0;
+    if (!get_id(env, argv[1], &run_id)) return NULL;
     metask_agentcore_owned_bytes_v1 diagnostic = {NULL, 0};
-    uint32_t status = g_api->session->abort(session->handle, (uint64_t)run_id, METASK_AGENTCORE_ABORT_USER_REQUEST, &diagnostic);
+    mutex_lock(&gate);
+    uint32_t status = session->native_running && session->run_id == run_id
+        ? request_abort(session, &diagnostic) : METASK_AGENTCORE_STATUS_TOO_LATE;
+    mutex_unlock(&gate);
+    if (status != METASK_AGENTCORE_STATUS_OK && status != METASK_AGENTCORE_STATUS_STALE_RUN && status != METASK_AGENTCORE_STATUS_TOO_LATE) {
+        throw_status(env, "session.abort", status, &diagnostic);
+        return NULL;
+    }
     g_api->buffer_release(&diagnostic);
     napi_value value;
     napi_create_uint32(env, status, &value);
@@ -847,10 +1037,9 @@ static napi_value session_submit(napi_env env, napi_callback_info info) {
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     session_t *session = get_session(env, argv[0]);
     if (session == NULL) return NULL;
-    int64_t run_id = 0, input_id = 0;
+    uint64_t run_id = 0, input_id = 0;
     owned_t text;
-    napi_get_value_int64(env, argv[1], &run_id);
-    napi_get_value_int64(env, argv[2], &input_id);
+    if (!get_id(env, argv[1], &run_id) || !get_id(env, argv[2], &input_id)) return NULL;
     if (!get_string(env, argv[3], &text)) return NULL;
     metask_agentcore_submitted_input_v1 input;
     memset(&input, 0, sizeof(input));
@@ -961,19 +1150,14 @@ static napi_value session_set_permission_mode(napi_env env, napi_callback_info i
     return NULL;
 }
 
-/* sessionRewindToUserMessage(session, position): index.js has checked that
- * position is a safe integer >= 1. */
 static napi_value session_rewind_to_user_message(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value argv[2];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     session_t *session = get_session(env, argv[0]);
     if (session == NULL) return NULL;
-    int64_t position = 0;
-    if (napi_get_value_int64(env, argv[1], &position) != napi_ok || position < 1) {
-        napi_throw_type_error(env, NULL, "position must be a positive integer");
-        return NULL;
-    }
+    uint64_t position;
+    if (!get_id(env, argv[1], &position)) return NULL;
     metask_agentcore_owned_bytes_v1 diagnostic = {NULL, 0};
     uint32_t status = g_api->session_control->rewind_to_user_message(session->handle, (uint64_t)position, &diagnostic);
     if (status != METASK_AGENTCORE_STATUS_OK) {
@@ -1002,64 +1186,164 @@ static napi_value session_destroy(napi_env env, napi_callback_info info) {
     }
     g_api->buffer_release(&diagnostic);
     session->destroyed = 1;
-    session->handle = NULL;
+    napi_remove_env_cleanup_hook(env, cleanup_session, session);
     napi_release_threadsafe_function(session->tsfn, napi_tsfn_release);
+    unlink_session(session);
     return NULL;
 }
 
-/* completeCall(pendingExternal, status, text?) answers a tool call or UI request. */
 static napi_value complete_call(napi_env env, napi_callback_info info) {
-    size_t argc = 3;
-    napi_value argv[3];
+    size_t argc = 4;
+    napi_value argv[4];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-    void *data = NULL;
-    uint32_t status = 0;
+    session_t *session = get_session(env, argv[0]);
+    uint64_t id;
+    uint32_t status;
     owned_t text;
-    if (napi_get_value_external(env, argv[0], &data) != napi_ok || data == NULL ||
-        napi_get_value_uint32(env, argv[1], &status) != napi_ok || !get_string(env, argv[2], &text)) {
-        napi_throw_type_error(env, NULL, "invalid completion");
-        return NULL;
-    }
-    pending_finish((pending_t *)data, status, text);
+    if (!session || !get_id(env, argv[1], &id) ||
+        napi_get_value_uint32(env, argv[2], &status) != napi_ok || !get_string(env, argv[3], &text)) return NULL;
+    answer(session, id, status, text);
     return NULL;
 }
 
-/* load(path) -> ABI revision */
-static napi_value load_library(napi_env env, napi_callback_info info) {
+typedef struct {
+    path_lock_t lock;
+    char *path;
+    int held;
+} held_lock_t;
+
+static void release_held_lock(held_lock_t *held) {
+    if (!held->held) return;
+    held->held = 0;
+    unlock_path(held->lock, held->path);
+}
+
+static void held_lock_finalize(napi_env env, void *data, void *hint) {
+    held_lock_t *held = data;
+    release_held_lock(held);
+    free(held->path);
+    free(held);
+}
+
+static napi_value lock_file(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value argv[1];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
-    if (g_api == NULL) {
-        owned_t path;
-        if (!get_string(env, argv[0], &path)) return NULL;
-        if (path.ptr == NULL) {
-            napi_throw_type_error(env, NULL, "library path required");
-            return NULL;
-        }
-        void *library = dlopen((const char *)path.ptr, RTLD_NOW | RTLD_LOCAL);
+    owned_t path;
+    if (argc != 1 || !get_string(env, argv[0], &path)) return NULL;
+    if (!path.ptr) {
+        napi_throw_type_error(env, NULL, "lock path required");
+        return NULL;
+    }
+    held_lock_t *held = calloc(1, sizeof(*held));
+    if (!held) {
         free(path.ptr);
-        if (library == NULL) {
-            napi_throw_error(env, "LOAD_FAILED", dlerror());
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    held->path = (char *)path.ptr;
+    int error = 0;
+    int status = lock_path(held->path, &held->lock, &error);
+    if (status) {
+        free(held->path);
+        free(held);
+        if (status > 0) {
+            napi_throw_error(env, "EBUSY", "the lock is held by another writer");
+        } else {
+            char message[64];
+            snprintf(message, sizeof(message), "cannot acquire the lock (system error %d)", error);
+            napi_throw_error(env, "LOCK_FAILED", message);
+        }
+        return NULL;
+    }
+    held->held = 1;
+    napi_value external;
+    if (napi_create_external(env, held, held_lock_finalize, NULL, &external) != napi_ok) {
+        held_lock_finalize(env, held, NULL);
+        napi_throw_error(env, NULL, "cannot create the lock handle");
+        return NULL;
+    }
+    return external;
+}
+
+static napi_value unlock_file(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    void *data = NULL;
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (argc != 1 || napi_get_value_external(env, argv[0], &data) != napi_ok || !data) {
+        napi_throw_type_error(env, NULL, "expected a lock handle");
+        return NULL;
+    }
+    release_held_lock(data);
+    return NULL;
+}
+
+static napi_value load_locked(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (g_api == NULL) {
+        owned_t rg = {0};
+        if (argc == 2 && !get_string(env, argv[1], &rg)) return NULL;
+        if (rg.ptr) {
+#ifdef _WIN32
+            int failed = _putenv_s("RG_BIN", (const char *)rg.ptr);
+#else
+            int failed = setenv("RG_BIN", (const char *)rg.ptr, 1);
+#endif
+            free(rg.ptr);
+            if (failed) {
+                napi_throw_error(env, "LOAD_FAILED", "cannot configure bundled ripgrep");
+                return NULL;
+            }
+        }
+    }
+    owned_t path;
+    if (!get_string(env, argv[0], &path)) return NULL;
+    if (path.ptr == NULL) {
+        napi_throw_type_error(env, NULL, "library path required");
+        return NULL;
+    }
+    void *library = open_library((const char *)path.ptr);
+    free(path.ptr);
+    if (library == NULL) {
+        napi_throw_error(env, "LOAD_FAILED", library_error());
+        return NULL;
+    }
+    const void *(*get_api)(uint32_t) = (const void *(*)(uint32_t))library_symbol(library, "metask_agentcore_get_api");
+    if (get_api == NULL) {
+        close_library(library);
+        napi_throw_error(env, "LOAD_FAILED", "metask_agentcore_get_api not exported");
+        return NULL;
+    }
+    const metask_agentcore_api_v1 *api = (const metask_agentcore_api_v1 *)get_api(METASK_AGENTCORE_ABI_V1);
+    if (!metask_agentcore_api_v1_is_compatible(api)) {
+        close_library(library);
+        napi_throw_error(env, "ABI_MISMATCH",
+                         "library does not provide the expected AgentCore ABI revision and layout");
+        return NULL;
+    }
+    if (g_api == NULL) {
+        g_api = api;
+    } else {
+        int different = g_api != api;
+        close_library(library);
+        if (different) {
+            napi_throw_error(env, "ABI_MISMATCH", "another AgentCore library is already loaded in this process");
             return NULL;
         }
-        const void *(*get_api)(uint32_t) = (const void *(*)(uint32_t))dlsym(library, "metask_agentcore_get_api");
-        if (get_api == NULL) {
-            dlclose(library);
-            napi_throw_error(env, "LOAD_FAILED", "metask_agentcore_get_api not exported");
-            return NULL;
-        }
-        const metask_agentcore_api_v1 *api = (const metask_agentcore_api_v1 *)get_api(METASK_AGENTCORE_ABI_V1);
-        if (!metask_agentcore_api_v1_is_compatible(api)) {
-            dlclose(library);
-            napi_throw_error(env, "ABI_MISMATCH",
-                             "library does not provide AgentCore ABI v1 revision " "28" " with the expected layout");
-            return NULL;
-        }
-        g_api = api; /* the library stays loaded for the life of the process */
     }
     napi_value value;
     napi_create_uint32(env, g_api->abi_revision, &value);
     return value;
+}
+
+static napi_value load_library(napi_env env, napi_callback_info info) {
+    mutex_lock(&gate);
+    napi_value revision = load_locked(env, info);
+    mutex_unlock(&gate);
+    return revision;
 }
 
 #define EXPORT(name, function)                                              \
@@ -1070,10 +1354,23 @@ static napi_value load_library(napi_env env, napi_callback_info info) {
     } while (0)
 
 NAPI_MODULE_INIT() {
+#ifdef _WIN32
+    if (!load_host_api()) return NULL;
+#endif
+    mutex_lock(&gate);
+    static int pinned;
+    if (!pinned) pinned = pin_addon((void *)&load_library);
+    mutex_unlock(&gate);
+    if (!pinned) {
+        napi_throw_error(env, "LOAD_FAILED", "cannot pin Node addon");
+        return NULL;
+    }
     EXPORT("load", load_library);
+    EXPORT("project", project_protocol);
     EXPORT("runtimeCreate", runtime_create);
     EXPORT("runtimeDestroy", runtime_destroy);
     EXPORT("sessionCreate", session_create);
+    EXPORT("sessionExport", session_export);
     EXPORT("sessionRun", session_run);
     EXPORT("sessionAbort", session_abort);
     EXPORT("sessionSubmit", session_submit);
@@ -1084,6 +1381,8 @@ NAPI_MODULE_INIT() {
     EXPORT("sessionRewindToUserMessage", session_rewind_to_user_message);
     EXPORT("sessionDestroy", session_destroy);
     EXPORT("completeCall", complete_call);
+    EXPORT("lockPath", lock_file);
+    EXPORT("unlockPath", unlock_file);
     napi_value revision;
     napi_create_uint32(env, METASK_AGENTCORE_ABI_REVISION, &revision);
     napi_set_named_property(env, exports, "abiRevision", revision);

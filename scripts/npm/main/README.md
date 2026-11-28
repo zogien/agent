@@ -1,11 +1,29 @@
 # @zogien/agent-sdk
 
-Prebuilt AgentCore SDK bundles: the C ABI library (static and shared), the C
-header, Zig and Rust bindings, and the runtime helpers AgentCore ships with.
+Run AgentCore from Node.js or Electron main with its prebuilt Node-API binding.
+The platform package also includes the C ABI libraries, header, Zig and Rust bindings and runtime helpers.
 
 ```sh
 npm install @zogien/agent-sdk
 ```
+
+```js
+const { Runtime } = require('@zogien/agent-sdk');
+
+async function ask(model, prompt) {
+  const runtime = new Runtime();
+  try {
+    const session = runtime.session(model, { workspace: '.', provider: 'anthropic' });
+    return await session.run(prompt);
+  } finally {
+    runtime.close();
+  }
+}
+```
+
+Supply the provider credential with `apiKey` or its environment variable.
+The [Node SDK guide](https://github.com/zogien/agent/blob/main/sdk/node/README.md)
+covers streams, JavaScript tools, cancellation and portable checkpoints.
 
 This package holds no binaries. Each platform's bundle is its own package, and
 npm installs the one that matches the machine:

@@ -1,18 +1,22 @@
-# metacodes for Node.js
+# AgentCore for Node.js and Electron
 
-Embed the [metacodes](https://github.com/metask-ai/metacodes) agent runtime in a
-Node.js program. A small Node-API addon (`src/addon.c`) loads the AgentCore
-shared library and runs each agent Run on its own thread, so the event loop
-never blocks. No npm dependencies; Node 18 or newer on macOS or Linux.
+Install `@zogien/agent-sdk` with npm. Its optional platform dependency supplies
+the Node-API 8 addon, AgentCore shared library and ripgrep for Windows, macOS
+and GNU/Linux on x64 and ARM64. The host needs Node 18 or later or a compatible
+Electron main process.
 
 ```js
-const metacodes = require('metacodes');
+const { Runtime } = require('@zogien/agent-sdk');
 
-const runtime = new metacodes.Runtime({ tools: ['Read', 'Glob', 'Grep'] });
-const session = runtime.session('claude-sonnet-4-5', { provider: 'anthropic', workspace: '.' });
-const result = await session.run('Summarize this repository in three lines.');
-console.log(result.text, result.stopReason, result.usage);
-runtime.close();
+async function summarize(model) {
+  const runtime = new Runtime({ tools: ['Read', 'Glob', 'Grep'] });
+  try {
+    const session = runtime.session(model, { provider: 'anthropic', workspace: '.' });
+    return await session.run('Summarize the repository in three lines.');
+  } finally {
+    runtime.close();
+  }
+}
 ```
 
 A Run that stops on the model resolves normally with `stopReason === 'api_error'`,
@@ -27,7 +31,7 @@ The API key comes from `apiKey`, else the provider's usual variable
 `METACODES_API_KEY`. `baseUrl` is the full endpoint; empty means the
 provider's official one.
 
-Preview features default to disabled. `new metacodes.Runtime({ preview: true })`
+Preview features default to disabled. `new Runtime({ preview: true })`
 opts in and includes the `ExecuteCode` JavaScript orchestration tool; Session
 tool selection and ordinary permission checks still apply. Selecting
 `ExecuteCode` with preview disabled is rejected. This requires AgentCore ABI revision 29.
@@ -35,13 +39,14 @@ tool selection and ordinary permission checks still apply. Selecting
 ## Tools written in JavaScript
 
 ```js
-const lookupOrder = metacodes.tool({
+const { Runtime, tool } = require('@zogien/agent-sdk');
+const lookupOrder = tool({
   name: 'lookup_order',
   description: 'Look up an order by id.',
   inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
   handler: async ({ id }) => ({ id, status: 'shipped' }),   // string or anything JSON-serialisable
 });
-const runtime = new metacodes.Runtime({ tools: ['Read'], hostTools: [lookupOrder] });
+const runtime = new Runtime({ tools: ['Read'], hostTools: [lookupOrder] });
 ```
 
 Handlers may be async. A thrown error or rejected promise is returned to the
@@ -106,31 +111,60 @@ const session = runtime.session('…', {
 });
 ```
 
-## Where the native pieces come from
+## Run context, cancellation and checkpoints
 
-`prebuilds/<platform>-<arch>/` holds the addon and, in a packaged build, the
-AgentCore library and ripgrep. The library is otherwise looked up through the
-`library` option, `METACODES_AGENTCORE_LIB`, `METACODES_AGENTCORE_SDK/lib`,
-and the SDK from an existing upstream CLI install under
-`~/.local/opt/metacodes` or `~/.local/opt/metacodes-dev`. To use a standalone
-SDK archive, set `METACODES_AGENTCORE_SDK` to the extracted bundle directory.
+`run(prompt, { contextBlocks: [{ label, text }] })` and `stream` copy the blocks
+when called. Each Run accepts up to 32 blocks, a 64-byte label and 64 KiB of text
+per block, and 256 KiB total, measured in UTF-8.
+
+A host tool receives `handler(args, { sessionId, runId, callId, signal })`.
+Forward the signal to cancellable work. `await stream.abort()` targets that
+stream's Run. `await session.abort()` targets the current Run. The returned
+`status` is `cancelled` after an aborted terminal result, `already_finished`
+when the Run has finished, or `failed` with a diagnostic. If a handler never
+returns, cancelling releases the native waiter. Terminating a Node Worker
+detaches its callbacks and lets native cleanup finish on the running thread.
+
+Protocol 64-bit integers, including Run IDs, token counts, byte counts and
+permission generations, are JavaScript `bigint`. Turn counts and tool counts
+are numbers. Use a JSON replacer that converts bigints to decimal strings when
+logging a complete event or session description.
+
+```js
+const { missingArtifacts } = await session.exportCheckpoint(snapshotDirectory);
+const restored = await otherRuntime.restoreSession(snapshotDirectory, {
+  workspace: freshWorkspace, provider: 'anthropic', apiKey,
+});
+const next = await restored.run('Continue');
+```
+
+Export an idle Session to a new directory with an existing parent. The v1
+directory contains `manifest.json`, `checkpoint.bin` and `blobs/<sha256>.blob`.
+It captures committed artifacts for this logical Session, including any retained
+from earlier turns. `missingArtifacts` lists the `sha256:` artifact IDs that the
+checkpoint references but the Session store no longer holds; after restore,
+`ReadArtifact` reports those as not found. An export or restore holds an
+operating-system lock beside its target. Another live writer is refused, and a
+writer that exited without releasing it does not block a retry. Transfer the
+whole directory. Restore checks file sizes and
+digests, uses the supplied host options and resumes after the checkpoint's last
+Run ID. Register any host tools on the receiving Runtime. The restore report
+is available as `restored.restoreReport`. The checkpoint limit is 64 MiB,
+with up to 128 MiB per blob and 1 GiB of blobs per Session.
+
+The installed package locates the addon and shared library in the platform
+package. Keep that package's native files unpacked when bundling an Electron
+application; its library, helpers and manifest must remain accessible as files.
 
 ## Building and testing
 
 ```sh
 zig build agentcore:bundle -Dtarget=aarch64-macos -Doptimize=ReleaseSafe
-node sdk/node/scripts/build.js --bundle zig-out/agentcore/<resolved target>
+npm ci --prefix sdk/node --ignore-scripts
+node sdk/node/scripts/build.js --bundle zig-out/agentcore/<resolved-target>
 node --test sdk/node/test/metacodes.test.js
 ```
 
-`scripts/build.js` compiles the addon with `zig cc` against the running Node's
-own headers (`NODE_INCLUDE_DIR` overrides) and copies the bundle's library and
-ripgrep beside it. The tests drive the real library against a scripted local
-mock provider; no network, no API key.
-
-## Status
-
-Experimental, like the AgentCore ABI it wraps. Not yet published to npm.
-Windows is not supported yet (the addon uses `dlopen` and pthreads). Skills,
-MCP, checkpoints, goals and teams exist in the ABI but are not wrapped yet;
-contributions welcome.
+The build uses Zig 0.16 and the pinned Node-API headers. Set `NODE_INCLUDE_DIR`
+to use an existing set of headers. Consumer tests run against a local scripted
+provider. Set `METACODES_NODE_SDK_REQUIRE_LIB=1` to require the native build.

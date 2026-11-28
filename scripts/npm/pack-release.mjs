@@ -24,10 +24,10 @@ import {
   versionFromTag,
 } from "./release-metadata.mjs";
 
-const [archives, tag, commit, destination] = process.argv.slice(2);
+const [archives, tag, commit, destination, addons] = process.argv.slice(2);
 assert(
-  archives && tag && commit && destination,
-  "usage: node pack-release.mjs <archives-dir> <fork-tag> <commit> <out-dir>",
+  archives && tag && commit && destination && addons,
+  "usage: node pack-release.mjs <archives-dir> <fork-tag> <commit> <out-dir> <addons-dir>",
 );
 assert(process.platform !== "win32", "pack on a POSIX filesystem to preserve executable bits");
 const version = versionFromTag(tag);
@@ -119,6 +119,13 @@ function packPlatform(work, archive, platform, expected) {
   const { binary_abi_version: abiVersion, binary_abi_revision: abiRevision } = manifest.contract;
   assert(Number.isSafeInteger(abiVersion) && Number.isSafeInteger(abiRevision), "missing SDK ABI");
   verifyBundle(root, manifest, ["manifest.json"]);
+  const addonFile = path.join(addons, target + ".node");
+  const addonDigest = sha256(addonFile);
+  assert.deepEqual(JSON.parse(readFileSync(addonFile + ".json")), {
+    version, commit, target, revision: abiRevision, sha256: addonDigest,
+  });
+  mkdirSync(path.join(root, "node"));
+  copyFileSync(addonFile, path.join(root, "node", "metacodes.node"));
 
   const topLevel = new Set(
     manifest.files.map(({ path }) => path.split("/")[0]).sort(),
@@ -131,7 +138,7 @@ function packPlatform(work, archive, platform, expected) {
     os: [os],
     cpu: [cpu],
     ...(libc ? { libc: [libc] } : {}),
-    files: ["manifest.json", ...topLevel],
+    files: ["manifest.json", "node", ...topLevel],
     preferUnplugged: true,
     ...repositoryMetadata,
     publishConfig,
@@ -141,7 +148,8 @@ function packPlatform(work, archive, platform, expected) {
   mkdirSync(verify);
   execFileSync("tar", ["-xf", path.join(out, expected.filename), "-C", verify]);
   const unpacked = path.join(verify, "package");
-  verifyBundle(unpacked, manifest, ["manifest.json", "package.json", "LICENSE"]);
+  verifyBundle(unpacked, manifest, ["manifest.json", "package.json", "LICENSE", "node/metacodes.node"]);
+  assert.equal(sha256(path.join(unpacked, "node/metacodes.node")), addonDigest);
   assert.equal(sha256(path.join(unpacked, "manifest.json")), sha256(manifestPath));
   if (os !== "win32") {
     for (const file of manifest.files) {
@@ -161,8 +169,12 @@ function packMain(work) {
     { package: packages[index].name, target },
   ]));
   writeJson(path.join(root, "platforms.json"), byHost);
-  for (const file of ["index.js", "index.d.ts", "README.md"]) {
+  for (const file of ["index.js", "index.d.ts", "location.js", "README.md"]) {
     copyFileSync(new URL(`./main/${file}`, import.meta.url), path.join(root, file));
+  }
+  copyFileSync(new URL("../../sdk/node/checkpoint.js", import.meta.url), path.join(root, "checkpoint.js"));
+  for (const extension of ["js", "d.ts"]) {
+    copyFileSync(new URL(`../../sdk/node/index.${extension}`, import.meta.url), path.join(root, `binding.${extension}`));
   }
   pack(root, mainTarball, {
     name: mainPackage,
@@ -175,7 +187,7 @@ function packMain(work) {
       ".": { types: "./index.d.ts", default: "./index.js" },
       "./package.json": "./package.json",
     },
-    files: ["index.js", "index.d.ts", "platforms.json"],
+    files: ["index.js", "index.d.ts", "location.js", "binding.js", "binding.d.ts", "checkpoint.js", "platforms.json"],
     keywords: ["agent", "agent-runtime", "agentcore", "sdk", "c-abi", "zig"],
     ...repositoryMetadata,
     engines: { node: ">=18" },
@@ -211,6 +223,7 @@ function checkInstallation(work, abiRevision) {
   assert.equal(metadata.repository.url, config.repository);
   assert.deepEqual(metadata.optionalDependencies, optionalDependencies);
   const bundle = requireInstalled(mainPackage).resolve();
+  new (requireInstalled(mainPackage).Runtime)({ tools: [] }).close();
   assert.equal(bundle.package, hostPackage.name);
   assert.equal(bundle.target, hostTarget);
   assert.equal(bundle.version, version);

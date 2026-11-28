@@ -7,18 +7,27 @@ export const DEFAULT_TOOLS: readonly string[];
 /** One AgentCore observation event: a single key (the tag) and its payload. */
 export type AgentEvent = Record<string, unknown>;
 
+export interface ToolContext {
+  sessionId: string;
+  runId: bigint;
+  callId: bigint;
+  signal: AbortSignal;
+}
+
+export type CancelResult = { status: 'cancelled' | 'already_finished' } | { status: 'failed'; diagnostic: string };
+
 export interface Tool<Args = Record<string, unknown>> {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  handler: (args: Args) => unknown | Promise<unknown>;
+  handler: (args: Args, context: ToolContext) => unknown | Promise<unknown>;
 }
 
 export function tool<Args = Record<string, unknown>>(spec: {
   name: string;
   description?: string;
   inputSchema?: Record<string, unknown>;
-  handler: (args: Args) => unknown | Promise<unknown>;
+  handler: (args: Args, context: ToolContext) => unknown | Promise<unknown>;
 }): Tool<Args>;
 
 export class UiRequest {
@@ -37,7 +46,7 @@ export class UiRequest {
  * safe to display: redacted and bounded.
  */
 export interface ModelError {
-  run_id: number;
+  run_id: bigint;
   category:
     | 'authentication' | 'permission' | 'payment_required' | 'not_found' | 'invalid_request'
     | 'context_window' | 'rate_limited' | 'overloaded' | 'server_error' | 'timeout'
@@ -48,21 +57,22 @@ export interface ModelError {
   http_status: number | null;
   request_id: string | null;
   retry: 'retryable' | 'not_retryable' | 'unknown';
-  retry_after_ms: number | null;
+  retry_after_ms: bigint | null;
   attempts: number;
   truncated: boolean;
 }
 
 export interface RunResult {
+  runId: bigint;
   text: string;
   stopReason: string;
   turns: number;
   toolCalls: number;
   usage: {
-    input_tokens: number;
-    output_tokens: number;
-    cache_read_input_tokens: number;
-    cache_creation_input_tokens: number;
+    input_tokens: bigint;
+    output_tokens: bigint;
+    cache_read_input_tokens: bigint;
+    cache_creation_input_tokens: bigint;
   };
   segments: { disposition: string; group: number; text: string }[];
   inputAccepted: number;
@@ -96,6 +106,7 @@ export interface SessionOptions {
 }
 
 export interface RunOptions {
+  contextBlocks?: readonly { label: string; text: string }[];
   maxTurns?: number;
   /** Revision 28: re-issues after a broken-off stream, beyond each request's own one (#461), 0 to 8 (default 0). */
   streamRetryBudget?: number;
@@ -104,23 +115,47 @@ export interface RunOptions {
 
 export interface EventStream extends AsyncIterable<AgentEvent> {
   result: Promise<RunResult>;
-  abort(): void;
+  abort(): Promise<CancelResult>;
+}
+
+export interface SessionDescription extends Record<string, unknown> {
+  session_id: string;
+  model: string;
+  last_run_id: bigint;
+  last_compact_id: bigint;
+  checkpoint_generation: bigint;
+  policy_generation: bigint;
+  catalog_generation: bigint;
+  conversation: { message_count: bigint; compact_boundary: bigint };
+}
+
+export interface CheckpointExport {
+  missingArtifacts: string[];
+}
+
+export interface RestoreReport extends Record<string, unknown> {
+  session_id: string;
+  checkpoint_generation: bigint;
+  policy_generation: bigint;
+  catalog_generation: bigint;
 }
 
 export class Session {
+  readonly restoreReport: RestoreReport | null;
+  exportCheckpoint(directory: string): Promise<CheckpointExport>;
   readonly runtime: Runtime;
   model: string;
   run(prompt: string, options?: RunOptions): Promise<RunResult>;
-  stream(prompt: string, options?: { maxTurns?: number; streamRetryBudget?: number }): EventStream;
-  abort(): void;
+  stream(prompt: string, options?: Omit<RunOptions, 'onEvent'>): EventStream;
+  abort(): Promise<CancelResult>;
   submit(text: string): number;
   /** Revision 25: replace the provider credential in place, also mid-Run. */
   updateCredential(apiKey: string): void;
-  describe(): Record<string, unknown>;
+  describe(): SessionDescription;
   setModel(model: string): void;
   setPermissionMode(mode: NonNullable<SessionOptions['permissionMode']>): void;
   /** Revision 27: drop the user message at a 1-based position and everything after it. */
-  rewindToUserMessage(position: number): void;
+  rewindToUserMessage(position: bigint | number): void;
   close(): void;
 }
 
@@ -129,6 +164,7 @@ export class Runtime {
   readonly tools: string[];
   readonly hostTools: Tool<any>[];
   session(model: string, options?: SessionOptions): Session;
+  restoreSession(directory: string, options?: SessionOptions): Promise<Session>;
   close(): void;
 }
 

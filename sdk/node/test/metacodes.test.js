@@ -8,12 +8,17 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { Worker } = require('node:worker_threads');
+const { spawn } = require('node:child_process');
+const { once } = require('node:events');
+const { createHash } = require('node:crypto');
 
-const metacodes = require('..');
+const sdkName = process.env.AGENT_SDK_TEST_INSTALLED ? '@zogien/agent-sdk' : '..';
+const metacodes = require(sdkName);
 const { startMockProvider } = require('./mock_provider');
 
 const addon = path.join(__dirname, '..', 'prebuilds', `${process.platform}-${process.arch}`, 'metacodes.node');
-const available = fs.existsSync(addon) && metacodes.candidateLibraryPaths().some((candidate) => fs.existsSync(candidate));
+const available = !!process.env.AGENT_SDK_TEST_INSTALLED || (fs.existsSync(addon) && metacodes.candidateLibraryPaths().some((candidate) => fs.existsSync(candidate)));
 const skip = !available && process.env.METACODES_NODE_SDK_REQUIRE_LIB !== '1'
   ? 'addon or AgentCore library not built; see README.md'
   : false;
@@ -59,10 +64,87 @@ test('a text run returns the final answer, events and usage', { skip }, async (t
   assert.equal(result.text, 'hello from the mock');
   assert.equal(result.stopReason, 'end_turn');
   assert.equal(result.turns, 1);
-  assert.equal(result.usage.input_tokens, 11);
+  assert.equal(result.usage.input_tokens, 11n);
   assert.ok(tags.includes('text_chunk'));
   assert.ok(tags.includes('output_segment_end'));
   assert.match(JSON.stringify(provider.requests[0].messages), /say hello/);
+});
+
+test('context blocks reach the provider and wide protocol fields retain every bit', { skip }, async (t) => {
+  const provider = await withProvider(t, [['text', 'ok']]);
+  const { session } = open(t, { tools: [] }, provider, workspace(t));
+  const blocks = [{ label: 'Document', text: '原始内容' }];
+  const runId = 9007199254740993n;
+  session._nextRunId = runId;
+  const events = [];
+  const run = session.run('go', { contextBlocks: blocks, onEvent: event => events.push(event) });
+  blocks[0].text = '调用后替换';
+  assert.equal((await run).runId, runId);
+  assert.equal(session.describe().last_run_id, runId);
+  assert.ok(events.some(event => event.run_state?.run_id === runId));
+  assert.match(JSON.stringify(provider.requests[0]), /原始内容/);
+  assert.doesNotMatch(JSON.stringify(provider.requests[0]), /调用后替换/);
+  await assert.rejects(session.run('go', { contextBlocks: [{ label: 'a', text: '字'.repeat(22000) }] }), RangeError);
+  assert.equal(provider.requests.length, 1);
+});
+
+test('checkpoint restores history, Run identity and readable tool artifacts in a fresh workspace', { skip }, async (t) => {
+  const bytes = 'x'.repeat(180000) + 'portable-result';
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const provider = await withProvider(t, [
+    ['tool', 'large', {}], ['text', 'remember this response'],
+    ['tool', 'ReadArtifact', { artifact_id: 'sha256:' + sha256, offset: 180000, limit: 15 }], ['echo'],
+  ]);
+  const large = metacodes.tool({ name: 'large', handler: () => bytes });
+  const config = { tools: ['ReadArtifact'], hostTools: [large] };
+  const { session, runtime } = open(t, config, provider, workspace(t), { permissionMode: 'full_access' });
+  const id = session.describe().session_id;
+  session._nextRunId = 9007199254740993n;
+  await session.run('first conversation turn');
+  assert.match(JSON.stringify(provider.requests[1].messages), new RegExp(sha256));
+  const snapshot = path.join(workspace(t), 'snapshot');
+  const exported = session.exportCheckpoint(snapshot);
+  await assert.rejects(session.run('busy'), /export/);
+  assert.deepEqual(await exported, { missingArtifacts: [] });
+  await assert.rejects(session.exportCheckpoint(snapshot), /already exists/);
+  runtime.close();
+  const fresh = new metacodes.Runtime(config);
+  t.after(() => fresh.close());
+  const options = { workspace: workspace(t), apiKey: 'new-key', baseUrl: provider.baseUrl, permissionMode: 'full_access' };
+  const restored = await fresh.restoreSession(snapshot, options);
+  assert.equal(restored.restoreReport.session_id, id);
+  const run = await restored.run('read the saved artifact');
+  assert.match(run.text, /"data":"portable-result"/);
+  assert.equal(run.runId, 9007199254740994n);
+  assert.match(JSON.stringify(provider.requests[2].messages), /remember this response/);
+  const file = path.join(snapshot, 'blobs', sha256 + '.blob');
+  fs.writeFileSync(file, 'tampered');
+  await assert.rejects(fresh.restoreSession(snapshot, options), /integrity/);
+});
+
+test('checkpoint export reports an artifact the session references but no longer stores', { skip }, async (t) => {
+  const bytes = 'y'.repeat(180000) + 'vanished-result';
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const provider = await withProvider(t, [['tool', 'large', {}], ['text', 'kept a reference']]);
+  const large = metacodes.tool({ name: 'large', handler: () => bytes });
+  const root = workspace(t);
+  const { session } = open(t, { tools: ['ReadArtifact'], hostTools: [large] }, provider, root, { permissionMode: 'full_access' });
+  await session.run('make a large result');
+  const id = session.describe().session_id;
+  fs.rmSync(path.join(root, '.metacodes', 'agentcore', 'sessions', id, 'tool-results', 'sha256', sha256 + '.blob'));
+  const snapshot = path.join(workspace(t), 'snapshot');
+  assert.deepEqual(await session.exportCheckpoint(snapshot), { missingArtifacts: ['sha256:' + sha256] });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(snapshot, 'manifest.json'))).blobs, []);
+});
+
+test('checkpoint export ignores artifact receipts quoted in conversation text', { skip }, async (t) => {
+  const example = JSON.stringify({
+    schema_version: 'metacodes.tool-result-projection.v1', projection: 'artifact', artifact_id: 'sha256:' + 'a'.repeat(64),
+  });
+  const provider = await withProvider(t, [['text', example]]);
+  const { session } = open(t, { tools: [] }, provider, workspace(t));
+  assert.equal((await session.run(example)).toolCalls, 0);
+  assert.deepEqual(await session.exportCheckpoint(path.join(workspace(t), 'snapshot')), { missingArtifacts: [] });
 });
 
 test('a model failure reaches the result and a later success clears it', { skip }, async (t) => {
@@ -99,10 +181,10 @@ test('a stream cut after thinking is sent again under the budget (Revision 28)',
   assert.equal(provider.requests.length, 2);
   assert.deepEqual(provider.requests[1], provider.requests[0]);
   const payloads = (tag) => events.filter((event) => tag in event).map((event) => event[tag]);
-  assert.deepEqual(payloads('thinking_discarded'), [{ index: 0, turn: 1, group: 0, bytes: 17 }]);
+  assert.deepEqual(payloads('thinking_discarded'), [{ index: 0, turn: 1, group: 0, bytes: 17n }]);
   // One failed stream of at most three: the first attempt, the request's own
   // re-issue (#461) and the budget's one, after the short backoff.
-  assert.deepEqual(payloads('retry_notice'), [{ attempt: 1, max: 3, delay_ms: 500 }]);
+  assert.deepEqual(payloads('retry_notice'), [{ attempt: 1, max: 3, delay_ms: 500n }]);
   assert.deepEqual(result.segments.map((segment) => segment.disposition), ['discarded', 'final']);
 });
 
@@ -121,8 +203,8 @@ test('without a budget a request cut twice after thinking ends the Run', { skip 
   assert.equal(provider.requests.length, 2);
   assert.deepEqual(provider.requests[1], provider.requests[0]);
   const payloads = (tag) => events.filter((event) => tag in event).map((event) => event[tag]);
-  assert.deepEqual(payloads('thinking_discarded'), [{ index: 0, turn: 1, group: 0, bytes: 17 }]);
-  assert.deepEqual(payloads('retry_notice'), [{ attempt: 1, max: 2, delay_ms: 500 }]);
+  assert.deepEqual(payloads('thinking_discarded'), [{ index: 0, turn: 1, group: 0, bytes: 17n }]);
+  assert.deepEqual(payloads('retry_notice'), [{ attempt: 1, max: 2, delay_ms: 500n }]);
   assert.equal(result.modelError.attempts, 2);
   await assert.rejects(session.run('think', { streamRetryBudget: 9 }), RangeError);
   assert.equal(provider.requests.length, 2);
@@ -182,7 +264,8 @@ test('Runtime points RG_BIN at the ripgrep staged beside the library', { skip },
   t.after(() => { if (saved === undefined) delete process.env.RG_BIN; else process.env.RG_BIN = saved; });
   const runtime = new metacodes.Runtime({ tools: ['Grep'] });
   t.after(() => runtime.close());
-  const staged = path.join(__dirname, '..', 'prebuilds', `${process.platform}-${process.arch}`, 'rg');
+  const bin = metacodes.resolve ? metacodes.resolve().binDir : path.join(__dirname, '..', 'prebuilds', `${process.platform}-${process.arch}`);
+  const staged = path.join(bin, process.platform === 'win32' ? 'rg.exe' : 'rg');
   if (!fs.existsSync(staged)) return t.skip('no ripgrep staged');
   assert.ok(process.env.RG_BIN && fs.realpathSync(process.env.RG_BIN) === fs.realpathSync(staged));
 });
@@ -277,9 +360,9 @@ test('a shell tool requires a shell policy', { skip }, async (t) => {
 test('describe and setModel', { skip }, async (t) => {
   const provider = await withProvider(t, []);
   const { session } = open(t, { tools: [] }, provider, workspace(t));
-  assert.match(JSON.stringify(session.describe()), /mock-model/);
+  assert.equal(session.describe().model, 'mock-model');
   session.setModel('mock-model-2');
-  assert.match(JSON.stringify(session.describe()), /mock-model-2/);
+  assert.equal(session.describe().model, 'mock-model-2');
 });
 
 test('unknown built-in tools are rejected', { skip }, () => {
@@ -400,6 +483,73 @@ test('abort stops the active Run', { skip, timeout: TIMEOUT }, async (t) => {
   assert.equal(provider.requests.length, 1);
 });
 
+test('abort targets its Run and wakes an unresolved host call', { skip, timeout: TIMEOUT }, async (t) => {
+  let started;
+  const pending = new Promise(resolve => { started = resolve; });
+  let finish;
+  const wait = metacodes.tool({ name: 'wait', handler: (_, context) => {
+    started(context);
+    return new Promise(resolve => { finish = resolve; });
+  } });
+  const provider = await withProvider(t, [['tool', 'wait', {}], ['text', 'next']]);
+  const { session } = open(t, { tools: [], hostTools: [wait] }, provider, workspace(t), { permissionMode: 'full_access' });
+  const sessionId = session.describe().session_id;
+  const stream = session.stream('start', { contextBlocks: [{ label: 'host', text: 'call context' }] });
+  const context = await pending;
+  assert.equal(context.sessionId, sessionId);
+  assert.equal(context.runId, 1n);
+  assert.equal(context.callId, 1n);
+  const cancelled = stream.abort();
+  assert.equal(context.signal.aborted, true);
+  assert.deepEqual(await cancelled, { status: 'cancelled' });
+  assert.equal((await stream.result).stopReason, 'aborted');
+  const next = session.run('again');
+  finish('late answer');
+  assert.deepEqual(await stream.abort(), { status: 'already_finished' });
+  assert.equal((await next).text, 'next');
+});
+
+test('abort immediately after starting a Run reaches admission', { skip, timeout: TIMEOUT }, async (t) => {
+  const provider = await withProvider(t, [['text', 'ok']]);
+  const { session } = open(t, { tools: [] }, provider, workspace(t));
+  const stream = session.stream('go');
+  assert.deepEqual(await stream.abort(), { status: 'cancelled' });
+  assert.equal((await stream.result).stopReason, 'aborted');
+});
+
+test('a host tool can await cancellation of its own Run', { skip, timeout: TIMEOUT }, async (t) => {
+  let observed;
+  const finished = new Promise(resolve => { observed = resolve; });
+  const cancel = metacodes.tool({ name: 'cancel', async handler(_, context) {
+    const result = await session.abort();
+    observed([result.status, context.signal.aborted]);
+  } });
+  const provider = await withProvider(t, [['tool', 'cancel', {}]]);
+  const { session } = open(t, { tools: [], hostTools: [cancel] }, provider, workspace(t), { permissionMode: 'full_access' });
+  assert.equal((await session.run('cancel from tool')).stopReason, 'aborted');
+  assert.deepEqual(await finished, ['cancelled', true]);
+});
+
+test('terminating Workers with pending host callbacks leaves the process usable', { skip, timeout: TIMEOUT }, async (t) => {
+  const provider = await withProvider(t, [['tool', 'wait', {}], ['tool', 'wait', {}], ['text', 'still alive']]);
+  const workers = Array.from({ length: 2 }, () => new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { Runtime, tool } = require(workerData.sdk);
+    const wait = tool({ name: 'wait', handler() {
+      parentPort.postMessage('waiting');
+      return new Promise(() => {});
+    } });
+    new Runtime({ tools: [], hostTools: [wait] }).session('mock-model', workerData.options).run('go');
+  `, { eval: true, workerData: { sdk: require.resolve(sdkName), options: {
+    baseUrl: provider.baseUrl, workspace: workspace(t), apiKey: 'test', permissionMode: 'full_access',
+  } } }));
+  t.after(() => Promise.all(workers.map(w => w.terminate())));
+  await Promise.all(workers.map(w => once(w, 'message')));
+  assert.deepEqual(await Promise.all(workers.map(w => w.terminate())), [1, 1]);
+  const { session } = open(t, { tools: [] }, provider, workspace(t));
+  assert.equal((await session.run('go')).text, 'still alive');
+});
+
 test('close during a Run is refused and keeps the handle', { skip, timeout: TIMEOUT }, async (t) => {
   const provider = await withProvider(t, [['tool', 'wait', {}], ['text', 'done']]);
   const { wait, started, release } = blockingTool();
@@ -420,6 +570,43 @@ test('close during a Run is refused and keeps the handle', { skip, timeout: TIME
 function writeScript(root, ...names) {
   return [...names.map((name) => ['tool', 'Write', { file_path: path.join(root, name), content: name }]), ['text', 'done']];
 }
+
+test('a checkpoint lock left by an exited writer does not block a retry, but a live writer does', { skip, timeout: TIMEOUT }, async (t) => {
+  const provider = await withProvider(t, [['echo']]);
+  const { session } = open(t, {}, provider, workspace(t));
+  const parent = workspace(t);
+  const crashed = path.join(parent, 'crashed');
+  fs.writeFileSync(crashed + '.lock', '');
+  assert.deepEqual(await session.exportCheckpoint(crashed), { missingArtifacts: [] });
+  assert.equal(fs.existsSync(crashed + '.lock'), false);
+
+  const held = path.join(parent, 'held');
+  const holder = spawn(process.execPath, ['-e', `
+    const { Runtime } = require(${JSON.stringify(require.resolve(sdkName))});
+    new Runtime({ tools: [] })._native.lockPath(${JSON.stringify(held + '.lock')});
+    process.stdout.write('locked\\n');
+    setInterval(() => {}, 1000);
+  `], { stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => holder.kill('SIGKILL'));
+  const [ready] = await once(holder.stdout, 'data');
+  assert.equal(String(ready).trim(), 'locked');
+  await assert.rejects(session.exportCheckpoint(held), /locked by another writer/);
+  assert.equal(fs.existsSync(held), false);
+  holder.kill('SIGKILL');
+  await once(holder, 'exit');
+  assert.deepEqual(await session.exportCheckpoint(held), { missingArtifacts: [] });
+
+  const id = session.describe().session_id;
+  const home = workspace(t);
+  const sessions = path.join(home, '.metacodes', 'agentcore', 'sessions');
+  fs.mkdirSync(sessions, { recursive: true });
+  fs.writeFileSync(path.join(sessions, id + '.restore.lock'), '');
+  const fresh = new metacodes.Runtime();
+  t.after(() => fresh.close());
+  const restored = await fresh.restoreSession(held, { workspace: home, baseUrl: provider.baseUrl, apiKey: 'test-key' });
+  assert.equal(restored.restoreReport.session_id, id);
+  assert.equal(fs.existsSync(path.join(sessions, id + '.restore.lock')), false);
+});
 
 test('allow and deny rules decide without asking', { skip, timeout: TIMEOUT }, async (t) => {
   const root = workspace(t);
@@ -449,18 +636,18 @@ test('rewindToUserMessage reruns an edited message', { skip, timeout: TIMEOUT },
   const provider = await withProvider(t, [['text', 'first answer'], ['text', 'second answer'], ['text', 'edited answer']]);
   const { session } = open(t, { tools: [] }, provider, workspace(t));
   await session.run('alpha-prompt');
-  const position = session.describe().conversation.message_count + 1;
+  const position = session.describe().conversation.message_count + 1n;
   await session.run('beta-prompt');
-  assert.equal(session.describe().conversation.message_count, 4);
+  assert.equal(session.describe().conversation.message_count, 4n);
   // An assistant reply and a position past the end are refused with their
   // own codes and change nothing.
   assert.throws(() => session.rewindToUserMessage(2), { code: 'NOT_USER_MESSAGE' });
   assert.throws(() => session.rewindToUserMessage(9), { code: 'MESSAGE_POSITION_OUT_OF_RANGE' });
   assert.throws(() => session.rewindToUserMessage(0), TypeError);
-  assert.equal(session.describe().conversation.message_count, 4);
+  assert.equal(session.describe().conversation.message_count, 4n);
   assert.equal(provider.requests.length, 2);
   session.rewindToUserMessage(position);
-  assert.equal(session.describe().conversation.message_count, 2);
+  assert.equal(session.describe().conversation.message_count, 2n);
   const result = await session.run('gamma-edited');
   assert.equal(result.text, 'edited answer');
   const rerun = JSON.stringify(provider.requests[2].messages);
@@ -478,7 +665,7 @@ test('allowSession is asked once per target', { skip, timeout: TIMEOUT }, async 
     onUiRequest: (request) => { asked.push(request.data.candidate.target); return request.allowSession(); },
   });
   await session.run('write three times');
-  assert.deepEqual(asked, [path.join(root, 'a.txt'), path.join(root, 'b.txt')]);
+  assert.deepEqual(asked.map(value => path.normalize(value)), [path.join(root, 'a.txt'), path.join(root, 'b.txt')]);
 });
 
 test('an ask_question answer reaches the model', { skip, timeout: TIMEOUT }, async (t) => {

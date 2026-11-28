@@ -1,3 +1,5 @@
+export * from "./binding";
+
 export interface ResolveOptions {
   /** A `process.platform` value. Defaults to this machine's. */
   platform?: string;

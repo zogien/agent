@@ -41,6 +41,13 @@ jobs:
           version: 0.16.0
       - name: Build SDK archive
         run: zig build archive -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSafe
+      - run: npm ci --prefix sdk/node --ignore-scripts
+      - run: node sdk/node/scripts/build.js --target ${{ matrix.target }} --release --artifact zig-out/node-addons
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: node-addon-${{ matrix.target }}
+          path: zig-out/node-addons/
+          if-no-files-found: error
       - name: Upload SDK archive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -88,11 +95,17 @@ jobs:
           path: ${{ runner.temp }}/agentcore-archives
       - name: Test npm publication retries
         run: node --test scripts/npm/publish-release.test.mjs
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: node-addon-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/node-addons
       - name: Pack and install-check npm packages
         run: >-
           node scripts/npm/pack-release.mjs
           "$RUNNER_TEMP/agentcore-archives" "$GITHUB_REF_NAME"
           "$(git rev-parse HEAD)" "$RUNNER_TEMP/agentcore-npm"
+          "$RUNNER_TEMP/node-addons"
       - name: Upload npm packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -100,10 +113,38 @@ jobs:
           path: ${{ runner.temp }}/agentcore-npm/
           if-no-files-found: error
 
+  test-npm:
+    name: Install SDK and run Electron (${{ matrix.runner }})
+    needs: pack-npm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: npm-packages
+          path: ${{ runner.temp }}/agentcore-npm
+      - name: Install Electron test host
+        shell: bash
+        run: npm install --prefix "$RUNNER_TEMP/desktop" --no-audit --no-fund electron@44.7.0
+      - name: Verify packed SDK in Node Workers and Electron main
+        shell: bash
+        run: node scripts/npm/test-install.mjs "$RUNNER_TEMP/agentcore-npm" "$RUNNER_TEMP/desktop/node_modules/electron"
+
   publish-npm:
     name: Publish SDK to npm
     if: github.repository == 'zogien/agent'
-    needs: [publish, pack-npm]
+    needs: [publish, test-npm]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     concurrency:
