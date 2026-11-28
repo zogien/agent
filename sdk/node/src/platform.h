@@ -20,6 +20,11 @@ typedef CONDITION_VARIABLE cond_t;
 #define cond_destroy(c) ((void)(c))
 #define THREAD_RESULT unsigned __stdcall
 #define THREAD_DONE 0
+static int pin_addon(void *address) {
+    HMODULE module;
+    return GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN | GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                              (LPCWSTR)address, &module) != 0;
+}
 static int spawn_thread(unsigned (__stdcall *fn)(void *), void *arg) {
     uintptr_t handle = _beginthreadex(NULL, 8 * 1024 * 1024, fn, arg, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
     if (!handle) return -1;
@@ -56,6 +61,10 @@ typedef pthread_cond_t cond_t;
 #define cond_destroy(c) pthread_cond_destroy(c)
 #define THREAD_RESULT void *
 #define THREAD_DONE NULL
+static int pin_addon(void *address) {
+    Dl_info info;
+    return dladdr(address, &info) && dlopen(info.dli_fname, RTLD_NOW | RTLD_LOCAL) != NULL;
+}
 static int spawn_thread(void *(*fn)(void *), void *arg) {
     pthread_t thread;
     pthread_attr_t attr;

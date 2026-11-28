@@ -7,18 +7,27 @@ export const DEFAULT_TOOLS: readonly string[];
 /** One AgentCore observation event: a single key (the tag) and its payload. */
 export type AgentEvent = Record<string, unknown>;
 
+export interface ToolContext {
+  sessionId: string;
+  runId: bigint;
+  callId: bigint;
+  signal: AbortSignal;
+}
+
+export type CancelResult = { status: 'cancelled' | 'already_finished' } | { status: 'failed'; diagnostic: string };
+
 export interface Tool<Args = Record<string, unknown>> {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
-  handler: (args: Args) => unknown | Promise<unknown>;
+  handler: (args: Args, context: ToolContext) => unknown | Promise<unknown>;
 }
 
 export function tool<Args = Record<string, unknown>>(spec: {
   name: string;
   description?: string;
   inputSchema?: Record<string, unknown>;
-  handler: (args: Args) => unknown | Promise<unknown>;
+  handler: (args: Args, context: ToolContext) => unknown | Promise<unknown>;
 }): Tool<Args>;
 
 export class UiRequest {
@@ -106,7 +115,7 @@ export interface RunOptions {
 
 export interface EventStream extends AsyncIterable<AgentEvent> {
   result: Promise<RunResult>;
-  abort(): void;
+  abort(): Promise<CancelResult>;
 }
 
 export class Session {
@@ -114,7 +123,7 @@ export class Session {
   model: string;
   run(prompt: string, options?: RunOptions): Promise<RunResult>;
   stream(prompt: string, options?: Omit<RunOptions, 'onEvent'>): EventStream;
-  abort(): void;
+  abort(): Promise<CancelResult>;
   submit(text: string): number;
   /** Revision 25: replace the provider credential in place, also mid-Run. */
   updateCredential(apiKey: string): void;

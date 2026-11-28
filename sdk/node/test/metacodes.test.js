@@ -8,6 +8,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { Worker } = require('node:worker_threads');
+const { once } = require('node:events');
 
 const metacodes = require('..');
 const { startMockProvider } = require('./mock_provider');
@@ -416,6 +418,60 @@ test('abort stops the active Run', { skip, timeout: TIMEOUT }, async (t) => {
   const result = await run;
   assert.equal(result.stopReason, 'aborted');
   assert.equal(provider.requests.length, 1);
+});
+
+test('abort targets its Run and wakes an unresolved host call', { skip, timeout: TIMEOUT }, async (t) => {
+  let started;
+  const pending = new Promise(resolve => { started = resolve; });
+  let finish;
+  const wait = metacodes.tool({ name: 'wait', handler: (_, context) => {
+    started(context);
+    return new Promise(resolve => { finish = resolve; });
+  } });
+  const provider = await withProvider(t, [['tool', 'wait', {}], ['text', 'next']]);
+  const { session } = open(t, { tools: [], hostTools: [wait] }, provider, workspace(t), { permissionMode: 'full_access' });
+  const sessionId = session.describe().session_id;
+  const stream = session.stream('start', { contextBlocks: [{ label: 'host', text: 'call context' }] });
+  const context = await pending;
+  assert.equal(context.sessionId, sessionId);
+  assert.equal(context.runId, 1n);
+  assert.equal(context.callId, 1n);
+  const cancelled = stream.abort();
+  assert.equal(context.signal.aborted, true);
+  assert.deepEqual(await cancelled, { status: 'cancelled' });
+  assert.equal((await stream.result).stopReason, 'aborted');
+  const next = session.run('again');
+  finish('late answer');
+  assert.deepEqual(await stream.abort(), { status: 'already_finished' });
+  assert.equal((await next).text, 'next');
+});
+
+test('abort immediately after starting a Run reaches admission', { skip, timeout: TIMEOUT }, async (t) => {
+  const provider = await withProvider(t, [['text', 'ok']]);
+  const { session } = open(t, { tools: [] }, provider, workspace(t));
+  const stream = session.stream('go');
+  assert.deepEqual(await stream.abort(), { status: 'cancelled' });
+  assert.equal((await stream.result).stopReason, 'aborted');
+});
+
+test('terminating Workers with pending host callbacks leaves the process usable', { skip, timeout: TIMEOUT }, async (t) => {
+  const provider = await withProvider(t, [['tool', 'wait', {}], ['tool', 'wait', {}], ['text', 'still alive']]);
+  const workers = Array.from({ length: 2 }, () => new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { Runtime, tool } = require(workerData.sdk);
+    const wait = tool({ name: 'wait', handler() {
+      parentPort.postMessage('waiting');
+      return new Promise(() => {});
+    } });
+    new Runtime({ tools: [], hostTools: [wait] }).session('mock-model', workerData.options).run('go');
+  `, { eval: true, workerData: { sdk: require.resolve('..'), options: {
+    baseUrl: provider.baseUrl, workspace: workspace(t), apiKey: 'test', permissionMode: 'full_access',
+  } } }));
+  t.after(() => Promise.all(workers.map(w => w.terminate())));
+  await Promise.all(workers.map(w => once(w, 'message')));
+  assert.deepEqual(await Promise.all(workers.map(w => w.terminate())), [1, 1]);
+  const { session } = open(t, { tools: [] }, provider, workspace(t));
+  assert.equal((await session.run('go')).text, 'still alive');
 });
 
 test('close during a Run is refused and keeps the handle', { skip, timeout: TIMEOUT }, async (t) => {

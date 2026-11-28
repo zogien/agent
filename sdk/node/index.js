@@ -127,15 +127,6 @@ function errorText(error) {
   }
 }
 
-/** Answer a blocked native call exactly once; a second answer would touch freed memory. */
-function once(handle, fallbackStatus) {
-  let done = false;
-  return (status, text) => {
-    if (done) return;
-    done = true;
-    native.completeCall(handle, status ?? fallbackStatus, text ?? '');
-  };
-}
 
 /** Define a tool implemented in JavaScript. `handler(args)` may be async. */
 function tool({ name, description, inputSchema, handler }) {
@@ -248,24 +239,7 @@ class Runtime {
       description: hostTool.description,
       schema: JSON.stringify(hostTool.inputSchema),
     }));
-    this._handle = this._native.runtimeCreate(this.tools, specs, (kind, handle, index, args) => {
-      this._dispatchTool(handle, index, args);
-    }, preview);
-  }
-
-  _dispatchTool(handle, index, args) {
-    const finish = once(handle, HOST_FAILED);
-    const hostTool = this.hostTools[index];
-    Promise.resolve()
-      .then(() => hostTool.handler(args ? JSON.parse(args) : {}))
-      .then((value) => (typeof value === 'string' ? value : toJson(value, `${hostTool.name} result`)))
-      .then(
-        (text) => finish(HOST_OK, text),
-        (error) => finish(HOST_FAILED, errorText(error)),
-      )
-      // Last resort: the call is answered whatever went wrong above; once()
-      // ignores a second answer.
-      .catch(() => finish(HOST_FAILED, 'Error'));
+    this._handle = this._native.runtimeCreate(this.tools, specs, preview);
   }
 
   /** Create a Session; see README.md for the options. */
@@ -347,17 +321,28 @@ class Session {
         ask,
         deny,
       },
-      (kind, a, b) => this._dispatch(kind, a, b),
+      (...args) => this._dispatch(...args),
     );
   }
 
-  _dispatch(kind, a, b) {
-    if (kind === 'event') {
-      this._event(a);
-    } else if (kind === 'ui') {
-      this._uiRequest(a, b);
-    } else if (kind === 'done') {
-      this._done(a);
+  _dispatch(kind, a, b, index, runId, sessionId) {
+    if (kind === 'event') this._event(a);
+    else if (kind === 'done') this._done(a);
+    else if (kind === 'ui' || kind === 'tool') {
+      const active = this._active;
+      if (!active || active.runId !== runId || active.cancel) return;
+      const controller = new AbortController();
+      active.calls.set(a, controller);
+      const finish = (status, text) => {
+        if (!active.calls.delete(a) || this._active !== active || !this._handle) return;
+        this._native.completeCall(this._handle, a, status, text);
+      };
+      if (kind === 'ui') return this._uiRequest(finish, b, active);
+      const hostTool = this.runtime.hostTools[index];
+      Promise.resolve()
+        .then(() => hostTool.handler(JSON.parse(b || '{}'), { sessionId, runId, callId: a, signal: controller.signal }))
+        .then(value => typeof value === 'string' ? value : toJson(value, hostTool.name + ' result'))
+        .then(text => finish(HOST_OK, text), error => finish(HOST_FAILED, errorText(error)));
     }
   }
 
@@ -386,8 +371,7 @@ class Session {
     }
   }
 
-  _uiRequest(handle, json) {
-    const finish = once(handle, UI_UNAVAILABLE);
+  _uiRequest(finish, json, active) {
     if (!this._onUiRequest) return finish(UI_UNAVAILABLE, '');
     let request;
     try {
@@ -404,7 +388,7 @@ class Session {
       .then(
         (text) => (text == null ? finish(UI_UNAVAILABLE, '') : finish(UI_ANSWERED, text)),
         (error) => {
-          if (this._active && !this._active.error) this._active.error = error;
+          if (this._active === active && !active.cancel && !active.error) active.error = error;
           finish(UI_UNAVAILABLE, '');
         },
       )
@@ -415,6 +399,12 @@ class Session {
     const active = this._active;
     this._active = null;
     if (!active) return;
+    active.calls.clear();
+    if (active.finishCancel) {
+      const result = outcome.status ? { status: 'failed', diagnostic: outcome.diagnostic || outcome.statusName }
+        : { status: outcome.stopReasonCode === 3 ? 'cancelled' : 'already_finished' };
+      active.finishCancel(result);
+    }
     if (active.error) return active.reject(active.error);
     if (outcome.status !== 0) {
       return active.reject(new AgentCoreError('session.run_input', outcome.status, outcome.statusName, outcome.diagnostic));
@@ -455,7 +445,7 @@ class Session {
     }
     return new Promise((resolve, reject) => {
       const runId = this._nextRunId++;
-      this._active = { runId, state: new RunState(), onEvent, resolve, reject, error: null };
+      this._active = { runId, state: new RunState(), onEvent, resolve, reject, error: null, calls: new Map() };
       try {
         this._native.sessionRun(this._handle, runId, String(prompt), turns, budget, copyContextBlocks(contextBlocks));
       } catch (error) {
@@ -475,14 +465,16 @@ class Session {
       queue.push(event);
       if (wake) { wake(); wake = null; }
     };
+    const previous = this._active;
     const result = this.run(prompt, { ...options, onEvent: push }).then(
       (value) => { finished = true; if (wake) wake(); return value; },
       (error) => { finished = true; failure = error; if (wake) wake(); throw error; },
     );
+    const active = this._active !== previous ? this._active : null;
     result.catch(() => {});
     return {
       result,
-      abort: () => this.abort(),
+      abort: () => this._abort(active),
       async *[Symbol.asyncIterator]() {
         while (true) {
           if (queue.length) { yield queue.shift(); continue; }
@@ -494,9 +486,22 @@ class Session {
     };
   }
 
-  /** Ask the active Run to stop; it settles with stopReason 'aborted'. */
   abort() {
-    if (this._active && this._handle) this._native.sessionAbort(this._handle, this._active.runId);
+    return this._abort(this._active);
+  }
+
+  _abort(active) {
+    if (!active || this._active !== active) return Promise.resolve({ status: 'already_finished' });
+    if (active.cancel) return active.cancel;
+    try {
+      this._native.sessionAbort(this._handle, active.runId);
+    } catch (error) {
+      return Promise.resolve({ status: 'failed', diagnostic: error.message });
+    }
+    active.cancel = new Promise(resolve => { active.finishCancel = resolve; });
+    for (const controller of active.calls.values()) controller.abort();
+    active.calls.clear();
+    return active.cancel;
   }
 
   /** Hand the active Run more user text; returns its acceptance sequence. */
