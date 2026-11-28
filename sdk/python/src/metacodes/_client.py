@@ -441,7 +441,7 @@ class Runtime:
         self.close()
 
 
-RunInput = Union[str, Sequence[Dict[str, Any]]]
+RunInput = Union[str, Dict[str, str], Sequence[Dict[str, Any]]]
 
 
 def _string(value):
@@ -492,6 +492,11 @@ def _permission_rules(arena, allow, ask, deny):
 
 def _run_input(arena, prompt):
     value = n.RunInput(struct_size=ctypes.sizeof(n.RunInput))
+    if isinstance(prompt, dict):
+        if prompt != {"type": "goal_continuation"}:
+            raise ValueError("invalid tagged run input")
+        value.kind_code = n.RUN_INPUT_GOAL_CONTINUATION
+        return value
     if isinstance(prompt, (str, bytes)):
         value.kind_code = n.RUN_INPUT_TEXT
         value.text = arena.view(prompt)
@@ -740,6 +745,9 @@ class Session:
         *,
         max_turns: Optional[int] = None,
         stream_retry_budget: int = 0,
+        time_context: str = "system",
+        utc_offset_minutes: int = 0,
+        context_blocks: Sequence[dict] = (),
         on_event: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> RunResult:
         """Run one prompt to completion and return the final answer.
@@ -775,6 +783,23 @@ class Session:
             if not 0 <= budget <= n.MAX_STREAM_RETRY_BUDGET:
                 raise ValueError("stream_retry_budget must be between 0 and %d" % n.MAX_STREAM_RETRY_BUDGET)
             options.stream_retry_budget = budget
+            if time_context not in n.TIME_CONTEXT:
+                raise ValueError("unknown time_context")
+            if type(utc_offset_minutes) is not int or abs(utc_offset_minutes) > 840 or (
+                time_context != "utc_offset" and utc_offset_minutes != 0
+            ):
+                raise ValueError("utc_offset_minutes must be within -840..840 and zero unless time_context is utc_offset")
+            options.time_context_code = n.TIME_CONTEXT[time_context]
+            options.utc_offset_minutes = utc_offset_minutes
+            if context_blocks:
+                if len(context_blocks) > 32:
+                    raise ValueError("context_blocks allows up to 32 blocks")
+                blocks = arena.keep((n.ContextBlock * len(context_blocks))())
+                for block, source in zip(blocks, context_blocks):
+                    block.struct_size = ctypes.sizeof(n.ContextBlock)
+                    block.label = arena.view(_string(source["label"]))
+                    block.text = arena.view(_string(source["text"]))
+                options.context_blocks, options.context_block_count = blocks, len(blocks)
             result = n.RunResult(struct_size=ctypes.sizeof(n.RunResult))
             diagnostic = n.OwnedBytes()
             run_id = self._next_run_id
@@ -834,7 +859,8 @@ class Session:
         )
 
     def stream(
-        self, prompt: RunInput, *, max_turns: Optional[int] = None, stream_retry_budget: int = 0
+        self, prompt: RunInput, *, max_turns: Optional[int] = None, stream_retry_budget: int = 0,
+        time_context: str = "system", utc_offset_minutes: int = 0, context_blocks: Sequence[dict] = (),
     ) -> "EventStream":
         """Run ``prompt`` on a background thread and iterate over its events.
 
@@ -842,7 +868,8 @@ class Session:
         ``stream.result`` holds the :class:`RunResult`. ``stream_retry_budget``
         is :meth:`run`'s.
         """
-        return EventStream(self, prompt, max_turns, stream_retry_budget)
+        return EventStream(self, prompt, max_turns, stream_retry_budget, time_context=time_context,
+                           utc_offset_minutes=utc_offset_minutes, context_blocks=context_blocks)
 
     def abort(self) -> None:
         """Ask the active Run to stop; it returns with stop_reason 'aborted'."""
@@ -898,6 +925,51 @@ class Session:
             self._lib.take_bytes(output)
         self._lib.check("session.describe", status, diagnostic)
         return json.loads(self._lib.take_bytes(output).decode("utf-8"))
+
+    def get_goal(self) -> Optional[dict]:
+        output = n.OwnedBytes()
+        diagnostic = n.OwnedBytes()
+        with self._handle_lock:
+            status = self._lib.api.goal.contents.get(self._handle, ctypes.byref(output), ctypes.byref(diagnostic))
+        document = self._lib.take_bytes(output)
+        self._lib.check("goal.get", status, diagnostic)
+        return json.loads(document)["goal"]
+
+    def set_goal(self, objective: str, token_budget: int = 0) -> None:
+        arena = n.ViewArena()
+        goal = n.GoalSet(struct_size=ctypes.sizeof(n.GoalSet), objective=arena.view(_string(objective)),
+                         token_budget=_integer64(token_budget))
+        diagnostic = n.OwnedBytes()
+        with self._handle_lock:
+            status = self._lib.api.goal.contents.set(self._handle, ctypes.byref(goal), ctypes.byref(diagnostic))
+        self._lib.check("goal.set", status, diagnostic)
+
+    def update_goal(self, *, objective: Optional[str] = None, token_budget: Optional[int] = None,
+                    action: Optional[str] = None) -> None:
+        arena = n.ViewArena()
+        update = n.GoalUpdate(struct_size=ctypes.sizeof(n.GoalUpdate))
+        if objective is not None:
+            update.fields |= 1
+            update.objective = arena.view(_string(objective))
+        if token_budget is not None:
+            update.fields |= 2
+            update.token_budget = _integer64(token_budget)
+        if action is not None:
+            update.fields |= 4
+            actions = {"pause": 1, "activate": 2, "complete": 3, "block": 4}
+            if action not in actions:
+                raise ValueError("unknown goal action")
+            update.action_code = actions[action]
+        diagnostic = n.OwnedBytes()
+        with self._handle_lock:
+            status = self._lib.api.goal.contents.update(self._handle, ctypes.byref(update), ctypes.byref(diagnostic))
+        self._lib.check("goal.update", status, diagnostic)
+
+    def clear_goal(self) -> None:
+        diagnostic = n.OwnedBytes()
+        with self._handle_lock:
+            status = self._lib.api.goal.contents.clear(self._handle, ctypes.byref(diagnostic))
+        self._lib.check("goal.clear", status, diagnostic)
 
     def set_prompt_profile(self, profile: Optional[Sequence[dict]]) -> None:
         arena = n.ViewArena()
@@ -1018,7 +1090,8 @@ class EventStream:
     """Iterator over one Run's events; ``result`` is set when it ends."""
 
     def __init__(
-        self, session: Session, prompt: RunInput, max_turns: Optional[int], stream_retry_budget: int = 0
+        self, session: Session, prompt: RunInput, max_turns: Optional[int], stream_retry_budget: int = 0,
+        *, time_context: str = "system", utc_offset_minutes: int = 0, context_blocks: Sequence[dict] = (),
     ) -> None:
         self.result: Optional[RunResult] = None
         self._queue: "queue.Queue[Any]" = queue.Queue()
@@ -1031,6 +1104,9 @@ class EventStream:
                     prompt,
                     max_turns=max_turns,
                     stream_retry_budget=stream_retry_budget,
+                    time_context=time_context,
+                    utc_offset_minutes=utc_offset_minutes,
+                    context_blocks=context_blocks,
                     on_event=self._queue.put,
                 )
             except BaseException as error:

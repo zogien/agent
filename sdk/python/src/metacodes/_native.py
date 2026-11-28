@@ -80,6 +80,8 @@ STOP_REASONS = {
 }
 RUN_INPUT_TEXT = 1
 RUN_INPUT_MULTIMODAL = 3
+RUN_INPUT_GOAL_CONTINUATION = 4
+TIME_CONTEXT = {"system": 0, "utc_offset": 1, "off": 2}
 EVENT_CONTINUE = 0
 EVENT_FATAL = 1
 UI_ANSWERED = 0
@@ -300,11 +302,18 @@ class RunInput(ctypes.Structure):
     ]
 
 
+class ContextBlock(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32), ("reserved0", ctypes.c_uint32),
+        ("label", BytesView), ("text", BytesView), ("reserved", ctypes.c_uint64 * 2),
+    ]
+
+
 class RunOptions(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
         ("max_turns", ctypes.c_uint32),
-        ("context_blocks", ctypes.c_void_p),
+        ("context_blocks", ctypes.POINTER(ContextBlock)),
         ("context_block_count", ctypes.c_uint64),
         ("time_context_code", ctypes.c_uint32),
         ("utc_offset_minutes", ctypes.c_int32),
@@ -435,6 +444,30 @@ class SessionControlApi(ctypes.Structure):
     ]
 
 
+class GoalSet(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32), ("reserved0", ctypes.c_uint32), ("objective", BytesView),
+        ("token_budget", ctypes.c_uint64), ("reserved", ctypes.c_uint64 * 3),
+    ]
+
+
+class GoalUpdate(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32), ("fields", ctypes.c_uint32), ("objective", BytesView),
+        ("token_budget", ctypes.c_uint64), ("action_code", ctypes.c_uint32), ("reserved0", ctypes.c_uint32),
+        ("reserved", ctypes.c_uint64 * 3),
+    ]
+
+
+class GoalApi(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32), ("reserved0", ctypes.c_uint32), ("get", SessionDescribeFn),
+        ("set", ctypes.CFUNCTYPE(ctypes.c_uint32, _P, ctypes.POINTER(GoalSet), _DIAG)),
+        ("update", ctypes.CFUNCTYPE(ctypes.c_uint32, _P, ctypes.POINTER(GoalUpdate), _DIAG)),
+        ("clear", ctypes.CFUNCTYPE(ctypes.c_uint32, _P, _DIAG)),
+    ]
+
+
 def _slot_table(name: str, slots: int) -> type:
     fields = [("struct_size", ctypes.c_uint32), ("reserved0", ctypes.c_uint32)]
     fields += [("slot%d" % index, ctypes.c_void_p) for index in range(slots)]
@@ -445,7 +478,6 @@ def _slot_table(name: str, slots: int) -> type:
 # slots exactly like the header's metask_agentcore_api_v1_is_compatible.
 SkillApi = _slot_table("SkillApi", 3)
 McpApi = _slot_table("McpApi", 4)
-GoalApi = _slot_table("GoalApi", 4)
 TeamApi = _slot_table("TeamApi", 2)
 
 

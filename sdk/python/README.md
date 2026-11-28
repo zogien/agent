@@ -64,6 +64,17 @@ of integer byte counts with the keys `hard_bytes`, `soft_bytes`, `input_cap_byte
 `provider_request_cap_bytes`, `provider_result_cap_bytes`, `tool_result_cap_bytes`,
 `mcp_result_cap_bytes`, `audit_reserve_bytes` and `terminal_reserve_bytes`.
 
+Use `time_context="system"` (default), `"utc_offset"` or `"off"` on either
+`run` or `stream`. For a fixed offset, supply `utc_offset_minutes` as an
+integer from -840 to 840. The other modes require zero. Add per-Run context
+with `context_blocks=[{"label": "Review", "text": "Check the new importer"}]`.
+
+An idle Session exposes `get_goal()`, `set_goal(objective, token_budget=0)`,
+`update_goal(objective=..., token_budget=..., action=...)` and `clear_goal()`.
+Supply only the fields you want to update. A zero budget removes the cap.
+Pass `{"type": "goal_continuation"}` to `run` or `stream` to continue an
+active goal with runtime-generated input. Goal counters are Python integers.
+
 ## Tools written in Python
 
 ```python
@@ -191,5 +202,5 @@ network, no API key. Without a library they skip, unless
 
 Experimental, like the AgentCore ABI it wraps: the package pins one exact ABI
 revision and follows it. Not yet published to PyPI; build the wheel as above.
-Windows is not covered by CI. Manual compaction, skills, MCP, checkpoints, goals and teams exist in
+Windows is not covered by CI. Manual compaction, skills, MCP, checkpoints and teams exist in
 the ABI but are not wrapped yet; contributions welcome.
