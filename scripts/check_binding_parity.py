@@ -9,7 +9,7 @@ CONFIGS = ("runtime_config_v1", "session_host_config_v1", "session_create_config
 
 
 def inventory(header):
-    header = re.sub(r"/\*.*?\*/", "", header, flags=re.S)
+    header = re.sub(r"/\*.*?\*/|//[^\n]*", " ", header, flags=re.S)
     structs = {name: body for body, name in re.findall(
         r"typedef\s+struct(?:\s+\w+)?\s*\{([^{}]*)\}\s*metask_agentcore_(\w+)\s*;", header
     )}
@@ -23,7 +23,19 @@ def inventory(header):
 
 
 def declarations(body):
-    return set(re.findall(r"\b(\w+)\s*(?:\[\d+\])?\s*;", body))
+    fields = set()
+    for declaration in body.split(";"):
+        declaration = declaration.strip()
+        if not declaration:
+            continue
+        if "(" in declaration:
+            field = re.fullmatch(r"[\w\s*]+\(\s*\*\s*(\w+)\s*\)\s*\(.*\)", declaration, re.S)
+        else:
+            field = re.fullmatch(r"[\w\s*]+?\b(\w+)\s*(?:\[\s*\w+\s*\])?", declaration)
+        if not field:
+            raise ValueError(f"unrecognized ABI member declaration: {declaration}")
+        fields.add(field[1])
+    return fields
 
 
 def scoped(source, prefix):

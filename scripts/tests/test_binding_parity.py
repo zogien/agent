@@ -1,5 +1,7 @@
 import json
 import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +15,7 @@ class BindingParityTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         for filename in (
+            "scripts/check_binding_parity.py",
             "sdk/metask/agentcore.h", "sdk/zig/types.zig", "sdk/zig/root.zig",
             "sdk/rust/src/lib.rs", "sdk/rust/src/raw.rs", "sdk/node/abi-coverage.json",
             "sdk/node/index.js", "sdk/node/src/addon.c", "sdk/node/index.d.ts", "sdk/python/abi-coverage.json",
@@ -32,15 +35,29 @@ class BindingParityTest(unittest.TestCase):
         path.write_text(json.dumps(manifest))
         self.assertEqual(check(self.root), ["node mcp.describe: missing from manifest"])
 
-    def test_new_header_entry(self):
+    def assert_new_team_entry_is_missing(self, declaration):
         path = self.root / "sdk/metask/agentcore.h"
         path.write_text(path.read_text().replace(
             "} metask_agentcore_team_api_v1;",
-            "    metask_agentcore_team_poll_fn_v1 poll_once;\n} metask_agentcore_team_api_v1;",
-        ))
-        errors = check(self.root)
-        for language in ("zig", "rust", "node", "python"):
-            self.assertTrue(any(error.startswith(language) and "poll_once" in error for error in errors))
+            f"    {declaration}\n}} metask_agentcore_team_api_v1;",
+        ).replace("ASSERT_SIZE(metask_agentcore_team_api_v1, 24)", "ASSERT_SIZE(metask_agentcore_team_api_v1, 32)"))
+        result = subprocess.run(
+            [sys.executable, "scripts/check_binding_parity.py"], cwd=self.root, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        for language in ("node", "python"):
+            self.assertIn(f"{language} team.poll_once: missing from manifest", result.stderr.splitlines())
+        for language in ("zig", "rust"):
+            self.assertIn(f"{language} missing TeamApi.poll_once", result.stderr.splitlines())
+
+    def test_new_typedef_entry(self):
+        self.assert_new_team_entry_is_missing("metask_agentcore_team_poll_fn_v1 poll_once;")
+
+    def test_new_inline_function_pointer_entry(self):
+        self.assert_new_team_entry_is_missing(
+            "uint32_t (*poll_once)(metask_agentcore_session *, metask_agentcore_owned_bytes_v1 *,\n"
+            "                          metask_agentcore_owned_bytes_v1 *);"
+        )
 
     def test_unknown_api(self):
         for language in ("node", "python"):
