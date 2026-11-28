@@ -35,6 +35,7 @@ pub const ContextWindowNumbers = struct {
     input_limit: ?u64 = null,
     /// Upper bound on prompt + completion tokens.
     total_limit: ?u64 = null,
+    unspecified_limit: ?u64 = null,
     /// The rejected request's prompt (input) tokens, when reported.
     input_actual: ?u64 = null,
     /// The rejected request's prompt + completion tokens, when reported.
@@ -43,7 +44,7 @@ pub const ContextWindowNumbers = struct {
     completion: ?u64 = null,
 
     pub fn isEmpty(self: ContextWindowNumbers) bool {
-        return self.input_limit == null and self.total_limit == null and
+        return self.input_limit == null and self.total_limit == null and self.unspecified_limit == null and
             self.input_actual == null and self.total_actual == null and self.completion == null;
     }
 
@@ -109,6 +110,15 @@ pub fn parseContextWindowNumbers(body: []const u8) ContextWindowNumbers {
         // "longer than the model's context length (1048576 tokens)"
         if (numberAfter(body, at + "context length".len)) |limit| out.total_limit = limit.value;
     }
+    const exceeds = "input exceeds the context limit";
+    if (indexOfIgnoreCase(body, 0, exceeds)) |at| {
+        const tail = std.mem.trimStart(u8, body[at + exceeds.len ..], " \t");
+        if (tail.len > 0 and tail[0] == '(') {
+            if (readDigits(tail, 1)) |n| {
+                if (std.ascii.startsWithIgnoreCase(tail[n.end..], " tokens)")) out.unspecified_limit = n.value;
+            }
+        }
+    }
     for ([_][]const u8{ "from the input messages", "in the messages" }) |phrase| {
         if (indexOfIgnoreCase(body, 0, phrase)) |at| {
             if (numberBefore(body, at)) |v| out.input_actual = out.input_actual orelse v;
@@ -135,18 +145,15 @@ fn indexOfGreaterThan(body: []const u8, from: usize) ?usize {
 
 const Number = struct { value: u64, end: usize };
 
-/// Skip at most a few non-digit bytes (" of ", " is ", " (", " a total of ")
-/// and read one digit run. Thousands separators (`,` / `_`) inside the run are
-/// tolerated; anything further away is another sentence.
 fn numberAfter(body: []const u8, from: usize) ?Number {
-    const MAX_SKIP = 24;
-    var i = from;
-    var skipped: usize = 0;
-    while (i < body.len and !std.ascii.isDigit(body[i])) : (i += 1) {
-        skipped += 1;
-        if (skipped > MAX_SKIP) return null;
+    var tail = std.mem.trimStart(u8, body[from..], " \t:(");
+    for ([_][]const u8{ "a total of ", "is ", "of " }) |prefix| {
+        if (std.ascii.startsWithIgnoreCase(tail, prefix)) {
+            tail = std.mem.trimStart(u8, tail[prefix.len..], " \t(");
+            break;
+        }
     }
-    return readDigits(body, i);
+    return readDigits(body, body.len - tail.len);
 }
 
 /// Walk back over at most a few non-digit bytes ("tokens ", " (") to the digit
@@ -278,6 +285,25 @@ test "overflow numbers: Gemini input token count wording" {
     const n = parseContextWindowNumbers("{\"error\":{\"message\":\"The input token count (1100000) exceeds the maximum number of tokens allowed (1048576).\"}}");
     try std.testing.expectEqual(@as(?u64, 1100000), n.input_actual);
     try std.testing.expectEqual(@as(?u64, 1048576), n.input_limit);
+}
+
+test "overflow numbers: context limit reports its value without an input count or a window kind" {
+    for ([_][]const u8{
+        "Input exceeds the context limit (1048568 tokens).",
+        "Input exceeds the context limit (1048568 tokens). Request ID: 987654",
+    }) |message| {
+        try std.testing.expect(isContextWindowExceeded(message));
+        const numbers = parseContextWindowNumbers(message);
+        try std.testing.expectEqual(@as(?u64, 1048568), numbers.unspecified_limit);
+        try std.testing.expectEqual(@as(?u64, null), numbers.inputActual(32_000));
+        try std.testing.expectEqual(@as(?u64, null), numbers.inputCap(32_000));
+    }
+    for ([_][]const u8{
+        "Input exceeds the context limit. Request ID: 987654",
+        "Input exceeds the context limit (987654 request ID)",
+        "context length exceeded. Request ID: 987654",
+        "maximum context length exceeded. Request ID: 987654",
+    }) |message| try std.testing.expect(parseContextWindowNumbers(message).isEmpty());
 }
 
 test "overflow numbers: thousands separators and unknown wording" {

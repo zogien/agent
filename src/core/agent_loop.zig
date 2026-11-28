@@ -2422,7 +2422,8 @@ fn runCounted(
     // next optimistic preview. This is run-scoped on purpose: it suppresses
     // immediate retry storms without persisting model-specific estimates into
     // the transcript or across process revisions.
-    var compact_summary_reserve_tokens: usize = 0;
+    var compact_history: CompactHistory = .{};
+    var reported_window: error_class.ContextWindowNumbers = .{};
 
     outer_turn: while (turns < opts.max_turns +| kg_coverage_borrowed_turns +| learning_borrowed_turns +| verifier_borrowed_turns) : (turns += 1) {
         // 开头检查 abort
@@ -2741,10 +2742,9 @@ fn runCounted(
         // 下限 MIN_AUTO_COMPACT_THRESHOLD:避免异常小值导致每 turn 都 compact。
         const synthetic_user_input = if (turns == 0) opts.synthetic_user_input else null;
         const model_switch_compact = if (turns == 0) opts.model_switch_compact else null;
-        var previous_model_compact_outcome: AutoCompactOutcome = .not_needed;
         if (fast_action == null) if (model_switch_compact) |msc| {
             if (!std.mem.eql(u8, msc.previous_model, provider.model()) and msc.previous_context_window > msc.current_context_window) {
-                previous_model_compact_outcome = try runAutoCompactControlled(
+                const previous_model_compact_outcome = try runAutoCompactControlled(
                     conversation,
                     provider,
                     effective_system_prompt,
@@ -2766,52 +2766,19 @@ fn runCounted(
                     allocator,
                     opts.tasks,
                     permission_ctx.hooks,
-                    &compact_summary_reserve_tokens,
+                    &compact_history,
                     opts.request_gate,
                     opts.abort,
                     opts.goal_meter,
                     opts.compaction_control,
-                    false,
+                    .automatic,
                 );
                 if (compactStopReason(previous_model_compact_outcome, opts.abort)) |stop_reason| {
                     return finishRun(backend, sess, trace_id, depth, .{ .stop_reason = stop_reason, .turns = turns, .tool_calls = total_tool_calls });
                 }
             }
         };
-        if (fast_action == null and previous_model_compact_outcome != .skipped_no_savings) {
-            const pre_sampling_compact = try runAutoCompactControlled(
-                conversation,
-                provider,
-                effective_system_prompt,
-                opts.inject_user_context,
-                synthetic_user_input,
-                provider_tool_defs,
-                opts.model_override,
-                null,
-                opts.auto_compact_threshold,
-                opts.auto_compact_keep_recent,
-                "pre_sampling_pending_turn_threshold",
-                false,
-                backend,
-                sess,
-                trace_id,
-                depth,
-                turns + 1,
-                &context_warning_emitted,
-                allocator,
-                opts.tasks,
-                permission_ctx.hooks,
-                &compact_summary_reserve_tokens,
-                opts.request_gate,
-                opts.abort,
-                opts.goal_meter,
-                opts.compaction_control,
-                false,
-            );
-            if (compactStopReason(pre_sampling_compact, opts.abort)) |stop_reason| {
-                return finishRun(backend, sess, trace_id, depth, .{ .stop_reason = stop_reason, .turns = turns, .tool_calls = total_tool_calls });
-            }
-        }
+        var sampling_checked = false;
 
         log.info("agent", "turn {d}/{d} starting (msgs={d})", .{ turns + 1, opts.max_turns, conversation.messages.items.len });
 
@@ -2928,7 +2895,8 @@ fn runCounted(
         // 1+2. 构造当前这一轮的 API 请求并发送。若建连/收头阶段或 SSE error
         // 明确报 context-window-exceeded,按 Rust compact recovery 路径逐步删最老
         // history 后重试。同一 turn 内重试,不把恢复尝试计成新 turn。
-        var context_recovery = ContextRecoveryState{ .cap = @max(conversation.len(), 1) };
+        var context_recovery = ContextRecoveryState{ .cap = @max(conversation.len(), 1), .numbers = reported_window };
+        defer reported_window = context_recovery.numbers;
         if (fast_action == null) model_error.beginRequest();
         // Re-issues of this model request under `STREAM_RETRIES_PER_REQUEST`
         // (#461): a fresh allowance for every request, so an earlier turn's
@@ -3098,22 +3066,60 @@ fn runCounted(
                 // dropping one; the provider's own limit decides the request.
                 log.warn("agent", "image wire cap exceeded by non-trimmable images: over_by={d} cap={d}", .{ image_trim.remaining_over_cap, opts.image_request_bytes_cap });
             }
-            var api_messages = try buildApiMessagesWithFeatures(conversation, allocator, opts.inject_user_context, synthetic_user_input, .{
-                .harnessmm = harnessmm_enabled,
-                .rsi = opts.rsi,
-            });
+            const notes = OptimizationNotes{ .harnessmm = harnessmm_enabled, .rsi = opts.rsi };
+            var api_messages = try buildApiMessagesWithFeatures(conversation, allocator, opts.inject_user_context, synthetic_user_input, notes);
             defer freeApiMessages(&api_messages, allocator);
-            if (opts.request_gate) |gate| {
-                const max_input_tokens = serializedRequestInputTokenReserve(
-                    allocator,
+            const estimate = try estimateApiRequest(allocator, provider, api_messages.items, effective_system_prompt, provider_tool_defs, opts.model_override);
+            context_recovery.pending_tokens = estimate.tokens;
+            if (!sampling_checked) {
+                sampling_checked = true;
+                const before_version = conversation.mutation_version;
+                const sampling_compact = try runAutoCompactControlled(
+                    conversation,
                     provider,
-                    api_messages.items,
                     effective_system_prompt,
+                    opts.inject_user_context,
+                    synthetic_user_input,
                     provider_tool_defs,
                     opts.model_override,
-                ) catch std.math.maxInt(u64);
+                    null,
+                    opts.auto_compact_threshold,
+                    opts.auto_compact_keep_recent,
+                    "pre_sampling_pending_turn_threshold",
+                    false,
+                    backend,
+                    sess,
+                    trace_id,
+                    depth,
+                    turns + 1,
+                    &context_warning_emitted,
+                    allocator,
+                    opts.tasks,
+                    permission_ctx.hooks,
+                    &compact_history,
+                    opts.request_gate,
+                    opts.abort,
+                    opts.goal_meter,
+                    opts.compaction_control,
+                    .{ .pending = .{ .tokens = context_recovery.pending_tokens, .notes = notes } },
+                );
+                if (compactStopReason(sampling_compact, opts.abort)) |stop_reason| {
+                    return finishRun(backend, sess, trace_id, depth, .{ .stop_reason = stop_reason, .turns = turns, .tool_calls = total_tool_calls });
+                }
+                if (conversation.mutation_version != before_version) continue :request_recovery;
+            }
+            const window_pressure = context_recovery.pressure(provider, opts.model_override);
+            if (window_pressure.isAtBlockingLimit()) {
+                if (opts.abort) |signal| if (signal.isAborted())
+                    return finishRun(backend, sess, trace_id, depth, .{ .stop_reason = stopReasonForAbort(signal), .turns = turns, .tool_calls = total_tool_calls });
+                const keep = forcedAutoCompactKeep() orelse opts.auto_compact_keep_recent;
+                const reason: model_error.ContextWindow.Compaction = if (conversation.compactBoundary(keep) <= conversation.compact_boundary) .no_history else .insufficient;
+                model_error.noteWindowDecision(context_recovery.windowDetail(if (context_recovery.compact_retries == 0) .local else .provider, window_pressure.blocking_limit, reason));
+                return finishRun(backend, sess, trace_id, depth, .{ .stop_reason = .api_error, .turns = turns, .tool_calls = total_tool_calls });
+            }
+            if (opts.request_gate) |gate| {
                 if (!gate.allowsRequest(.{
-                    .max_input_tokens = max_input_tokens,
+                    .max_input_tokens = estimate.budget_reserve,
                     // Resolved through the override like the estimate above it:
                     // an admission decision made against the parent's output cap
                     // admits or refuses a child request on the wrong number.
@@ -3252,7 +3258,7 @@ fn runCounted(
                         .allocator = allocator,
                         .tasks = opts.tasks,
                         .hookset = permission_ctx.hooks,
-                        .summary_reserve_tokens = &compact_summary_reserve_tokens,
+                        .compact_history = &compact_history,
                         .request_gate = opts.request_gate,
                         .abort = opts.abort,
                         .goal_meter = opts.goal_meter,
@@ -3286,7 +3292,7 @@ fn runCounted(
                             .allocator = allocator,
                             .tasks = opts.tasks,
                             .hookset = permission_ctx.hooks,
-                            .summary_reserve_tokens = &compact_summary_reserve_tokens,
+                            .compact_history = &compact_history,
                             .request_gate = opts.request_gate,
                             .abort = opts.abort,
                             .goal_meter = opts.goal_meter,
@@ -3755,6 +3761,14 @@ fn runCounted(
                 thinking_text.clearRetainingCapacity();
                 for (reasoning_items.items) |item| allocator.free(item);
                 reasoning_items.clearRetainingCapacity();
+                const window_numbers: error_class.ContextWindowNumbers = if (stream_context_window_exceeded) blk: {
+                    const frame = stream.contextWindowNumbers();
+                    break :blk if (frame.isEmpty()) provider.lastContextWindowNumbers() else frame;
+                } else .{};
+                if (stream_context_window_exceeded and !can_recover_context_error) {
+                    context_recovery.numbers = window_numbers;
+                    model_error.noteWindowDecision(context_recovery.windowDetail(.provider, context_recovery.pressure(provider, opts.model_override).blocking_limit, .not_evaluated));
+                }
                 if (can_recover_context_error) {
                     if (!recoverContextWindowExceeded(.{
                         .conversation = conversation,
@@ -3764,10 +3778,7 @@ fn runCounted(
                         .synthetic_user_input = synthetic_user_input,
                         .tool_defs = provider_tool_defs,
                         .model_override = opts.model_override,
-                        .numbers = blk: {
-                            const from_frame = stream.contextWindowNumbers();
-                            break :blk if (from_frame.isEmpty()) provider.lastContextWindowNumbers() else from_frame;
-                        },
+                        .numbers = window_numbers,
                         .keep_recent = opts.auto_compact_keep_recent,
                         .backend = backend,
                         .sess = sess,
@@ -3779,7 +3790,7 @@ fn runCounted(
                         .allocator = allocator,
                         .tasks = opts.tasks,
                         .hookset = permission_ctx.hooks,
-                        .summary_reserve_tokens = &compact_summary_reserve_tokens,
+                        .compact_history = &compact_history,
                         .request_gate = opts.request_gate,
                         .abort = opts.abort,
                         .goal_meter = opts.goal_meter,
@@ -5209,12 +5220,12 @@ fn runCounted(
             allocator,
             opts.tasks,
             permission_ctx.hooks,
-            &compact_summary_reserve_tokens,
+            &compact_history,
             opts.request_gate,
             opts.abort,
             opts.goal_meter,
             opts.compaction_control,
-            false,
+            .automatic,
         );
         if (compactStopReason(post_tool_compact, opts.abort)) |stop_reason| {
             return finishRun(backend, sess, trace_id, depth, .{ .stop_reason = stop_reason, .turns = turns + 1, .tool_calls = total_tool_calls });
@@ -5546,7 +5557,7 @@ fn estimateNextRequestTokens(
     // 冷路径(首轮/后端不报 usage/前缀被 compact 改写):序列化真实下一请求做全量估算。
     var api_messages = try buildApiMessages(conversation, allocator, inject_user_context, synthetic_user_input);
     defer freeApiMessages(&api_messages, allocator);
-    return estimateApiRequestTokens(allocator, provider, api_messages.items, system_prompt, tool_defs, model_override);
+    return (try estimateApiRequest(allocator, provider, api_messages.items, system_prompt, tool_defs, model_override)).tokens;
 }
 
 /// 单条消息的 token 估算(usage 锚点后缀用):text/tool_use/tool_result 各 block
@@ -5668,42 +5679,24 @@ fn serializeForEstimation(
     return .{ .body = body, .image_tokens = image_tokens };
 }
 
-fn estimateApiRequestTokens(
-    allocator: std.mem.Allocator,
-    provider: provider_mod.Provider,
-    messages: []const types.ApiMessage,
-    system_prompt: ?[]const u8,
-    tool_defs: []const json_mod.ToolDefinition,
-    model_override: ?[]const u8,
-) !usize {
-    const est = try serializeForEstimation(allocator, provider, messages, system_prompt, tool_defs, model_override);
-    defer allocator.free(est.body);
-    return Conversation.estimateTokens(est.body) +| @as(usize, @intCast(est.image_tokens));
-}
+const RequestEstimate = struct {
+    tokens: usize,
+    budget_reserve: u64,
+};
 
-/// Conservative request-local input reserve used by the paid evaluation gate.
-/// Freeze both independent estimates: twice the calibrated local tokenizer
-/// estimate, or one token per two serialized UTF-8 bytes, whichever is larger.
-/// The fixed margin covers provider-side chat framing absent from the JSON.
-fn serializedRequestInputTokenReserve(
+fn estimateApiRequest(
     allocator: std.mem.Allocator,
     provider: provider_mod.Provider,
     messages: []const types.ApiMessage,
     system_prompt: ?[]const u8,
     tool_defs: []const json_mod.ToolDefinition,
     model_override: ?[]const u8,
-) !u64 {
-    // 图像经估算投影(serializeForEstimation):按 IMAGE_TOKEN_ESTIMATE 计入 estimated
-    // (随 doubled 一起获得 2x 预留),不按 base64 字节计——否则一张图就把预留推到
-    // ~百万 token,request_gate 必拒。byte_reserve 的 floor 相应基于投影后 body:
-    // provider 按 token 计费(base64 字节不进 tokenizer 语义),图的预留由
-    // IMAGE_TOKEN_ESTIMATE*2(≈2x 缩放上限)承担,不再由 wire 字节 floor 承担。
+) !RequestEstimate {
     const est = try serializeForEstimation(allocator, provider, messages, system_prompt, tool_defs, model_override);
     defer allocator.free(est.body);
-    const estimated = @as(u64, @intCast(Conversation.estimateTokens(est.body))) +| est.image_tokens;
-    const doubled_estimate = estimated *| 2;
+    const tokens = Conversation.estimateTokens(est.body) +| @as(usize, @intCast(est.image_tokens));
     const byte_reserve = (@as(u64, @intCast(est.body.len)) +| 1) / 2;
-    return @max(doubled_estimate, byte_reserve) +| 4096;
+    return .{ .tokens = tokens, .budget_reserve = @max(@as(u64, tokens) *| 2, byte_reserve) +| 4096 };
 }
 
 /// Provider-neutral identity of the exact AgentLoop request IR. Concrete
@@ -5761,6 +5754,11 @@ fn estimateNextRequestTokensOrFallback(
     };
 }
 
+const CompactHistory = struct {
+    reserve: usize = 0,
+    skipped_version: ?u64 = null,
+};
+
 const AutoCompactOutcome = enum {
     not_needed,
     compacted,
@@ -5802,10 +5800,7 @@ fn serializeToolSchemasForCache(
     return try out.toOwnedSlice(allocator);
 }
 
-/// Pressure for the model a request will actually name, bounded by any wall
-/// learned on this endpoint (core.context_caps). Every threshold in this file
-/// must come from here, never from `ContextPressure.fromModel` directly, or a
-/// learned cap silently stops applying to that one check.
+/// Compaction pressure includes the input cap learned on this endpoint.
 fn pressureFor(
     provider: provider_mod.Provider,
     model_override: ?[]const u8,
@@ -5831,6 +5826,25 @@ const ContextRecoveryState = struct {
     cap: usize,
     /// Compaction retries spent this turn (see CONTEXT_RECOVERY_COMPACT_RETRIES).
     compact_retries: u32 = 0,
+    numbers: error_class.ContextWindowNumbers = .{},
+    pending_tokens: usize = 0,
+
+    fn pressure(self: ContextRecoveryState, provider: provider_mod.Provider, model: ?[]const u8) context_pressure_mod.ContextPressure {
+        const output = provider.maxTokensFor(model);
+        const cap = self.numbers.inputCap(output);
+        return context_pressure_mod.ContextPressure.fromModelWithCap(provider.maxInputTokensFor(model), output, null, self.pending_tokens, if (cap) |n| @intCast(n) else null);
+    }
+
+    fn windowDetail(self: ContextRecoveryState, origin: model_error.ContextWindow.Origin, blocking_limit: usize, compaction: model_error.ContextWindow.Compaction) model_error.ContextWindow {
+        const n = self.numbers;
+        return .{
+            .origin = origin,
+            .estimated_input_tokens = self.pending_tokens,
+            .blocking_limit = blocking_limit,
+            .compaction = compaction,
+            .server_limit = if (n.input_limit) |v| .{ .tokens = v, .kind = .input } else if (n.total_limit) |v| .{ .tokens = v, .kind = .total } else if (n.unspecified_limit) |v| .{ .tokens = v, .kind = .unspecified } else null,
+        };
+    }
 };
 
 /// How many times one turn may answer a rejection with a summary compaction
@@ -5860,7 +5874,7 @@ const RecoveryArgs = struct {
     allocator: std.mem.Allocator,
     tasks: ?*@import("task_store.zig").TaskStore,
     hookset: ?*const hooks_mod.HookSet,
-    summary_reserve_tokens: ?*usize,
+    compact_history: ?*CompactHistory,
     request_gate: ?request_gate_mod.Gate,
     abort: ?*const AbortSignal,
     goal_meter: ?*@import("goal.zig").Meter,
@@ -5890,6 +5904,18 @@ const RecoveryArgs = struct {
 /// original task statement dropped with no summary.
 fn recoverContextWindowExceeded(args: RecoveryArgs) bool {
     const st = args.state;
+    if (!args.numbers.isEmpty()) st.numbers = args.numbers;
+    const recovered = tryRecoverContextWindow(args);
+    if (!recovered and !(if (args.abort) |signal| signal.isAborted() else false)) {
+        const keep = forcedAutoCompactKeep() orelse args.keep_recent;
+        const reason: model_error.ContextWindow.Compaction = if (args.conversation.compactBoundary(keep) <= args.conversation.compact_boundary) .no_history else if (st.compact_retries > 0) .insufficient else .not_evaluated;
+        model_error.noteWindowDecision(st.windowDetail(.provider, st.pressure(args.provider, args.model_override).blocking_limit, reason));
+    }
+    return recovered;
+}
+
+fn tryRecoverContextWindow(args: RecoveryArgs) bool {
+    const st = args.state;
     st.attempts += 1;
     if (st.attempts > st.cap) {
         log.err("agent", "context-window recovery exhausted turn={d} attempts={d}", .{ args.turn_number, st.attempts });
@@ -5903,7 +5929,7 @@ fn recoverContextWindowExceeded(args: RecoveryArgs) bool {
 
     // 1. Measure the wall.
     const anchor_before = conversation.usageAnchor();
-    const local_estimate = estimateNextRequestTokensOrFallback(args.allocator, provider, conversation, args.system_prompt, args.inject_user_context, args.synthetic_user_input, args.tool_defs, args.model_override);
+    const local_estimate = st.pending_tokens;
     const server_cap = args.numbers.inputCap(assumed_completion);
     const server_actual = args.numbers.inputActual(assumed_completion);
     const input_cap: u64 = server_cap orelse blk: {
@@ -5919,7 +5945,7 @@ fn recoverContextWindowExceeded(args: RecoveryArgs) bool {
         args.turn_number,
         st.attempts,
         model,
-        server_cap,
+        args.numbers.input_limit orelse args.numbers.total_limit orelse args.numbers.unspecified_limit,
         server_actual,
         input_cap,
         source.label(),
@@ -5931,9 +5957,7 @@ fn recoverContextWindowExceeded(args: RecoveryArgs) bool {
         pressure.auto_compact_threshold,
     });
 
-    // 2. Mark full: what was just sent is at least the wall.
-    const rejected_size: usize = @intCast(@max(server_actual orelse 0, input_cap));
-    conversation.setUsageAnchor(@max(rejected_size, 1));
+    if (server_actual) |actual| conversation.setUsageAnchor(@intCast(actual));
 
     // 3. Summary compaction, once per turn.
     if (st.compact_retries < CONTEXT_RECOVERY_COMPACT_RETRIES) {
@@ -5960,15 +5984,14 @@ fn recoverContextWindowExceeded(args: RecoveryArgs) bool {
             args.allocator,
             args.tasks,
             args.hookset,
-            args.summary_reserve_tokens,
+            args.compact_history,
             args.request_gate,
             args.abort,
             args.goal_meter,
             args.control,
-            false,
+            .automatic,
         ) catch |err| {
             log.err("agent", "context-window recovery compaction failed turn={d}: {s}", .{ args.turn_number, @errorName(err) });
-            noteUnrecoveredContextWindow(args.abort);
             return false;
         };
         switch (outcome) {
@@ -5977,7 +6000,6 @@ fn recoverContextWindowExceeded(args: RecoveryArgs) bool {
             // and recorded its own terminal: not a context-window failure.
             .aborted, .refused => return false,
             .api_error => {
-                noteUnrecoveredContextWindow(args.abort);
                 return false;
             },
             // Nothing droppable (active window already ≤ keep_recent) or the
@@ -5990,7 +6012,6 @@ fn recoverContextWindowExceeded(args: RecoveryArgs) bool {
     // The rejection stands, bounded at one compaction per turn (issue #430).
     if (args.control != null) {
         log.err("agent", "context-window recovery exhausted turn={d}: compaction could not make the request fit and trimming is disabled for durable state", .{args.turn_number});
-        noteUnrecoveredContextWindow(args.abort);
         return false;
     }
 
@@ -6017,16 +6038,6 @@ fn recoverContextWindowExceeded(args: RecoveryArgs) bool {
         .cause = "context_window_exceeded_trim",
     } });
     return true;
-}
-
-/// The Run is about to stop because the context window still refuses the
-/// request. A recovery summary request may have succeeded in between and
-/// cleared the rejection the Run will report; say what actually stopped it.
-fn noteUnrecoveredContextWindow(abort: ?*const AbortSignal) void {
-    if (abort) |signal| if (signal.isAborted()) return;
-    model_error.noteContextWindowUnrecovered(
-        "The request exceeds the model's context window and automatic compaction could not make it fit.",
-    );
 }
 
 const DurableRecovery = enum {
@@ -6080,12 +6091,12 @@ fn recoverDurableCapacity(args: RecoveryArgs) DurableRecovery {
         args.allocator,
         args.tasks,
         args.hookset,
-        args.summary_reserve_tokens,
+        args.compact_history,
         args.request_gate,
         args.abort,
         args.goal_meter,
         args.control,
-        true,
+        .durable_recovery,
     ) catch |err| {
         log.err("agent", "durable-capacity compaction failed turn={d}: {s}", .{ args.turn_number, @errorName(err) });
         control.abandonDeferred();
@@ -6206,7 +6217,7 @@ fn runAutoCompactIfNeeded(
     allocator: std.mem.Allocator,
     tasks: ?*@import("task_store.zig").TaskStore,
     hookset: ?*const hooks_mod.HookSet,
-    summary_reserve_tokens: ?*usize,
+    compact_history: ?*CompactHistory,
     request_gate: ?request_gate_mod.Gate,
     abort: ?*const AbortSignal,
     goal_meter: ?*@import("goal.zig").Meter,
@@ -6233,12 +6244,12 @@ fn runAutoCompactIfNeeded(
         allocator,
         tasks,
         hookset,
-        summary_reserve_tokens,
+        compact_history,
         request_gate,
         abort,
         goal_meter,
         null,
-        false,
+        .automatic,
     );
 }
 
@@ -6290,13 +6301,14 @@ fn runAutoCompactControlled(
     allocator: std.mem.Allocator,
     tasks: ?*@import("task_store.zig").TaskStore,
     hookset: ?*const hooks_mod.HookSet,
-    summary_reserve_tokens: ?*usize,
+    compact_history: ?*CompactHistory,
     request_gate: ?request_gate_mod.Gate,
     abort: ?*const AbortSignal,
     goal_meter: ?*@import("goal.zig").Meter,
     control: ?compaction_control.Control,
-    durable_recovery: bool,
+    check: union(enum) { automatic, durable_recovery, pending: struct { tokens: usize, notes: OptimizationNotes } },
 ) !AutoCompactOutcome {
+    const durable_recovery = check == .durable_recovery;
     var outcome: AutoCompactOutcome = .not_needed;
     // Durable pressure is the owner's to declare: it deferred the pending
     // request (durable_recovery), or it asks at this boundary.
@@ -6310,7 +6322,11 @@ fn runAutoCompactControlled(
     else
         requested_cause;
 
-    var request_tokens_before = estimateNextRequestTokensOrFallback(allocator, provider, conversation, system_prompt, inject_user_context, synthetic_user_input, tool_defs, model_override);
+    var request_tokens_before = if (check == .pending and conversation.usageAnchor() == null)
+        check.pending.tokens
+    else
+        estimateNextRequestTokensOrFallback(allocator, provider, conversation, system_prompt, inject_user_context, synthetic_user_input, tool_defs, model_override);
+    if (check == .pending) request_tokens_before = @max(request_tokens_before, check.pending.tokens);
     var pressure = pressureFor(provider, model_override, configured_threshold, request_tokens_before);
     emitContextWarningIfNeeded(backend, sess, pressure, context_warning_emitted);
     // 正常:auto=max(formula, 32K floor);micro=其下一档。强制旋钮(仅测试/power-user)存在时,
@@ -6347,7 +6363,7 @@ fn runAutoCompactControlled(
         }
     }
 
-    if (forced or durable_pressure or request_tokens_before >= auto_threshold) {
+    if (forced or durable_pressure or request_tokens_before >= auto_threshold or (check == .pending and pressure.isAtBlockingLimit())) {
         // PreCompact hook(压缩前):喂 {trigger, active_msgs, tokens},side-effect(如存盘/记忆快照),非阻塞。
         if (hookset) |hs| if (hs.hasPreCompact()) {
             const pre_json = std.fmt.allocPrint(allocator, "{{\"hook_event_name\":\"PreCompact\",\"trigger\":\"{s}\",\"active_messages\":{d},\"tokens\":{d}}}", .{ trigger_cause, conversation.activeMessages().len, request_tokens_before }) catch null;
@@ -6363,6 +6379,9 @@ fn runAutoCompactControlled(
             if (durable_pressure) if (control) |c| c.settle(.durable_capacity, .nothing_to_compact);
             return outcome;
         }
+        if (!durable_pressure) if (compact_history) |history| {
+            if (history.skipped_version == conversation.mutation_version) return .skipped_no_savings;
+        };
         // 任务锚:进行中的任务确定性追加到摘要尾(压缩有损,闭环纪律硬保底)。
         const task_anchor: ?[]u8 = if (tasks) |ts| compact_summary.buildTaskAnchor(allocator, ts) else null;
         defer if (task_anchor) |a| allocator.free(a);
@@ -6394,8 +6413,17 @@ fn runAutoCompactControlled(
             tool_defs: []const json_mod.ToolDefinition,
             model_override: ?[]const u8,
 
+            pending: ?struct { live: *const Conversation, tokens: usize, notes: OptimizationNotes },
+
             fn estimate(raw: *anyopaque, value: *const Conversation) usize {
                 const self: *@This() = @ptrCast(@alignCast(raw));
+                if (self.pending) |pending| {
+                    if (value == pending.live) return pending.tokens;
+                    var messages = buildApiMessagesWithFeatures(value, self.allocator, self.inject_user_context, self.synthetic_user_input, pending.notes) catch return std.math.maxInt(usize);
+                    defer freeApiMessages(&messages, self.allocator);
+                    const size = estimateApiRequest(self.allocator, self.provider, messages.items, self.system_prompt, self.tool_defs, self.model_override) catch return std.math.maxInt(usize);
+                    return size.tokens;
+                }
                 return estimateNextRequestTokensOrFallback(
                     self.allocator,
                     self.provider,
@@ -6409,6 +6437,7 @@ fn runAutoCompactControlled(
             }
         };
         var estimate_ctx = EstimateContext{
+            .pending = if (check == .pending) .{ .live = conversation, .tokens = check.pending.tokens, .notes = check.pending.notes } else null,
             .allocator = allocator,
             .provider = provider,
             .system_prompt = system_prompt,
@@ -6424,6 +6453,9 @@ fn runAutoCompactControlled(
             controlled_commit = .{ .control = c };
             c.begin(trigger);
         }
+        var summary_failure: model_error.Capture = .{};
+        const summary_scope = model_error.Scope.enter(&summary_failure);
+        defer summary_scope.exit();
         const report = compact_kernel.run(
             allocator,
             conversation,
@@ -6443,7 +6475,7 @@ fn runAutoCompactControlled(
                 },
                 .minimum_saved_percent = COMPACT_MIN_SAVED_PERCENT,
                 .minimum_summary_reserve_tokens = if (compact_model_override == null)
-                    if (summary_reserve_tokens) |reserve| reserve.* else 0
+                    if (compact_history) |reserve| reserve.reserve else 0
                 else
                     0,
                 .request_gate = request_gate,
@@ -6491,11 +6523,14 @@ fn runAutoCompactControlled(
                 return .refused;
             },
             .no_change => {
-                if (compact_model_override == null and report.summary_request != null) {
-                    if (summary_reserve_tokens) |reserve|
-                        reserve.* = @max(reserve.*, report.summary_overhead_tokens);
+                if (report.summary_request != null) {
+                    if (compact_history) |history| history.skipped_version = conversation.mutation_version;
                 }
-                const active_reserve = if (summary_reserve_tokens) |reserve| reserve.* else 0;
+                if (compact_model_override == null and report.summary_request != null) {
+                    if (compact_history) |reserve|
+                        reserve.reserve = @max(reserve.reserve, report.summary_overhead_tokens);
+                }
+                const active_reserve = if (compact_history) |reserve| reserve.reserve else 0;
                 log.warn("agent", "auto-compact skipped: summary savings below {d}% before_tokens={d} after_tokens={d} summary_reserve_tokens={d} paid_request={} cause={s}", .{ COMPACT_MIN_SAVED_PERCENT, report.before_tokens, report.after_tokens, active_reserve, report.summary_request != null, trigger_cause });
                 outcome = .skipped_no_savings;
                 compact_lifecycle_outcome = "no_change";
@@ -6503,7 +6538,7 @@ fn runAutoCompactControlled(
             .compacted, .degraded => {
                 compact_lifecycle_outcome = if (report.outcome == .compacted) "compacted" else "degraded";
                 if (compact_model_override == null) {
-                    if (summary_reserve_tokens) |reserve| reserve.* = 0;
+                    if (compact_history) |reserve| reserve.reserve = 0;
                 }
                 // PostCompact hook(压缩后):喂 {trigger, summary},其 additionalContext 拼进投影摘要
                 // → 模型下轮读得到(条目 I 的挂载点:重注入 active skill/MCP)。非阻塞。
@@ -6562,14 +6597,6 @@ fn runAutoCompactControlled(
                 // cause already records that this happened at the blocking limit.
                 emitContextProjection(backend, sess, conversation, "stale_tool_result_microcompact", trigger_cause, reduced);
             }
-        }
-        if (pressure.isAtBlockingLimit()) {
-            // A forced recovery already paid for its compaction; the retry the
-            // caller is about to make is the real test, not this local model
-            // (whose learned cap may be a small observed lower bound).
-            if (forced and outcome == .compacted) return outcome;
-            log.err("agent", "context blocking limit reached: tokens={d} blocking_limit={d} raw_window={d} effective_window={d} cause={s}", .{ request_tokens_before, pressure.blocking_limit, pressure.raw_context_window, pressure.effective_context_window, trigger_cause });
-            return .api_error;
         }
     }
     return outcome;
@@ -7084,14 +7111,14 @@ test "estimateNextRequestTokens serializes the actual next Anthropic request" {
             @as(u64, @intCast(Conversation.estimateTokens(body))) * 2,
             (@as(u64, @intCast(body.len)) + 1) / 2,
         ) + 4096,
-        try serializedRequestInputTokenReserve(
+        (try estimateApiRequest(
             a,
             provider,
             api.items,
             "system prompt text",
             &tool_defs,
             "override-model",
-        ),
+        )).budget_reserve,
     );
     try std.testing.expect(std.mem.indexOf(u8, body, "synthetic steering text") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "override-model") != null);
@@ -7519,7 +7546,7 @@ test "issue #430: with a compaction control no in-place tool-result reduction re
     const backend = UiBackend{ .ctx = @ptrCast(&cap), .emit = Capture.emit, .poll = Capture.poll };
     const version = c.mutation_version;
     var recorder = compaction_control.Recorder{};
-    const outcome = try runAutoCompactControlled(&c, provider, system_prompt, null, null, &.{}, null, null, null, 2, "post_tool_follow_up_threshold", false, &backend, .single, [_]u8{0} ** 12, 0, 0, null, a, null, null, null, null, null, null, recorder.control(), false);
+    const outcome = try runAutoCompactControlled(&c, provider, system_prompt, null, null, &.{}, null, null, null, 2, "post_tool_follow_up_threshold", false, &backend, .single, [_]u8{0} ** 12, 0, 0, null, a, null, null, null, null, null, null, recorder.control(), .automatic);
     // Nothing ran: no clearing, no truncation, no compaction attempt.
     try std.testing.expectEqual(AutoCompactOutcome.not_needed, outcome);
     try std.testing.expectEqual(@as(u32, 0), cap.projections);
@@ -7814,7 +7841,7 @@ test "auto-compact feeds realized summary overhead back into retry preview" {
     };
     var dummy: u8 = 0;
     const backend = UiBackend{ .ctx = @ptrCast(&dummy), .emit = Capture.emit, .poll = Capture.poll };
-    var summary_reserve_tokens: usize = 0;
+    var compact_history: CompactHistory = .{};
 
     const first = try runAutoCompactIfNeeded(
         &c,
@@ -7838,14 +7865,14 @@ test "auto-compact feeds realized summary overhead back into retry preview" {
         a,
         null,
         null,
-        &summary_reserve_tokens,
+        &compact_history,
         null,
         null,
         null,
     );
     try std.testing.expectEqual(AutoCompactOutcome.skipped_no_savings, first);
     try std.testing.expectEqual(@as(u32, 1), provider_state.compact_request_count);
-    try std.testing.expect(summary_reserve_tokens > 0);
+    try std.testing.expect(compact_history.reserve > 0);
 
     const second = try runAutoCompactIfNeeded(
         &c,
@@ -7869,7 +7896,7 @@ test "auto-compact feeds realized summary overhead back into retry preview" {
         a,
         null,
         null,
-        &summary_reserve_tokens,
+        &compact_history,
         null,
         null,
         null,
@@ -8019,7 +8046,7 @@ test "issue #430: a compaction control sees every attempt and its refusal keeps 
         try compactionControlFixture(a, &c);
         var provider_state = TestProviderState{ .allocator = a, .compact_summary_response = "small summary", .max_input_tokens = 200_000, .max_tokens = 32_000 };
         var recorder = compaction_control.Recorder{};
-        const outcome = try runAutoCompactControlled(&c, testProvider(&provider_state), null, null, null, &.{}, null, null, 32_000, 2, "post_tool_follow_up_threshold", false, &backend, .single, [_]u8{0} ** 12, 0, 0, null, a, null, null, null, null, null, null, recorder.control(), false);
+        const outcome = try runAutoCompactControlled(&c, testProvider(&provider_state), null, null, null, &.{}, null, null, 32_000, 2, "post_tool_follow_up_threshold", false, &backend, .single, [_]u8{0} ** 12, 0, 0, null, a, null, null, null, null, null, null, recorder.control(), .automatic);
         try std.testing.expectEqual(AutoCompactOutcome.compacted, outcome);
         try std.testing.expectEqual(@as(u32, 1), recorder.begins);
         try std.testing.expectEqual(@as(u32, 1), recorder.allow_calls);
@@ -8035,7 +8062,7 @@ test "issue #430: a compaction control sees every attempt and its refusal keeps 
         const version = c.mutation_version;
         var provider_state = TestProviderState{ .allocator = a, .compact_summary_response = "small summary", .max_input_tokens = 200_000, .max_tokens = 32_000 };
         var recorder = compaction_control.Recorder{ .allow = false };
-        const outcome = try runAutoCompactControlled(&c, testProvider(&provider_state), null, null, null, &.{}, null, null, 32_000, 2, "post_tool_follow_up_threshold", false, &backend, .single, [_]u8{0} ** 12, 0, 0, null, a, null, null, null, null, null, null, recorder.control(), false);
+        const outcome = try runAutoCompactControlled(&c, testProvider(&provider_state), null, null, null, &.{}, null, null, 32_000, 2, "post_tool_follow_up_threshold", false, &backend, .single, [_]u8{0} ** 12, 0, 0, null, a, null, null, null, null, null, null, recorder.control(), .automatic);
         // A refusal is the owner's terminal, never reported as a cancellation.
         try std.testing.expectEqual(AutoCompactOutcome.refused, outcome);
         try std.testing.expectEqual(@as(u32, 1), recorder.not_committed);
@@ -8052,7 +8079,7 @@ test "issue #430: a compaction control sees every attempt and its refusal keeps 
         try compactionControlFixture(a, &c);
         var provider_state = TestProviderState{ .allocator = a, .compact_summary_response = "small summary", .max_input_tokens = 2_000_000, .max_tokens = 32_000 };
         var recorder = compaction_control.Recorder{ .wants = true };
-        const outcome = try runAutoCompactControlled(&c, testProvider(&provider_state), null, null, null, &.{}, null, null, null, 2, "pre_sampling_pending_turn_threshold", false, &backend, .single, [_]u8{0} ** 12, 0, 0, null, a, null, null, null, null, null, null, recorder.control(), false);
+        const outcome = try runAutoCompactControlled(&c, testProvider(&provider_state), null, null, null, &.{}, null, null, null, 2, "pre_sampling_pending_turn_threshold", false, &backend, .single, [_]u8{0} ** 12, 0, 0, null, a, null, null, null, null, null, null, recorder.control(), .automatic);
         try std.testing.expectEqual(AutoCompactOutcome.compacted, outcome);
         try std.testing.expectEqual(compaction_control.Trigger.durable_capacity, recorder.last_trigger.?);
         try std.testing.expectEqual(@as(u32, 1), recorder.committed);
@@ -8061,7 +8088,7 @@ test "issue #430: a compaction control sees every attempt and its refusal keeps 
         defer small.deinit();
         try small.appendText(.user, "one");
         var nothing = compaction_control.Recorder{ .wants = true };
-        const none = try runAutoCompactControlled(&small, testProvider(&provider_state), null, null, null, &.{}, null, null, null, 2, "pre_sampling_pending_turn_threshold", false, &backend, .single, [_]u8{0} ** 12, 0, 0, null, a, null, null, null, null, null, null, nothing.control(), false);
+        const none = try runAutoCompactControlled(&small, testProvider(&provider_state), null, null, null, &.{}, null, null, null, 2, "pre_sampling_pending_turn_threshold", false, &backend, .single, [_]u8{0} ** 12, 0, 0, null, a, null, null, null, null, null, null, nothing.control(), .automatic);
         try std.testing.expectEqual(AutoCompactOutcome.not_needed, none);
         try std.testing.expectEqual(@as(u32, 0), nothing.begins);
         try std.testing.expectEqual(@as(u32, 1), nothing.nothing);
@@ -8102,7 +8129,7 @@ test "issue #430: a refused replacement and an abandoned deferral end the Run as
                 .allocator = alloc,
                 .tasks = null,
                 .hookset = null,
-                .summary_reserve_tokens = null,
+                .compact_history = null,
                 .request_gate = null,
                 .abort = null,
                 .goal_meter = null,
@@ -8345,6 +8372,7 @@ const ContextRecoveryFixture = struct {
         /// Requests made through `sendStream` (the summary transport), by count.
         summary_sends: u32 = 0,
         streams: [4]FakeStream = undefined,
+        reject_first: bool = true,
         numbers: error_class.ContextWindowNumbers = .{},
         endpoint: []const u8 = "",
 
@@ -8358,7 +8386,7 @@ const ContextRecoveryFixture = struct {
             const st = asState(ctx);
             if (st.sends >= st.streams.len) return error.UnexpectedTestCall;
             const attempt = st.sends;
-            st.streams[attempt] = .{ .allocator = st.allocator, .attempt = attempt, .rid = log.genRequestId() };
+            st.streams[attempt] = .{ .allocator = st.allocator, .attempt = if (st.reject_first) attempt else attempt + 1, .rid = log.genRequestId() };
             st.sends += 1;
             return .{
                 .ctx = @ptrCast(&st.streams[attempt]),
@@ -8435,6 +8463,79 @@ const ContextRecoveryFixture = struct {
         }
     };
 };
+
+test "context-window admission blocks the exact threshold and reserves output only for total limits" {
+    var fake = ContextRecoveryFixture.FakeProvider{ .allocator = std.testing.allocator };
+    const provider = fake.provider();
+    var state = ContextRecoveryState{ .cap = 1, .pending_tokens = 164_999 };
+    try std.testing.expect(!state.pressure(provider, null).isAtBlockingLimit());
+    state.pending_tokens += 1;
+    try std.testing.expect(state.pressure(provider, null).isAtBlockingLimit());
+    state.numbers = .{ .total_limit = 100_000 };
+    try std.testing.expectEqual(@as(usize, 65_000), state.pressure(provider, null).blocking_limit);
+    state.numbers = .{ .input_limit = 100_000 };
+    try std.testing.expectEqual(@as(usize, 97_000), state.pressure(provider, null).blocking_limit);
+}
+
+test "context-window admission checks the pending request after skipped or successful compaction" {
+    const a = std.testing.allocator;
+    const large = try a.alloc(u8, 800 * 1024);
+    defer a.free(large);
+    @memset(large, 'x');
+    const Case = enum { retained, fixed, fits, recoverable, warm };
+    for ([_]Case{ .retained, .fixed, .fits, .recoverable, .warm }) |case| {
+        var c = Conversation.init(a);
+        defer c.deinit();
+        if (case == .fixed or case == .recoverable or case == .warm) {
+            for (0..15) |i| {
+                const content = if (i != 1) "ok" else switch (case) {
+                    .recoverable => large,
+                    .warm => large[0..20_000],
+                    else => "ok",
+                };
+                try c.appendText(if (i % 2 == 0) .user else .assistant, content);
+            }
+        } else try c.appendText(.user, if (case == .fits) large[0..630_000] else large);
+        c.setUsageAnchor(if (case == .warm) 160_000 else 32);
+        var fp = ContextRecoveryFixture.FakeProvider{ .allocator = a, .reject_first = false };
+        if (case == .fits) {
+            fp.endpoint = "https://observed-window.test";
+            _ = context_caps.learnInputCap(fp.endpoint, "fake", 40_000, .observed);
+        }
+        defer if (case == .fits) context_caps.resetForTest();
+        var cap = ContextRecoveryFixture.Capture{ .allocator = a };
+        defer cap.text.deinit(a);
+        const backend = UiBackend{ .ctx = &cap, .emit = ContextRecoveryFixture.Capture.emit, .poll = ContextRecoveryFixture.Capture.poll };
+        const perm = permission_mod.createContext(.bypass_permissions, a);
+        var failure: ?model_error.Detail = null;
+        const result = try run(&c, fp.provider(), &.{}, &perm, .{
+            .system_prompt = if (case == .fixed) large else null,
+            .max_turns = 2,
+            .model_error_out = &failure,
+        }, &backend, a);
+        switch (case) {
+            .retained, .fixed => {
+                try std.testing.expectEqual(StopReason.api_error, result.stop_reason);
+                try std.testing.expectEqual(@as(u32, 0), fp.sends);
+                const detail = failure orelse return error.MissingFailure;
+                try std.testing.expectEqual(model_error.Category.context_window, detail.category);
+                try std.testing.expectEqual(@as(u32, 1), detail.attempts);
+                try std.testing.expectEqual(@as(?u16, null), detail.http_status);
+                const window = detail.context_window orelse return error.MissingWindow;
+                try std.testing.expectEqual(model_error.ContextWindow.Origin.local, window.origin);
+                try std.testing.expectEqual(@as(u64, 165_000), window.blocking_limit);
+                try std.testing.expect(window.estimated_input_tokens >= window.blocking_limit);
+                try std.testing.expectEqual(if (case == .retained) model_error.ContextWindow.Compaction.no_history else .insufficient, window.compaction);
+            },
+            .fits, .recoverable, .warm => {
+                try std.testing.expectEqual(StopReason.end_turn, result.stop_reason);
+                try std.testing.expect(failure == null);
+                try std.testing.expectEqual(@as(u32, 1), fp.sends - fp.summary_sends);
+            },
+        }
+        try std.testing.expectEqual(@as(u32, if (case == .recoverable or case == .warm) 1 else 0), fp.summary_sends);
+    }
+}
 
 test "context-window rejection with nothing to compact trims the oldest pair and records an observed cap" {
     context_caps.resetForTest();
@@ -8793,7 +8894,7 @@ test "估算投影:image 按 IMAGE_TOKEN_ESTIMATE 计,不按 base64 字节(防�
     // catch maxInt → 预算门必拒)。
     var api = try buildApiMessages(&c, a, null, null);
     defer freeApiMessages(&api, a);
-    const reserve = try serializedRequestInputTokenReserve(a, provider, api.items, null, &.{}, null);
+    const reserve = (try estimateApiRequest(a, provider, api.items, null, &.{}, null)).budget_reserve;
     try std.testing.expect(reserve < 100_000);
     try std.testing.expect(reserve >= 2 * @as(u64, conversation_mod.IMAGE_TOKEN_ESTIMATE));
 }
@@ -8842,7 +8943,7 @@ test "估算投影覆盖 tool_result 图像形态(Read 截图不爆表)" {
     // 端到端:估算不按 base64 字节计。
     var state = TestProviderState{ .model = "gpt-4o", .max_tokens = 777, .reasoning_effort = null };
     const provider = testProvider(&state);
-    const estimated = try estimateApiRequestTokens(a, provider, &messages, null, &.{}, null);
+    const estimated = (try estimateApiRequest(a, provider, &messages, null, &.{}, null)).tokens;
     try std.testing.expect(estimated < 50_000);
 }
 

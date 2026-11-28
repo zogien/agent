@@ -12,6 +12,17 @@ must do about it under `### Migration`.
 
 ## Unreleased
 
+### Fixed
+
+- Runs now stop locally when the pending sampling request still reaches the
+  model's blocking threshold after automatic compaction. A `context_window`
+  model error carries an optional `context_window` object with the estimate,
+  threshold, compaction outcome, any reported server limit, and `origin`
+  (`local` when no request was sent). The ABI stays at revision 29, whose
+  bindings ignore the new field.
+- `Input exceeds the context limit (N tokens)` errors now report `N` as the
+  server limit, and a request ID in the message is no longer read as a limit.
+
 ### Added
 
 - Node.js and Electron hosts can use `Runtime`, `Session` and JavaScript tools

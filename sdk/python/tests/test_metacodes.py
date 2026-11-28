@@ -101,6 +101,23 @@ class PythonSdkTest(unittest.TestCase):
         self.assertEqual(recovered.stop_reason, "end_turn")
         self.assertIsNone(recovered.model_error)
 
+    def test_local_context_window_block_reaches_the_host_without_a_request(self) -> None:
+        with MockProvider([]) as provider, metacodes.Runtime(tools=()) as runtime:
+            result = self.session(runtime, provider).run("x" * (800 * 1024))
+        self.assertEqual(provider.requests, [])
+        self.assertEqual(result.stop_reason, "api_error")
+        detail = result.model_error
+        self.assertIsInstance(detail, metacodes.ModelError)
+        self.assertEqual(detail.category, "context_window")
+        self.assertEqual(detail.attempts, 1)
+        self.assertIsNone(detail.http_status)
+        self.assertIsNone(detail.request_id)
+        window = detail.context_window
+        self.assertEqual(window["origin"], "local")
+        self.assertEqual(window["compaction"], "no_history")
+        self.assertGreaterEqual(window["estimated_input_tokens"], window["blocking_limit"])
+        self.assertIsNone(window["server_limit"])
+
     def test_a_stream_cut_after_thinking_is_sent_again_under_the_budget(self) -> None:
         # Issue #452: thinking, then the body ends with no stop reason.
         events = []

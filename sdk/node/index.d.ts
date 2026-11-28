@@ -60,6 +60,13 @@ export interface ModelError {
   retry_after_ms: bigint | null;
   attempts: number;
   truncated: boolean;
+  context_window: {
+    origin: 'local' | 'provider';
+    estimated_input_tokens: bigint;
+    blocking_limit: bigint;
+    compaction: 'no_history' | 'insufficient' | 'not_evaluated';
+    server_limit: { tokens: bigint; kind: 'input' | 'total' | 'unspecified' } | null;
+  } | null;
 }
 
 export interface RunResult {

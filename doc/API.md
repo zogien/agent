@@ -31,6 +31,13 @@ Use [SessionHost](#sessionhost-a-multi-session-service-for-network-hosts)
 behind your own transport, or use the [AgentCore SDK](#agentcore-binary-embedding)
 to embed sessions in an application.
 
+A Run that reaches its local input blocking threshold attempts automatic
+compaction when eligible. If its pending request still reaches the threshold,
+it ends with `STOP_API_ERROR` and a `context_window` model error whose
+`context_window.origin` is `local`: no sampling request was sent. The error
+includes the estimated input, blocking threshold, compaction outcome and any
+limit the server reported.
+
 ## Preview features
 
 Preview features default to disabled, and each has its own switch:

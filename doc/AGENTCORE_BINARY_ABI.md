@@ -869,6 +869,19 @@ slot or revision, and an older Host decodes it through the `unknown` path.
 | `retry_after_ms` | The failing response's `Retry-After`, when it sent one |
 | `attempts` | Physical attempts of the request that failed, AgentCore's own retries included: connection retries and same-turn re-issues alike (see "Stream retry budget") |
 | `truncated` | A string above was cut at its size limit |
+| `context_window` | Present only on a `context_window` failure, described below. Older revision 29 bindings ignore it |
+
+`context_window.origin` is `local` when the Run stopped before sending its
+sampling request because the request's estimate reached the blocking limit, and
+`provider` when a provider rejected the request. A local stop sends no request:
+`http_status` and `request_id` are null and `attempts` is 1, the minimum every
+`model_error` carries. `estimated_input_tokens` is the local estimate of the
+pending request and `blocking_limit` the threshold it was checked against.
+`compaction` is `no_history` when nothing older could be summarized,
+`insufficient` when compaction did not make the request fit, and
+`not_evaluated` when compaction was not attempted. `server_limit` is the limit
+the provider reported, with `tokens` and `kind` (`input`, `total` or
+`unspecified`), or null. All token counts are unsigned 64-bit integers.
 
 `category` describes the failure, from transport facts and the provider's
 technical error types: `authentication` (401), `permission` (403),

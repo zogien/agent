@@ -95,9 +95,22 @@ fn Text(comptime cap: usize) type {
     };
 }
 
+pub const ContextWindow = struct {
+    pub const Origin = enum { local, provider };
+    pub const Compaction = enum { no_history, insufficient, not_evaluated };
+    pub const Limit = struct { tokens: u64, kind: enum { input, total, unspecified } };
+
+    origin: Origin,
+    estimated_input_tokens: u64,
+    blocking_limit: u64,
+    compaction: Compaction,
+    server_limit: ?Limit = null,
+};
+
 /// One failure, by value. Hosts read it through `view`, whose slices borrow
 /// this struct.
 pub const Detail = struct {
+    context_window: ?ContextWindow = null,
     category: Category = .unknown,
     retry: Retry = .unknown,
     http_status: ?u16 = null,
@@ -111,6 +124,7 @@ pub const Detail = struct {
     /// JSON shape of one failure on every host surface. Never empty `message`.
     pub const View = struct {
         category: Category,
+        context_window: ?ContextWindow = null,
         code: ?[]const u8,
         type: ?[]const u8,
         message: []const u8,
@@ -120,11 +134,28 @@ pub const Detail = struct {
         retry_after_ms: ?u64,
         attempts: u32,
         truncated: bool,
+
+        pub fn jsonStringify(self: View, writer: anytype) !void {
+            try writer.beginObject();
+            inline for (std.meta.fields(View)) |field| {
+                if (comptime std.mem.eql(u8, field.name, "context_window")) {
+                    if (self.context_window) |window| {
+                        try writer.objectField(field.name);
+                        try writer.write(window);
+                    }
+                } else {
+                    try writer.objectField(field.name);
+                    try writer.write(@field(self, field.name));
+                }
+            }
+            try writer.endObject();
+        }
     };
 
     pub fn view(self: *const Detail) View {
         return .{
             .category = self.category,
+            .context_window = self.context_window,
             .code = self.code.optional(),
             .type = self.type.optional(),
             .message = self.message.slice(),
@@ -368,18 +399,20 @@ pub fn noteStreamFailure(category: Category, retry: Retry, message: []const u8) 
     detail.message.set(message, capture.credential);
 }
 
-/// The Run stops on a context-window rejection that automatic compaction could
-/// not recover from. The provider's own rejection stays the reported failure
-/// when it is still the latest one; when a later recovery request replaced or
-/// cleared it (a summary request that succeeded, or failed for another
-/// reason), the failure the Run stops on is recorded as what it is.
-pub fn noteContextWindowUnrecovered(message: []const u8) void {
+pub fn noteWindowDecision(window: ContextWindow) void {
     const capture = active orelse return;
-    if (capture.has_failure and capture.failure.category == .context_window) return;
-    const detail = capture.fresh();
-    detail.category = .context_window;
-    detail.retry = .not_retryable;
-    detail.message.set(message, capture.credential);
+    if (window.origin == .local) {
+        const detail = capture.fresh();
+        detail.category = .context_window;
+        detail.retry = .not_retryable;
+        detail.message.set("The pending request reaches the local context window limit.", null);
+    } else if (!capture.has_failure or capture.failure.category != .context_window) {
+        const detail = capture.fresh();
+        detail.category = .context_window;
+        detail.retry = .not_retryable;
+        detail.message.set("The request exceeds the model's context window and automatic compaction could not make it fit.", null);
+    }
+    capture.failure.context_window = window;
 }
 
 /// `agent_loop`'s net under the clients: a failed send nobody described.
