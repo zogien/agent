@@ -129,6 +129,10 @@ export interface SessionDescription extends Record<string, unknown> {
   conversation: { message_count: bigint; compact_boundary: bigint };
 }
 
+export interface CheckpointExport {
+  missingArtifacts: string[];
+}
+
 export interface RestoreReport extends Record<string, unknown> {
   session_id: string;
   checkpoint_generation: bigint;
@@ -138,7 +142,7 @@ export interface RestoreReport extends Record<string, unknown> {
 
 export class Session {
   readonly restoreReport: RestoreReport | null;
-  exportCheckpoint(directory: string): Promise<void>;
+  exportCheckpoint(directory: string): Promise<CheckpointExport>;
   readonly runtime: Runtime;
   model: string;
   run(prompt: string, options?: RunOptions): Promise<RunResult>;

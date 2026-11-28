@@ -510,8 +510,9 @@ static void wake_pending(session_t *session) {
 }
 
 static uint32_t request_abort(session_t *session, metask_agentcore_owned_bytes_v1 *diagnostic) {
-    session->cancel_requested = 1;
     uint32_t status = g_api->session->abort(session->handle, session->run_id, METASK_AGENTCORE_ABORT_USER_REQUEST, diagnostic);
+    if (status == METASK_AGENTCORE_STATUS_OK || status == METASK_AGENTCORE_STATUS_STALE_RUN ||
+        status == METASK_AGENTCORE_STATUS_TOO_LATE) session->cancel_requested = 1;
     if (status == METASK_AGENTCORE_STATUS_OK || session->detached) wake_pending(session);
     return status;
 }
@@ -724,7 +725,6 @@ static session_t *get_session(napi_env env, napi_value value) {
     return session;
 }
 
-/* sessionCreate(runtime, config, dispatch) */
 typedef struct {
     napi_env env;
     napi_value callback;
@@ -1206,7 +1206,79 @@ static napi_value complete_call(napi_env env, napi_callback_info info) {
     return NULL;
 }
 
-/* load(path) -> ABI revision */
+typedef struct {
+    path_lock_t lock;
+    char *path;
+    int held;
+} held_lock_t;
+
+static void release_held_lock(held_lock_t *held) {
+    if (!held->held) return;
+    held->held = 0;
+    unlock_path(held->lock, held->path);
+}
+
+static void held_lock_finalize(napi_env env, void *data, void *hint) {
+    held_lock_t *held = data;
+    release_held_lock(held);
+    free(held->path);
+    free(held);
+}
+
+static napi_value lock_file(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    owned_t path;
+    if (argc != 1 || !get_string(env, argv[0], &path)) return NULL;
+    if (!path.ptr) {
+        napi_throw_type_error(env, NULL, "lock path required");
+        return NULL;
+    }
+    held_lock_t *held = calloc(1, sizeof(*held));
+    if (!held) {
+        free(path.ptr);
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    held->path = (char *)path.ptr;
+    int error = 0;
+    int status = lock_path(held->path, &held->lock, &error);
+    if (status) {
+        free(held->path);
+        free(held);
+        if (status > 0) {
+            napi_throw_error(env, "EBUSY", "the lock is held by another writer");
+        } else {
+            char message[64];
+            snprintf(message, sizeof(message), "cannot acquire the lock (system error %d)", error);
+            napi_throw_error(env, "LOCK_FAILED", message);
+        }
+        return NULL;
+    }
+    held->held = 1;
+    napi_value external;
+    if (napi_create_external(env, held, held_lock_finalize, NULL, &external) != napi_ok) {
+        held_lock_finalize(env, held, NULL);
+        napi_throw_error(env, NULL, "cannot create the lock handle");
+        return NULL;
+    }
+    return external;
+}
+
+static napi_value unlock_file(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    void *data = NULL;
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (argc != 1 || napi_get_value_external(env, argv[0], &data) != napi_ok || !data) {
+        napi_throw_type_error(env, NULL, "expected a lock handle");
+        return NULL;
+    }
+    release_held_lock(data);
+    return NULL;
+}
+
 static napi_value load_locked(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value argv[2];
@@ -1309,6 +1381,8 @@ NAPI_MODULE_INIT() {
     EXPORT("sessionRewindToUserMessage", session_rewind_to_user_message);
     EXPORT("sessionDestroy", session_destroy);
     EXPORT("completeCall", complete_call);
+    EXPORT("lockPath", lock_file);
+    EXPORT("unlockPath", unlock_file);
     napi_value revision;
     napi_create_uint32(env, METASK_AGENTCORE_ABI_REVISION, &revision);
     napi_set_named_property(env, exports, "abiRevision", revision);

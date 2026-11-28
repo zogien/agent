@@ -9,6 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { Worker } = require('node:worker_threads');
+const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { createHash } = require('node:crypto');
 
@@ -104,7 +105,7 @@ test('checkpoint restores history, Run identity and readable tool artifacts in a
   const snapshot = path.join(workspace(t), 'snapshot');
   const exported = session.exportCheckpoint(snapshot);
   await assert.rejects(session.run('busy'), /export/);
-  await exported;
+  assert.deepEqual(await exported, { missingArtifacts: [] });
   await assert.rejects(session.exportCheckpoint(snapshot), /already exists/);
   runtime.close();
   const fresh = new metacodes.Runtime(config);
@@ -119,6 +120,21 @@ test('checkpoint restores history, Run identity and readable tool artifacts in a
   const file = path.join(snapshot, 'blobs', sha256 + '.blob');
   fs.writeFileSync(file, 'tampered');
   await assert.rejects(fresh.restoreSession(snapshot, options), /integrity/);
+});
+
+test('checkpoint export reports an artifact the session references but no longer stores', { skip }, async (t) => {
+  const bytes = 'y'.repeat(180000) + 'vanished-result';
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const provider = await withProvider(t, [['tool', 'large', {}], ['text', 'kept a reference']]);
+  const large = metacodes.tool({ name: 'large', handler: () => bytes });
+  const root = workspace(t);
+  const { session } = open(t, { tools: ['ReadArtifact'], hostTools: [large] }, provider, root, { permissionMode: 'full_access' });
+  await session.run('make a large result');
+  const id = session.describe().session_id;
+  fs.rmSync(path.join(root, '.metacodes', 'agentcore', 'sessions', id, 'tool-results', 'sha256', sha256 + '.blob'));
+  const snapshot = path.join(workspace(t), 'snapshot');
+  assert.deepEqual(await session.exportCheckpoint(snapshot), { missingArtifacts: ['sha256:' + sha256] });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(snapshot, 'manifest.json'))).blobs, []);
 });
 
 test('a model failure reaches the result and a later success clears it', { skip }, async (t) => {
@@ -544,6 +560,43 @@ test('close during a Run is refused and keeps the handle', { skip, timeout: TIME
 function writeScript(root, ...names) {
   return [...names.map((name) => ['tool', 'Write', { file_path: path.join(root, name), content: name }]), ['text', 'done']];
 }
+
+test('a checkpoint lock left by an exited writer does not block a retry, but a live writer does', { skip, timeout: TIMEOUT }, async (t) => {
+  const provider = await withProvider(t, [['echo']]);
+  const { session } = open(t, {}, provider, workspace(t));
+  const parent = workspace(t);
+  const crashed = path.join(parent, 'crashed');
+  fs.writeFileSync(crashed + '.lock', '');
+  assert.deepEqual(await session.exportCheckpoint(crashed), { missingArtifacts: [] });
+  assert.equal(fs.existsSync(crashed + '.lock'), false);
+
+  const held = path.join(parent, 'held');
+  const holder = spawn(process.execPath, ['-e', `
+    const { Runtime } = require(${JSON.stringify(require.resolve(sdkName))});
+    new Runtime({ tools: [] })._native.lockPath(${JSON.stringify(held + '.lock')});
+    process.stdout.write('locked\\n');
+    setInterval(() => {}, 1000);
+  `], { stdio: ['ignore', 'pipe', 'inherit'] });
+  t.after(() => holder.kill('SIGKILL'));
+  const [ready] = await once(holder.stdout, 'data');
+  assert.equal(String(ready).trim(), 'locked');
+  await assert.rejects(session.exportCheckpoint(held), /locked by another writer/);
+  assert.equal(fs.existsSync(held), false);
+  holder.kill('SIGKILL');
+  await once(holder, 'exit');
+  assert.deepEqual(await session.exportCheckpoint(held), { missingArtifacts: [] });
+
+  const id = session.describe().session_id;
+  const home = workspace(t);
+  const sessions = path.join(home, '.metacodes', 'agentcore', 'sessions');
+  fs.mkdirSync(sessions, { recursive: true });
+  fs.writeFileSync(path.join(sessions, id + '.restore.lock'), '');
+  const fresh = new metacodes.Runtime();
+  t.after(() => fresh.close());
+  const restored = await fresh.restoreSession(held, { workspace: home, baseUrl: provider.baseUrl, apiKey: 'test-key' });
+  assert.equal(restored.restoreReport.session_id, id);
+  assert.equal(fs.existsSync(path.join(sessions, id + '.restore.lock')), false);
+});
 
 test('allow and deny rules decide without asking', { skip, timeout: TIMEOUT }, async (t) => {
   const root = workspace(t);

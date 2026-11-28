@@ -131,7 +131,7 @@ function errorText(error) {
 }
 
 
-/** Define a tool implemented in JavaScript. `handler(args)` may be async. */
+/** Define a tool implemented in JavaScript. `handler(args, context)` may be async. */
 function tool({ name, description, inputSchema, handler }) {
   if (!name || typeof handler !== 'function') throw new TypeError('tool needs a name and a handler');
   return {
@@ -259,7 +259,7 @@ class Runtime {
     host.workspaceHome = path.resolve(options.workspaceHome || host.workspace);
     this._restores++;
     try {
-      const session = await restoreSnapshot(directory, host.workspaceHome, read => new Session(this, '', host, read));
+      const session = await restoreSnapshot(this._native, directory, host.workspaceHome, read => new Session(this, '', host, read));
       this.sessions.add(session);
       return session;
     } finally { this._restores--; }
@@ -458,7 +458,7 @@ class Session {
    * send a request again after that. Each retry of an attempt that showed
    * output ends its segment `discarded`, takes back its thinking with a
    * `thinking_discarded` event and is announced by `retry_notice`.
-   * @returns {Promise<{text: string, stopReason: string, turns: number, toolCalls: number, usage: object, segments: object[]}>}
+   * @returns {Promise<{runId: bigint, text: string, stopReason: string, turns: number, toolCalls: number, usage: object, segments: object[]}>}
    */
   run(prompt, { maxTurns, streamRetryBudget = 0, onEvent, contextBlocks = [] } = {}) {
     if (!this._handle) return Promise.reject(new Error('session is closed'));
@@ -558,7 +558,7 @@ class Session {
   async exportCheckpoint(directory) {
     if (!this._handle || this._active || this._exporting) throw new Error('checkpoint export requires an idle session');
     this._exporting = true;
-    try { await exportSnapshot(this, directory); }
+    try { return await exportSnapshot(this, directory); }
     finally { this._exporting = false; }
   }
 

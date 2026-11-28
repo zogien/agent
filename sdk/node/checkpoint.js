@@ -10,6 +10,7 @@ const MAX_BLOB = 128 * 1024 * 1024;
 const MAX_STORE = 1024 * 1024 * 1024;
 const DIGEST = /^[0-9a-f]{64}$/;
 const SESSION_ID = /^[0-9a-f]{24}$/;
+const ARTIFACT_REFERENCE = /artifact_id\\?"\s*:\s*\\?"sha256:([0-9a-f]{64})/g;
 
 async function directory(root, parts, create = false) {
   let dir = root;
@@ -60,13 +61,19 @@ async function transfer(source, destination, limit, expected) {
   } finally { await input.close(); }
 }
 
-async function exclusive(lockPath, work) {
-  const lock = await fsp.open(lockPath, 'wx', 0o600);
-  try { return await work(); }
-  finally {
-    await lock.close();
-    await fsp.unlink(lockPath);
+async function exclusive(native, lockPath, work) {
+  let lock;
+  try { lock = native.lockPath(lockPath); } catch (error) {
+    if (error.code === 'EBUSY') throw new Error('Snapshot is locked by another writer: ' + lockPath);
+    throw error;
   }
+  try { return await work(); }
+  finally { native.unlockPath(lock); }
+}
+
+async function referencedArtifacts(checkpoint) {
+  const text = (await fsp.readFile(checkpoint)).toString('latin1');
+  return new Set(Array.from(text.matchAll(ARTIFACT_REFERENCE), match => match[1]));
 }
 
 function sessionParts(id) {
@@ -77,7 +84,7 @@ function sessionParts(id) {
 async function exportSnapshot(session, target) {
   const id = session.describe().session_id;
   const dest = path.resolve(target);
-  return exclusive(dest + '.lock', async () => {
+  return exclusive(session._native, dest + '.lock', async () => {
     await fsp.lstat(dest).then(() => { throw new Error('Snapshot destination already exists'); },
       error => { if (error.code !== 'ENOENT') throw error; });
     const stage = await fsp.mkdtemp(dest + '.tmp-');
@@ -102,8 +109,12 @@ async function exportSnapshot(session, target) {
         total += entry.size;
         blobs.push(entry);
       }
+      const present = new Set(blobs.map(entry => entry.sha256));
+      const missingArtifacts = [...await referencedArtifacts(binary)]
+        .filter(hash => !present.has(hash)).sort().map(hash => 'sha256:' + hash);
       await fsp.writeFile(path.join(stage, 'manifest.json'), JSON.stringify({ version: 1, sessionId: id, checkpoint, blobs }), { flag: 'wx', mode: 0o600 });
       await fsp.rename(stage, dest);
+      return { missingArtifacts };
     } finally { await fsp.rm(stage, { recursive: true, force: true }); }
   });
 }
@@ -113,7 +124,7 @@ function validate(entry, limit) {
       !Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > limit) throw new Error('Invalid snapshot manifest entry');
 }
 
-async function restoreSnapshot(source, home, createSession) {
+async function restoreSnapshot(native, source, home, createSession) {
   const root = await fsp.realpath(source);
   const manifest = await regular(path.join(root, 'manifest.json'), 16 * 1024 * 1024);
   let data;
@@ -132,7 +143,7 @@ async function restoreSnapshot(source, home, createSession) {
   }
   const blobs = await directory(root, ['blobs']);
   const base = await directory(await fsp.realpath(home), parts.slice(0, 3), true);
-  return exclusive(path.join(base, data.sessionId + '.restore.lock'), async () => {
+  return exclusive(native, path.join(base, data.sessionId + '.restore.lock'), async () => {
     const stage = await fsp.mkdtemp(path.join(base, '.restore-'));
     const installed = [];
     let session;

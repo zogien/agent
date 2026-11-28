@@ -131,7 +131,7 @@ are numbers. Use a JSON replacer that converts bigints to decimal strings when
 logging a complete event or session description.
 
 ```js
-await session.exportCheckpoint(snapshotDirectory);
+const { missingArtifacts } = await session.exportCheckpoint(snapshotDirectory);
 const restored = await otherRuntime.restoreSession(snapshotDirectory, {
   workspace: freshWorkspace, provider: 'anthropic', apiKey,
 });
@@ -141,7 +141,12 @@ const next = await restored.run('Continue');
 Export an idle Session to a new directory with an existing parent. The v1
 directory contains `manifest.json`, `checkpoint.bin` and `blobs/<sha256>.blob`.
 It captures committed artifacts for this logical Session, including any retained
-from earlier turns. Transfer the whole directory. Restore checks file sizes and
+from earlier turns. `missingArtifacts` lists the `sha256:` artifact IDs that the
+checkpoint references but the Session store no longer holds; after restore,
+`ReadArtifact` reports those as not found. An export or restore holds an
+operating-system lock beside its target. Another live writer is refused, and a
+writer that exited without releasing it does not block a retry. Transfer the
+whole directory. Restore checks file sizes and
 digests, uses the supplied host options and resumes after the checkpoint's last
 Run ID. Register any host tools on the receiving Runtime. The restore report
 is available as `restored.restoreReport`. The checkpoint limit is 64 MiB,
