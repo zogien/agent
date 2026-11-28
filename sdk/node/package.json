@@ -23,7 +23,7 @@
   "files": [
     "index.js",
     "location.js",
-    "location.js",
+    "checkpoint.js",
     "index.d.ts",
     "src/",
     "scripts/",

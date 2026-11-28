@@ -119,6 +119,8 @@ export interface EventStream extends AsyncIterable<AgentEvent> {
 }
 
 export class Session {
+  readonly restoreReport: (Record<string, unknown> & { session_id: string; policy_generation: bigint }) | null;
+  exportCheckpoint(directory: string): Promise<void>;
   readonly runtime: Runtime;
   model: string;
   run(prompt: string, options?: RunOptions): Promise<RunResult>;
@@ -140,6 +142,7 @@ export class Runtime {
   readonly tools: string[];
   readonly hostTools: Tool<any>[];
   session(model: string, options?: SessionOptions): Session;
+  restoreSession(directory: string, options?: SessionOptions): Promise<Session>;
   close(): void;
 }
 

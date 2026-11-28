@@ -740,9 +740,72 @@ static session_t *get_session(napi_env env, napi_value value) {
 }
 
 /* sessionCreate(runtime, config, dispatch) */
+typedef struct {
+    napi_env env;
+    napi_value callback;
+    napi_value buffer;
+    uint8_t *bytes;
+} checkpoint_io;
+
+static const metask_agentcore_checkpoint_limits_v1 limits = {
+    .struct_size = sizeof(limits), .hard_bytes = 64u << 20, .max_section_bytes = 64u << 20,
+    .max_string_bytes = 16u << 20, .max_messages = 1000000, .max_blocks_per_message = 4096, .chunk_bytes = 65536
+};
+
+static uint32_t transfer(checkpoint_io *io, uint32_t capacity, uint32_t *count) {
+    napi_handle_scope scope;
+    if (napi_open_handle_scope(io->env, &scope) != napi_ok) return 1;
+    napi_value receiver, args[2] = {io->buffer}, result;
+    napi_get_undefined(io->env, &receiver);
+    napi_create_uint32(io->env, capacity, &args[1]);
+    int failed = napi_call_function(io->env, receiver, io->callback, 2, args, &result) != napi_ok ||
+        napi_get_value_uint32(io->env, result, count) != napi_ok || *count > capacity;
+    napi_close_handle_scope(io->env, scope);
+    return failed;
+}
+
+static uint32_t write_checkpoint(void *ctx, metask_agentcore_bytes_view_v1 chunk) {
+    checkpoint_io *io = ctx;
+    for (uint64_t offset = 0; offset < chunk.len;) {
+        uint32_t length = chunk.len - offset > limits.chunk_bytes ? limits.chunk_bytes : (uint32_t)(chunk.len - offset);
+        memcpy(io->bytes, chunk.ptr + offset, length);
+        uint32_t count;
+        if (transfer(io, length, &count) || !count) return 1;
+        offset += count;
+    }
+    return 0;
+}
+
+static uint32_t read_checkpoint(void *ctx, uint8_t *dest, uint64_t capacity, uint64_t *read) {
+    checkpoint_io *io = ctx;
+    uint32_t count;
+    if (transfer(io, capacity > limits.chunk_bytes ? limits.chunk_bytes : (uint32_t)capacity, &count)) return 1;
+    memcpy(dest, io->bytes, count);
+    *read = count;
+    return 0;
+}
+
+static napi_value session_export(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    session_t *session = get_session(env, argv[0]);
+    if (!session) return NULL;
+    checkpoint_io io = {.env = env, .callback = argv[1]};
+    if (napi_create_buffer(env, limits.chunk_bytes, (void **)&io.bytes, &io.buffer) != napi_ok) return NULL;
+    metask_agentcore_checkpoint_sink_v1 sink = {.struct_size = sizeof(sink), .ctx = &io, .write = write_checkpoint};
+    metask_agentcore_checkpoint_export_config_v1 config = {.struct_size = sizeof(config), .sink = &sink, .limits = &limits};
+    metask_agentcore_checkpoint_export_result_v1 result = {.struct_size = sizeof(result)};
+    metask_agentcore_owned_bytes_v1 diagnostic = {0};
+    uint32_t status = g_api->session_control->export_checkpoint(session->handle, &config, &result, &diagnostic);
+    if (status) throw_status(env, "session.export_checkpoint", status, &diagnostic);
+    else g_api->buffer_release(&diagnostic);
+    return NULL;
+}
+
 static napi_value session_create(napi_env env, napi_callback_info info) {
-    size_t argc = 3;
-    napi_value argv[3];
+    size_t argc = 4;
+    napi_value argv[4];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     runtime_t *runtime = get_runtime(env, argv[0]);
     if (runtime == NULL) return NULL;
@@ -819,12 +882,28 @@ static napi_value session_create(napi_env env, napi_callback_info info) {
     callbacks.on_ui_request = session_on_ui_request;
     callbacks.release_response = session_release_response;
     metask_agentcore_owned_bytes_v1 diagnostic = {NULL, 0};
-    uint32_t status = g_api->session->create(runtime->handle, &config, &callbacks, &session->handle, &diagnostic);
+    uint32_t status;
+    if (argc == 4) {
+        checkpoint_io io = {.env = env, .callback = argv[3]};
+        metask_agentcore_checkpoint_source_v1 source = {.struct_size = sizeof(source), .ctx = &io, .read = read_checkpoint};
+        metask_agentcore_session_restore_config_v1 restore = {.struct_size = sizeof(restore), .host = &host, .source = &source, .limits = &limits};
+        metask_agentcore_owned_bytes_v1 report = {0};
+        status = napi_create_buffer(env, limits.chunk_bytes, (void **)&io.bytes, &io.buffer) == napi_ok
+            ? g_api->session_control->restore(runtime->handle, &restore, &callbacks, &session->handle, &report, &diagnostic)
+            : METASK_AGENTCORE_STATUS_OUT_OF_MEMORY;
+        if (!status) {
+            owned_t bytes = {report.ptr, report.len};
+            napi_set_named_property(env, cfg, "restoreReport", make_string(env, &bytes));
+        }
+        g_api->buffer_release(&report);
+    } else {
+        status = g_api->session->create(runtime->handle, &config, &callbacks, &session->handle, &diagnostic);
+    }
     if (status != METASK_AGENTCORE_STATUS_OK) {
         napi_release_threadsafe_function(session->tsfn, napi_tsfn_abort);
         free(session);
         session = NULL;
-        throw_status(env, "session.create", status, &diagnostic);
+        throw_status(env, argc == 4 ? "session.restore" : "session.create", status, &diagnostic);
         goto done;
     }
     g_api->buffer_release(&diagnostic);
@@ -1215,6 +1294,7 @@ NAPI_MODULE_INIT() {
     EXPORT("runtimeCreate", runtime_create);
     EXPORT("runtimeDestroy", runtime_destroy);
     EXPORT("sessionCreate", session_create);
+    EXPORT("sessionExport", session_export);
     EXPORT("sessionRun", session_run);
     EXPORT("sessionAbort", session_abort);
     EXPORT("sessionSubmit", session_submit);

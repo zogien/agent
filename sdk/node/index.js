@@ -3,6 +3,7 @@
 // See README.md; the native bridge is src/addon.c.
 
 const fs = require('node:fs');
+const { exportSnapshot, restoreSnapshot } = require('./checkpoint');
 const { addonPath, candidateLibraryPaths } = require('./location');
 const path = require('node:path');
 
@@ -10,7 +11,7 @@ const ABI_REVISION = 29;
 const BUILTIN_TOOLS = [
   'ExecuteCode',
   'Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash', 'BashOutput', 'KillShell',
-  'WebSearch', 'WebFetch', 'AskUserQuestion',
+  'WebSearch', 'WebFetch', 'AskUserQuestion', 'ReadArtifact',
 ];
 const DEFAULT_TOOLS = ['Read', 'Glob', 'Grep'];
 const SHELL_TOOLS = ['Bash', 'BashOutput', 'KillShell'];
@@ -230,6 +231,7 @@ class Runtime {
     this.tools = [...tools];
     this.hostTools = [...hostTools];
     this.sessions = new Set();
+    this._restores = 0;
     if ((tools.includes('Glob') || tools.includes('Grep')) && !process.env.RG_BIN) {
       const rg = bundledRipgrep(loadedLibrary);
       if (rg) process.env.RG_BIN = rg;
@@ -249,8 +251,21 @@ class Runtime {
     return session;
   }
 
+  async restoreSession(directory, options = {}) {
+    if (!this._handle) throw new Error('runtime is closed');
+    const host = { ...options, workspace: path.resolve(options.workspace || '.') };
+    host.workspaceHome = path.resolve(options.workspaceHome || host.workspace);
+    this._restores++;
+    try {
+      const session = await restoreSnapshot(directory, host.workspaceHome, read => new Session(this, '', host, read));
+      this.sessions.add(session);
+      return session;
+    } finally { this._restores--; }
+  }
+
   close() {
     if (!this._handle) return;
+    if (this._restores) throw new Error('session restore in progress');
     for (const session of [...this.sessions]) session.close();
     this._native.runtimeDestroy(this._handle);
     this._handle = null;
@@ -258,7 +273,7 @@ class Runtime {
 }
 
 class Session {
-  constructor(runtime, model, options = {}) {
+  constructor(runtime, model, options = {}, readCheckpoint) {
     const {
       provider = 'anthropic',
       apiKey,
@@ -304,25 +319,36 @@ class Session {
     this._nextRunId = 1n;
     this._nextInputId = 1n;
     this._active = null;
-    this._handle = this._native.sessionCreate(
-      runtime._handle,
-      {
-        provider: PROVIDERS[provider],
-        protocol,
-        permissionMode: PERMISSION_MODES[permissionMode],
-        shell: SHELL_POLICIES[shell],
-        apiKey: key || '',
-        baseUrl,
-        workspaceRoot: path.resolve(workspace),
-        workspaceHome: workspaceHome ? path.resolve(workspaceHome) : '',
-        model,
-        tools: selected,
-        allow,
-        ask,
-        deny,
-      },
-      (...args) => this._dispatch(...args),
-    );
+    this._workspaceHome = path.resolve(workspaceHome || workspace);
+    this._exporting = false;
+    this.restoreReport = null;
+    const config = {
+      provider: PROVIDERS[provider],
+      protocol,
+      permissionMode: PERMISSION_MODES[permissionMode],
+      shell: SHELL_POLICIES[shell],
+      apiKey: key || '',
+      baseUrl,
+      workspaceRoot: path.resolve(workspace),
+      workspaceHome: workspaceHome ? path.resolve(workspaceHome) : '',
+      model,
+      tools: selected,
+      allow,
+      ask,
+      deny,
+    };
+    const dispatch = (...args) => this._dispatch(...args);
+    this._handle = readCheckpoint
+      ? this._native.sessionCreate(runtime._handle, config, dispatch, readCheckpoint)
+      : this._native.sessionCreate(runtime._handle, config, dispatch);
+    if (readCheckpoint) {
+      try {
+        this.restoreReport = decode(3, config.restoreReport);
+        const description = this.describe();
+        this.model = description.model;
+        this._nextRunId = description.last_run_id + 1n;
+      } catch (error) { this.close(); throw error; }
+    }
   }
 
   _dispatch(kind, a, b, index, runId, sessionId) {
@@ -434,6 +460,7 @@ class Session {
    */
   run(prompt, { maxTurns, streamRetryBudget = 0, onEvent, contextBlocks = [] } = {}) {
     if (!this._handle) return Promise.reject(new Error('session is closed'));
+    if (this._exporting) return Promise.reject(new Error('checkpoint export in progress'));
     if (this._active) return Promise.reject(new Error('a Run is already active on this session'));
     const turns = maxTurns === undefined ? DEFAULT_MAX_TURNS : Number(maxTurns);
     if (!Number.isInteger(turns) || turns < 1 || turns > MAX_TURNS) {
@@ -526,12 +553,21 @@ class Session {
     return decode(2, this._native.sessionDescribe(this._handle));
   }
 
+  async exportCheckpoint(directory) {
+    if (!this._handle || this._active || this._exporting) throw new Error('checkpoint export requires an idle session');
+    this._exporting = true;
+    try { await exportSnapshot(this, directory); }
+    finally { this._exporting = false; }
+  }
+
   setModel(model) {
+    if (this._exporting) throw new Error('checkpoint export in progress');
     this._native.sessionSetModel(this._handle, model);
     this.model = model;
   }
 
   setPermissionMode(mode) {
+    if (this._exporting) throw new Error('checkpoint export in progress');
     if (!(mode in PERMISSION_MODES)) throw new Error(`permissionMode must be one of ${Object.keys(PERMISSION_MODES).join(', ')}`);
     this._native.sessionSetPermissionMode(this._handle, PERMISSION_MODES[mode]);
   }
@@ -547,6 +583,7 @@ class Session {
    * `MESSAGE_POSITION_COMPACTED` and changes nothing.
    */
   rewindToUserMessage(position) {
+    if (this._exporting) throw new Error('checkpoint export in progress');
     if (Number.isSafeInteger(position)) position = BigInt(position);
     if (typeof position !== 'bigint' || position < 1n) throw new TypeError('position must be a positive integer');
     this._native.sessionRewindToUserMessage(this._handle, position);
@@ -554,6 +591,7 @@ class Session {
 
   close() {
     if (!this._handle) return;
+    if (this._exporting) throw new Error('checkpoint export in progress');
     this._native.sessionDestroy(this._handle);
     this._handle = null;
     this.runtime.sessions.delete(this);

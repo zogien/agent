@@ -10,6 +10,7 @@ const path = require('node:path');
 const test = require('node:test');
 const { Worker } = require('node:worker_threads');
 const { once } = require('node:events');
+const { createHash } = require('node:crypto');
 
 const metacodes = require('..');
 const { startMockProvider } = require('./mock_provider');
@@ -83,6 +84,40 @@ test('context blocks reach the provider and wide protocol fields retain every bi
   assert.doesNotMatch(JSON.stringify(provider.requests[0]), /调用后替换/);
   await assert.rejects(session.run('go', { contextBlocks: [{ label: 'a', text: '字'.repeat(22000) }] }), RangeError);
   assert.equal(provider.requests.length, 1);
+});
+
+test('checkpoint restores history, Run identity and readable tool artifacts in a fresh workspace', { skip }, async (t) => {
+  const bytes = 'x'.repeat(180000) + 'portable-result';
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  const provider = await withProvider(t, [
+    ['tool', 'large', {}], ['text', 'remember this response'],
+    ['tool', 'ReadArtifact', { artifact_id: 'sha256:' + sha256, offset: 180000, limit: 15 }], ['echo'],
+  ]);
+  const large = metacodes.tool({ name: 'large', handler: () => bytes });
+  const config = { tools: ['ReadArtifact'], hostTools: [large] };
+  const { session, runtime } = open(t, config, provider, workspace(t), { permissionMode: 'full_access' });
+  const id = session.describe().session_id;
+  session._nextRunId = 9007199254740993n;
+  await session.run('first conversation turn');
+  assert.match(JSON.stringify(provider.requests[1].messages), new RegExp(sha256));
+  const snapshot = path.join(workspace(t), 'snapshot');
+  const exported = session.exportCheckpoint(snapshot);
+  await assert.rejects(session.run('busy'), /export/);
+  await exported;
+  await assert.rejects(session.exportCheckpoint(snapshot), /already exists/);
+  runtime.close();
+  const fresh = new metacodes.Runtime(config);
+  t.after(() => fresh.close());
+  const options = { workspace: workspace(t), apiKey: 'new-key', baseUrl: provider.baseUrl, permissionMode: 'full_access' };
+  const restored = await fresh.restoreSession(snapshot, options);
+  assert.equal(restored.restoreReport.session_id, id);
+  const run = await restored.run('read the saved artifact');
+  assert.match(run.text, /"data":"portable-result"/);
+  assert.equal(run.runId, 9007199254740994n);
+  assert.match(JSON.stringify(provider.requests[2].messages), /remember this response/);
+  const file = path.join(snapshot, 'blobs', sha256 + '.blob');
+  fs.writeFileSync(file, 'tampered');
+  await assert.rejects(fresh.restoreSession(snapshot, options), /integrity/);
 });
 
 test('a model failure reaches the result and a later success clears it', { skip }, async (t) => {
