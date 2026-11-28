@@ -25,6 +25,11 @@ must do about it under `### Migration`.
 
 ### Added
 
+- Node and Python sessions accept ordered text and image input, prompt section
+  edits, model capabilities, durable budgets and journal modes. Hosts can
+  replace the prompt profile and permission rules between Runs. Node also
+  exposes cancellable, asynchronous conversation compaction.
+
 - Node.js and Electron hosts can use `Runtime`, `Session` and JavaScript tools
   directly from `@zogien/agent-sdk`. The six platform packages include a
   prebuilt binding. Runs accept labelled context and expose cancellable tool

@@ -38,6 +38,16 @@ it ends with `STOP_API_ERROR` and a `context_window` model error whose
 includes the estimated input, blocking threshold, compaction outcome and any
 limit the server reported.
 
+## Node Session controls
+
+The Node SDK accepts ordered text and image parts in `session.run` and
+`session.stream`. While idle, replace prompt section edits with
+`setPromptProfile`, replace permission rules with `updatePermissionRules`,
+or summarize the conversation with `await session.compact()`. Use
+`abortCompact()` to cancel a pending summary. A checkpoint preserves prompt
+edits. Supply the current host's `modelCapabilities`, `durableBudget` and
+`runJournalMode` at creation or restore. See the [Node SDK guide](../sdk/node/README.md#session-configuration-and-input).
+
 ## Preview features
 
 Preview features default to disabled, and each has its own switch:
