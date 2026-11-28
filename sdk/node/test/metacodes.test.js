@@ -9,7 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { Worker } = require('node:worker_threads');
-const { spawn } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const { once } = require('node:events');
 const { createHash } = require('node:crypto');
 
@@ -43,6 +43,142 @@ function open(t, runtimeOptions, provider, root, sessionOptions = {}) {
   });
   return { runtime, session };
 }
+
+test('MCP refresh discovers the live stdio catalog and selections control actual calls', { skip }, async t => {
+  const root = workspace(t);
+  const mock = process.env.METACODES_MOCK_MCP_SERVER || path.resolve(__dirname, '../../../zig-out/bin',
+    process.platform === 'win32' ? 'mock_mcp_server.exe' : 'mock_mcp_server');
+  if (!fs.existsSync(mock) && !process.env.METACODES_MOCK_MCP_SERVER) {
+    if (process.env.AGENT_SDK_TEST_INSTALLED) return t.skip('the stdio harness is built in the source suite');
+    execFileSync(process.env.ZIG || 'zig', ['build', 'test:harness', '-Doptimize=ReleaseSafe'],
+      { cwd: path.resolve(__dirname, '../../..'), stdio: 'inherit' });
+  }
+  fs.accessSync(mock);
+  const flag = path.join(root, 'paginate');
+  const launcher = `const args = ['--version', '2025-06-18'];
+    if (require('fs').existsSync(process.argv[2])) args.push('--paginate');
+    process.exit(require('child_process').spawnSync(process.argv[1], args, {stdio:'inherit'}).status ?? 1);`;
+  const id = 'ab'.repeat(32);
+  const server = { namespace: 'fixture', command: process.execPath, args: ['-e', launcher, mock, flag],
+    negotiationPolicy: 'legacy_2025_06_only', serverBindingIdentity: id, configurationFingerprint: 'cd'.repeat(32),
+    env: { ...process.env, MCP_FIXTURE_VALUE: 'arrived-at-mock' } };
+  const runtime = new metacodes.Runtime({ tools: [], mcpServers: [server],
+    mcpCatalogLimits: { maxServers: 1, maxIssues: 8, maxNamespaceBytes: 12 } });
+  t.after(() => runtime.close());
+  await assert.rejects(runtime.describeMcp(), { code: 'MCP_NOT_REFRESHED' });
+  const refresh = runtime.refreshMcp();
+  assert.throws(() => runtime.close(), /in progress/);
+  const first = await refresh;
+  const catalog = await runtime.describeMcp();
+  assert.equal(catalog.catalog_generation, first);
+  assert.equal(catalog.servers[0].server_binding_identity, id);
+  assert.ok(catalog.tools.some(tool => tool.canonical_name === 'env'));
+  assert.equal(typeof catalog.servers[0].ttl_remaining_ms, 'bigint');
+  const step = ['tool', '', { name: 'MCP_FIXTURE_VALUE' }];
+  const provider = await withProvider(t, [step, ['echo'], ['text', 'unselected']]);
+  const session = runtime.session('mock-model', { apiKey: 'test', baseUrl: provider.baseUrl, workspace: root,
+    permissionMode: 'full_access', mcpSelection: [{ serverBindingIdentity: id, toolName: 'env' }] });
+  step[1] = session.describe().mcp.tools[0].model_name;
+  assert.match((await session.run('get the fixture value')).text, /env:MCP_FIXTURE_VALUE=arrived-at-mock/);
+  assert.ok(provider.requests[0].tools.some(tool => tool.name === step[1]));
+  session.updateMcpSelection([]);
+  await session.run('now without the tool');
+  assert.ok(!(provider.requests[2].tools || []).some(tool => tool.name === step[1]));
+  fs.writeFileSync(flag, '');
+  const generation = await runtime.refreshMcp();
+  assert.ok(generation > first);
+  const updated = await runtime.describeMcp();
+  assert.deepEqual(updated.tools.map(tool => tool.canonical_name).sort(), ['echo', 'page.two']);
+  assert.throws(() => session.updateMcpSelection([{ serverBindingIdentity: id, toolName: 'env' }]), { code: 'INVALID_MCP_SELECTION' });
+  const revision = 9007199254740993n;
+  const report = await runtime.applyMcpConfiguration({ desiredRevision: revision, servers: [] });
+  assert.equal(report.disposition, 'applied');
+  assert.equal(report.activeRevision, revision);
+  assert.deepEqual((await runtime.describeMcp()).tools, []);
+  const applied = await runtime.applyMcpConfiguration({ desiredRevision: revision + 1n, servers: [server] });
+  assert.equal(applied.disposition, 'applied');
+  assert.equal((await runtime.describeMcp()).servers[0].namespace, 'fixture');
+  await assert.rejects(runtime.applyMcpConfiguration({ desiredRevision: revision + 2n, servers: [server, server] }),
+    { code: 'RESOURCE_LIMIT' });
+  const rejected = await runtime.applyMcpConfiguration({ desiredRevision: revision + 3n, servers: [
+    { ...server, command: path.join(root, 'missing-server'), configurationFingerprint: '01'.repeat(32) },
+  ] });
+  assert.equal(rejected.disposition, 'rejected');
+  assert.equal(rejected.activeRevision, applied.activeRevision);
+  assert.deepEqual((await runtime.describeMcp()).tools, updated.tools);
+});
+
+test('a host connector streams tool results from the HTTP MCP fixture', { skip }, async t => {
+  const python = process.env.METACODES_TEST_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+  const fixture = process.env.METACODES_MOCK_MCP_HTTP || path.resolve(__dirname, '../../../tests/_harness/mock_mcp_http_server.py');
+  const child = spawn(python, [fixture], { stdio: ['pipe', 'pipe', 'inherit'] });
+  const exited = once(child, 'exit');
+  t.after(async () => { child.stdin.end(); await exited; });
+  const [port] = await once(child.stdout, 'data');
+  const endpoint = `http://127.0.0.1:${port.toString().trim()}/keepalive`;
+  const id = 'ef'.repeat(32);
+  const request = (body, { signal }) => fetch(endpoint, { method: 'POST', body, signal,
+    headers: { 'Content-Type': 'application/json', 'MCP-Protocol-Version': '2025-11-25' } });
+  const server = { namespace: 'remote', transport: 'streamable_http', serverBindingIdentity: id,
+    configurationFingerprint: id, negotiationPolicy: 'legacy_only', open: () => ({
+      async request(frame, options) {
+        const response = await request(frame, options);
+        const body = await response.text();
+        const event = body.split('\n').find(line => line.startsWith('data: '));
+        return { httpStatus: response.status, body: event ? event.slice(6) : body };
+      },
+      async notify(frame, options) { await (await request(frame, options)).arrayBuffer(); },
+      async *requestToolStream(frame, options) {
+        const response = await request(frame, options);
+        for await (const bytes of response.body) yield bytes;
+      },
+      close() {},
+    }) };
+  const runtime = new metacodes.Runtime({ tools: [], mcpServers: [server] });
+  t.after(() => runtime.close());
+  await runtime.refreshMcp();
+  const catalog = await runtime.describeMcp();
+  assert.deepEqual(catalog.tools.map(tool => tool.canonical_name), ['kept']);
+  const step = ['tool', '', {}];
+  const provider = await withProvider(t, [step, ['echo']]);
+  const session = runtime.session('mock-model', { apiKey: 'test', baseUrl: provider.baseUrl, workspace: workspace(t),
+    permissionMode: 'full_access', mcpSelection: [{ serverBindingIdentity: id, toolName: 'kept' }] });
+  step[1] = session.describe().mcp.tools[0].model_name;
+  assert.match((await session.run('call the remote tool')).text, /kept-call/);
+});
+
+test('a Worker can terminate during MCP discovery', { skip, timeout: 10000 }, async () => {
+  const worker = new Worker(`
+    const { parentPort, workerData } = require('node:worker_threads');
+    const { Runtime } = require(workerData);
+    const runtime = new Runtime({ tools: [], mcpServers: [{ namespace: 'wait', transport: 'streamable_http',
+      serverBindingIdentity: 'ab'.repeat(32), configurationFingerprint: 'cd'.repeat(32), timeoutMs: 60000,
+      open() { parentPort.postMessage('opening'); return new Promise(() => {}); } }] });
+    runtime.refreshMcp();
+  `, { eval: true, workerData: require.resolve(sdkName) });
+  try { await once(worker, 'message'); } finally { await worker.terminate(); }
+});
+
+test('a team member sees the roster and its lead drains the reply once', { skip }, async t => {
+  const root = workspace(t);
+  const provider = await withProvider(t, [['tool', 'TeamCreate', { name: 'crew' }],
+    ['tool', 'SpawnTeammate', { name: 'solver', prompt: 'solve' }], ['text', 'delegated'],
+    ['tool', 'SendMessage', { to: 'team-lead', message: 'computed 42', summary: 'done' }], ['text', 'idle']]);
+  const options = { workspaceHome: root, workspace: root, baseUrl: provider.baseUrl, apiKey: 'test', permissionMode: 'full_access' };
+  const { runtime, session: lead } = open(t, { tools: [], enableTeams: true }, provider, root,
+    { ...options, tools: ['TeamCreate', 'SpawnTeammate'], team: { role: 'lead' } });
+  await lead.run('create a team and delegate');
+  assert.equal(lead.describeTeam().pending_spawns[0].name, 'solver');
+  const member = runtime.session('mock-model', { ...options, tools: ['SendMessage'], team: { role: 'member',
+    teamName: 'crew', memberName: 'solver', leadSessionId: lead.describe().session_id, memberLease: '12'.repeat(12) } });
+  const roster = member.describeTeam();
+  assert.equal(roster.role, 'member');
+  assert.ok(roster.members.some(entry => entry.name === 'solver'));
+  assert.equal(member.pollTeam(), null);
+  await member.run('report your result');
+  assert.match(lead.pollTeam(), /computed 42/);
+  assert.equal(lead.pollTeam(), null);
+});
 
 test('preview must be enabled before a preview tool enters the native runtime', { skip }, async (t) => {
   assert.throws(() => new metacodes.Runtime({ tools: ['ExecuteCode'] }), /PreviewFeatureDisabled/);

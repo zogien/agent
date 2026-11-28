@@ -283,6 +283,78 @@ static napi_value make_string(napi_env env, const owned_t *bytes) {
     return value;
 }
 
+#include "mcp_bridge.h"
+
+static int buffer_view(napi_env env, napi_value item, const char *key, metask_agentcore_bytes_view_v1 *view);
+
+static int read_identity(napi_env env, napi_value item, const char *key, uint8_t target[32]) {
+    metask_agentcore_bytes_view_v1 view;
+    if (!buffer_view(env, item, key, &view) || view.len != 32) return 0;
+    memcpy(target, view.ptr, 32);
+    return 1;
+}
+
+typedef struct {
+    metask_agentcore_mcp_server_v1 *items;
+    metask_agentcore_mcp_protocol_limits_v1 *limits;
+    uint32_t count;
+} mcp_servers_t;
+
+static void free_servers(mcp_servers_t *servers) {
+    for (uint32_t i = 0; i < servers->count; i++) {
+        void *ctx = servers->items[i].connector.ctx;
+        if (ctx) mcp_release(ctx);
+    }
+    free(servers->items);
+    free(servers->limits);
+}
+
+static int read_u64(napi_env env, napi_value object, const char *key, uint64_t *out);
+
+static int read_protocol_limits(napi_env env, napi_value obj, metask_agentcore_mcp_protocol_limits_v1 *limits) {
+    limits->struct_size = sizeof(*limits);
+    return read_u64(env, obj, "maxFrameBytes", &limits->max_frame_bytes) &&
+        read_u64(env, obj, "maxTools", &limits->max_tools) && read_u64(env, obj, "maxToolNameBytes", &limits->max_tool_name_bytes) &&
+        read_u64(env, obj, "maxTextBytes", &limits->max_text_bytes) && read_u64(env, obj, "maxSchemaBytes", &limits->max_schema_bytes) &&
+        read_u64(env, obj, "maxJsonDepth", &limits->max_json_depth) && read_u64(env, obj, "maxJsonNodes", &limits->max_json_nodes) &&
+        read_u64(env, obj, "maxCursorBytes", &limits->max_cursor_bytes) && read_u64(env, obj, "maxVersions", &limits->max_versions);
+}
+
+static int read_servers(napi_env env, napi_value array, mcp_servers_t *out) {
+    uint32_t count;
+    if (napi_get_array_length(env, array, &count) != napi_ok || count > METASK_AGENTCORE_MAX_MCP_SERVERS_V1) return 0;
+    if (!count) return 1;
+    out->items = calloc(count, sizeof(*out->items));
+    out->limits = calloc(count, sizeof(*out->limits));
+    if (!out->items || !out->limits) return 0;
+    out->count = count;
+    for (uint32_t i = 0; i < count; i++) {
+        metask_agentcore_mcp_server_v1 *s = &out->items[i];
+        napi_value item = node_element(env, array, i);
+        s->struct_size = sizeof(*s);
+        napi_value limits = node_field(env, item, "limits");
+        napi_valuetype type;
+        if (napi_typeof(env, limits, &type) != napi_ok) return 0;
+        if (type == napi_object) {
+            if (!read_protocol_limits(env, limits, &out->limits[i])) return 0;
+            s->protocol_limits = &out->limits[i];
+        }
+        if (!item || !read_identity(env, item, "identity", s->server_binding_identity) ||
+            !read_identity(env, item, "fingerprint", s->configuration_fingerprint) ||
+            !buffer_view(env, item, "namespace", &s->namespace_) || !buffer_view(env, item, "clientName", &s->client_name) ||
+            !buffer_view(env, item, "clientVersion", &s->client_version) ||
+            !get_property_u32(env, item, "transport", &s->transport_code) || !get_property_u32(env, item, "timeoutMs", &s->timeout_ms) ||
+            !get_property_u32(env, item, "policy", &s->negotiation_policy_code) || !read_connector(env, item, &s->connector)) return 0;
+    }
+    return 1;
+}
+
+static int read_u64(napi_env env, napi_value object, const char *key, uint64_t *out) {
+    napi_value value = node_field(env, object, key);
+    bool lossless;
+    return value && napi_get_value_bigint_uint64(env, value, out, &lossless) == napi_ok && lossless;
+}
+
 /* ---------- Runtime ---------- */
 
 struct runtime_s;
@@ -299,6 +371,7 @@ typedef struct runtime_s {
     tool_ctx_t *tool_contexts;
     owned_t *tool_strings; /* 3 per tool: name, description, schema */
     uint32_t tool_count;
+    uint32_t mcp_jobs;
     int destroyed;
 } runtime_t;
 
@@ -366,6 +439,7 @@ static napi_value runtime_create(napi_env env, napi_callback_info info) {
     napi_get_array_length(env, argv[1], &host_count);
     runtime_t *runtime = (runtime_t *)calloc(1, sizeof(runtime_t));
     metask_agentcore_host_tool_v1 *host_tools = NULL;
+    mcp_servers_t servers = {0};
     if (runtime == NULL) {
         free_list(&builtin);
         napi_throw_error(env, NULL, "out of memory");
@@ -409,8 +483,27 @@ static napi_value runtime_create(napi_env env, napi_callback_info info) {
     config.host_tools = host_tools;
     config.host_tool_count = host_count;
     config.preview = preview ? 1 : 0;
+    metask_agentcore_mcp_catalog_limits_v1 limits = {.struct_size = sizeof(limits)};
+    if (argc == 4) {
+        napi_value opts = argv[3], catalog = node_field(env, opts, "limits");
+        napi_valuetype type;
+        bool teams;
+        if (!catalog || napi_typeof(env, catalog, &type) != napi_ok ||
+            napi_get_value_bool(env, node_field(env, opts, "enableTeams"), &teams) != napi_ok ||
+            !read_servers(env, node_field(env, opts, "servers"), &servers) ||
+            (type != napi_null && (!read_u64(env, catalog, "maxServers", &limits.max_servers) ||
+             !read_u64(env, catalog, "maxNamespaceBytes", &limits.max_namespace_bytes) || !read_u64(env, catalog, "maxIssues", &limits.max_issues)))) {
+            napi_throw_type_error(env, NULL, "invalid runtime MCP or team options");
+            goto fail;
+        }
+        config.enable_teams = teams;
+        config.mcp_catalog_limits = type == napi_null ? NULL : &limits;
+        config.mcp_servers = servers.items;
+        config.mcp_server_count = servers.count;
+    }
     metask_agentcore_owned_bytes_v1 diagnostic = {NULL, 0};
     uint32_t status = g_api->runtime->create(&config, NULL, &runtime->handle, &diagnostic);
+    free_servers(&servers);
     free_list(&builtin);
     free(host_tools);
     host_tools = NULL;
@@ -424,6 +517,7 @@ static napi_value runtime_create(napi_env env, napi_callback_info info) {
     return external;
 
 fail:
+    free_servers(&servers);
     free_list(&builtin);
 fail_after_list:
     free(host_tools);
@@ -440,6 +534,10 @@ static napi_value runtime_destroy(napi_env env, napi_callback_info info) {
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     runtime_t *runtime = get_runtime(env, argv[0]);
     if (runtime == NULL) return NULL;
+    if (runtime->mcp_jobs) {
+        napi_throw_error(env, "BUSY", "MCP operation in progress");
+        return NULL;
+    }
     metask_agentcore_owned_bytes_v1 diagnostic = {NULL, 0};
     uint32_t status = g_api->runtime->destroy(runtime->handle, &diagnostic);
     if (status != METASK_AGENTCORE_STATUS_OK) {
@@ -453,6 +551,146 @@ static napi_value runtime_destroy(napi_env env, napi_callback_info info) {
 }
 
 /* ---------- Session ---------- */
+
+enum mcp_operation { MCP_REFRESH, MCP_APPLY, MCP_DESCRIBE };
+typedef struct {
+    runtime_t *runtime;
+    enum mcp_operation operation;
+    napi_threadsafe_function completion;
+    mcp_environment_t *owner;
+    mutex_t lock;
+    cond_t wake;
+    bool started, finished, stopping;
+    napi_deferred promise;
+    napi_ref inputs;
+    mcp_servers_t servers;
+    metask_agentcore_mcp_configuration_v1 config;
+    metask_agentcore_mcp_apply_report_v1 report;
+    uint64_t generation;
+    uint32_t status;
+    metask_agentcore_owned_bytes_v1 diagnostic, document;
+} mcp_job_t;
+
+static THREAD_RESULT execute_mcp_job(void *data) {
+    mcp_job_t *job = data;
+    metask_agentcore_runtime *r = job->runtime->handle;
+    switch (job->operation) {
+    case MCP_REFRESH: job->status = g_api->mcp->refresh(r, &job->generation, &job->diagnostic); break;
+    case MCP_DESCRIBE: job->status = g_api->mcp->describe(r, &job->document, &job->diagnostic); break;
+    case MCP_APPLY: job->status = g_api->mcp->apply_configuration(r, &job->config, &job->report, &job->diagnostic); break;
+    }
+    mutex_lock(&job->lock);
+    job->finished = true;
+    if (!job->stopping) {
+        napi_status sent = napi_call_threadsafe_function(job->completion, NULL, napi_tsfn_nonblocking);
+        if (sent != napi_closing) napi_release_threadsafe_function(job->completion, napi_tsfn_release);
+    }
+    cond_wake(&job->wake);
+    mutex_unlock(&job->lock);
+    return THREAD_DONE;
+}
+
+static void free_mcp_job(napi_env env, mcp_job_t *job) {
+    free_servers(&job->servers);
+    if (job->inputs) napi_delete_reference(env, job->inputs);
+    cond_destroy(&job->wake);
+    mutex_destroy(&job->lock);
+    if (job->owner) release_mcp_environment(NULL, job->owner, NULL);
+    release_runtime(job->runtime);
+    free(job);
+}
+
+static void finalize_mcp_job(napi_env env, void *data, void *hint) {
+    mcp_job_t *job = data;
+    mutex_lock(&job->lock);
+    if (job->started && !job->finished) {
+        job->stopping = true;
+        stop_mcp_environment(job->owner);
+        while (!job->finished) cond_wait(&job->wake, &job->lock);
+    }
+    mutex_unlock(&job->lock);
+    g_api->buffer_release(&job->diagnostic);
+    g_api->buffer_release(&job->document);
+    free_mcp_job(env, job);
+}
+
+static void complete_mcp_job(napi_env env, napi_value callback, void *ctx, void *data) {
+    mcp_job_t *job = ctx;
+    if (!env) return;
+    job->runtime->mcp_jobs--;
+    napi_value value;
+    if (job->status) {
+        const char *code = status_name(job->status);
+        napi_value label, message;
+        napi_create_string_utf8(env, code, NAPI_AUTO_LENGTH, &label);
+        message = job->diagnostic.len ? make_string(env, &(owned_t){job->diagnostic.ptr, job->diagnostic.len}) : label;
+        napi_create_error(env, label, message, &value);
+        napi_reject_deferred(env, job->promise, value);
+    } else {
+        if (job->operation == MCP_APPLY) {
+            napi_value disposition;
+            napi_create_object(env, &value);
+            const char *names[] = {"", "applied", "superseded", "rejected"};
+            napi_create_string_utf8(env, names[job->report.disposition_code], NAPI_AUTO_LENGTH, &disposition);
+            node_set_field(env, value, "disposition", disposition);
+            node_set_field(env, value, "activeRevision", node_unsigned(env, job->report.active_revision));
+            node_set_field(env, value, "desiredRevision", node_unsigned(env, job->report.desired_revision));
+            node_set_field(env, value, "catalogGeneration", node_unsigned(env, job->report.catalog_generation));
+        } else if (job->operation == MCP_DESCRIBE) {
+            value = make_string(env, &(owned_t){job->document.ptr, job->document.len});
+        } else value = node_unsigned(env, job->generation);
+        napi_resolve_deferred(env, job->promise, value);
+    }
+}
+
+static napi_value queue_mcp_job(napi_env env, napi_callback_info info, enum mcp_operation op) {
+    size_t argc = 2;
+    napi_value argv[2], name, promise;
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    runtime_t *runtime = get_runtime(env, argv[0]);
+    if (!runtime) return NULL;
+    mcp_job_t *job = calloc(1, sizeof(*job));
+    if (!job) { napi_throw_error(env, NULL, "out of memory"); return NULL; }
+    atomic_fetch_add(&runtime->refs, 1);
+    mutex_init(&job->lock);
+    cond_init(&job->wake);
+    job->operation = op;
+    job->runtime = runtime;
+    if (napi_get_instance_data(env, (void **)&job->owner) != napi_ok) {
+        free_mcp_job(env, job);
+        return NULL;
+    }
+    atomic_fetch_add(&job->owner->refs, 1);
+    if (op == MCP_APPLY) {
+        if (argc != 2 || !read_u64(env, argv[1], "desiredRevision", &job->config.desired_revision) ||
+            napi_create_reference(env, argv[1], 1, &job->inputs) != napi_ok ||
+            !read_servers(env, node_field(env, argv[1], "servers"), &job->servers)) {
+            napi_throw_type_error(env, NULL, "invalid MCP configuration");
+            free_mcp_job(env, job);
+            return NULL;
+        }
+        job->config.struct_size = sizeof(job->config);
+        job->config.servers = job->servers.items;
+        job->config.server_count = job->servers.count;
+    }
+    if (napi_create_string_utf8(env, "metacodes.mcp.control", NAPI_AUTO_LENGTH, &name) == napi_ok &&
+        napi_create_promise(env, &job->promise, &promise) == napi_ok &&
+        napi_create_threadsafe_function(env, NULL, NULL, name, 0, 1, job, finalize_mcp_job,
+                                       job, complete_mcp_job, &job->completion) == napi_ok) {
+        if (spawn_thread(execute_mcp_job, job) == 0) {
+            job->started = true;
+            runtime->mcp_jobs++;
+            return promise;
+        }
+        napi_release_threadsafe_function(job->completion, napi_tsfn_abort);
+    } else free_mcp_job(env, job);
+    napi_throw_error(env, NULL, "cannot queue MCP operation");
+    return NULL;
+}
+
+static napi_value refresh_mcp(napi_env env, napi_callback_info info) { return queue_mcp_job(env, info, MCP_REFRESH); }
+static napi_value describe_mcp(napi_env env, napi_callback_info info) { return queue_mcp_job(env, info, MCP_DESCRIBE); }
+static napi_value apply_mcp(napi_env env, napi_callback_info info) { return queue_mcp_job(env, info, MCP_APPLY); }
 
 typedef struct session_s {
     struct session_s *next;
@@ -1058,12 +1296,47 @@ static int read_profile(napi_env env, napi_value array, profile_t *out) {
 typedef struct {
     metask_agentcore_model_capability_v1 models[METASK_AGENTCORE_MAX_MODEL_CAPABILITIES_V1];
     metask_agentcore_durable_budget_profile_v1 budget;
+    metask_agentcore_team_config_v1 team;
+    metask_agentcore_mcp_selection_v1 selection;
 } host_options_t;
+
+static int read_selection(napi_env env, napi_value array, metask_agentcore_mcp_selection_v1 *selection) {
+    uint32_t count;
+    if (napi_get_array_length(env, array, &count) != napi_ok || count > METASK_AGENTCORE_MAX_MCP_TOOLS_V1) return 0;
+    selection->struct_size = sizeof(*selection);
+    if (!count) return 1;
+    metask_agentcore_mcp_selector_v1 *selectors = calloc(count, sizeof(*selectors));
+    if (!selectors) return 0;
+    selection->selectors = selectors;
+    selection->selector_count = count;
+    for (uint32_t i = 0; i < count; i++) {
+        napi_value item = node_element(env, array, i);
+        selectors[i].struct_size = sizeof(*selectors);
+        if (!read_identity(env, item, "identity", selectors[i].server_binding_identity) ||
+            !buffer_view(env, item, "name", &selectors[i].tool_name)) return 0;
+    }
+    return 1;
+}
 
 static int read_host_options(napi_env env, napi_value cfg, host_options_t *storage, metask_agentcore_session_host_config_v1 *host) {
     napi_value array, budget;
     napi_valuetype type;
     uint32_t count;
+    napi_value team = node_field(env, cfg, "team"), selection = node_field(env, cfg, "mcpSelection");
+    if (napi_typeof(env, team, &type) != napi_ok) return 0;
+    if (type == napi_object) {
+        metask_agentcore_team_config_v1 *t = &storage->team;
+        t->struct_size = sizeof(*t);
+        if (!get_property_u32(env, team, "role", &t->role_code) || !buffer_view(env, team, "teamName", &t->team_name) ||
+            !buffer_view(env, team, "memberName", &t->member_name) || !buffer_view(env, team, "leadSessionId", &t->lead_session_id) ||
+            !buffer_view(env, team, "memberLease", &t->member_lease)) return 0;
+        host->team = t;
+    }
+    if (napi_typeof(env, selection, &type) != napi_ok) return 0;
+    if (type == napi_object) {
+        if (!read_selection(env, selection, &storage->selection)) return 0;
+        host->mcp_selection = &storage->selection;
+    }
     if (!get_property_u32(env, cfg, "runJournalMode", &host->run_journal_mode_code) ||
         napi_get_named_property(env, cfg, "modelCapabilities", &array) != napi_ok ||
         napi_get_array_length(env, array, &count) != napi_ok || count > METASK_AGENTCORE_MAX_MODEL_CAPABILITIES_V1) return 0;
@@ -1244,6 +1517,7 @@ static napi_value session_create(napi_env env, napi_callback_info info) {
     atomic_fetch_add(&session->refs, 1);
 
 done:
+    free((void *)host_options.selection.selectors);
     free(api_key.ptr);
     free(base_url.ptr);
     free(workspace_root.ptr);
@@ -1467,18 +1741,25 @@ static napi_value session_update_credential(napi_env env, napi_callback_info inf
     return NULL;
 }
 
-static napi_value session_document(napi_env env, napi_callback_info info, bool goal) {
+enum session_doc { DOC_SESSION, DOC_GOAL, DOC_TEAM, DOC_INBOX };
+static napi_value session_document(napi_env env, napi_callback_info info, enum session_doc kind) {
     size_t argc = 1;
     napi_value argv[1];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     session_t *session = get_session(env, argv[0]);
     if (session == NULL) return NULL;
     metask_agentcore_owned_bytes_v1 output = {NULL, 0}, diagnostic = {NULL, 0};
-    uint32_t status = goal ? g_api->goal->get(session->handle, &output, &diagnostic)
-        : g_api->session_control->describe(session->handle, &output, &diagnostic);
+    uint32_t status;
+    const char *op;
+    switch (kind) {
+    case DOC_GOAL: op = "goal.get"; status = g_api->goal->get(session->handle, &output, &diagnostic); break;
+    case DOC_TEAM: op = "team.describe"; status = g_api->team->describe(session->handle, &output, &diagnostic); break;
+    case DOC_INBOX: op = "team.poll"; status = g_api->team->poll(session->handle, &output, &diagnostic); break;
+    default: op = "session.describe"; status = g_api->session_control->describe(session->handle, &output, &diagnostic); break;
+    }
     if (status != METASK_AGENTCORE_STATUS_OK) {
         g_api->buffer_release(&output);
-        throw_status(env, goal ? "goal.get" : "session.describe", status, &diagnostic);
+        throw_status(env, op, status, &diagnostic);
         return NULL;
     }
     g_api->buffer_release(&diagnostic);
@@ -1489,11 +1770,34 @@ static napi_value session_document(napi_env env, napi_callback_info info, bool g
 }
 
 static napi_value session_describe(napi_env env, napi_callback_info info) {
-    return session_document(env, info, false);
+    return session_document(env, info, DOC_SESSION);
 }
 
 static napi_value get_goal(napi_env env, napi_callback_info info) {
-    return session_document(env, info, true);
+    return session_document(env, info, DOC_GOAL);
+}
+
+static napi_value describe_team(napi_env env, napi_callback_info info) { return session_document(env, info, DOC_TEAM); }
+static napi_value poll_team(napi_env env, napi_callback_info info) { return session_document(env, info, DOC_INBOX); }
+
+static napi_value update_mcp_selection(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    session_t *session = get_session(env, argv[0]);
+    if (!session) return NULL;
+    metask_agentcore_mcp_selection_v1 selection = {0};
+    if (argc != 2 || !read_selection(env, argv[1], &selection)) {
+        free((void *)selection.selectors);
+        napi_throw_type_error(env, NULL, "invalid MCP selection");
+        return NULL;
+    }
+    metask_agentcore_owned_bytes_v1 diagnostic = {0};
+    uint32_t status = g_api->mcp->update_selection(session->handle, &selection, &diagnostic);
+    free((void *)selection.selectors);
+    if (status) throw_status(env, "mcp.update_selection", status, &diagnostic);
+    else g_api->buffer_release(&diagnostic);
+    return NULL;
 }
 
 static bool read_goal_values(napi_env env, napi_value cfg, metask_agentcore_bytes_view_v1 *objective, uint64_t *budget) {
@@ -1837,10 +2141,23 @@ NAPI_MODULE_INIT() {
         napi_throw_error(env, "LOAD_FAILED", "cannot pin Node addon");
         return NULL;
     }
+    mcp_environment_t *owner = calloc(1, sizeof(*owner));
+    if (!owner) { napi_throw_error(env, NULL, "out of memory"); return NULL; }
+    atomic_init(&owner->refs, 1);
+    atomic_init(&owner->stopping, false);
+    if (napi_set_instance_data(env, owner, release_mcp_environment, NULL) != napi_ok) { free(owner); return NULL; }
+    if (napi_add_env_cleanup_hook(env, stop_mcp_environment, owner) != napi_ok) return NULL;
     EXPORT("load", load_library);
     EXPORT("project", project_protocol);
     EXPORT("runtimeCreate", runtime_create);
     EXPORT("runtimeDestroy", runtime_destroy);
+    EXPORT("mcpReply", mcp_reply);
+    EXPORT("applyMcp", apply_mcp);
+    EXPORT("describeMcp", describe_mcp);
+    EXPORT("refreshMcp", refresh_mcp);
+    EXPORT("updateMcpSelection", update_mcp_selection);
+    EXPORT("describeTeam", describe_team);
+    EXPORT("pollTeam", poll_team);
     EXPORT("resolveCatalog", resolve_catalog);
     EXPORT("releaseCatalog", release_catalog);
     EXPORT("bindPolicy", bind_policy);

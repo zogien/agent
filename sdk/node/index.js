@@ -3,6 +3,7 @@
 // See README.md; the native bridge is src/addon.c.
 
 const fs = require('node:fs');
+const mcp = require('./mcp');
 const { exportSnapshot, restoreSnapshot } = require('./checkpoint');
 const { addonPath, candidateLibraryPaths } = require('./location');
 const path = require('node:path');
@@ -142,6 +143,19 @@ function copyBudget(budget) {
   const fields = ['hardBytes', 'softBytes', 'inputCapBytes', 'providerRequestCapBytes', 'providerResultCapBytes',
     'toolResultCapBytes', 'mcpResultCapBytes', 'auditReserveBytes', 'terminalReserveBytes'];
   return Object.fromEntries(fields.map(key => [key, integer64(budget[key], false)]));
+}
+
+function copyTeam(team) {
+  if (team == null) return null;
+  const role = ['lead', 'member'].indexOf(team.role) + 1;
+  if (!role) throw new TypeError('team role must be lead or member');
+  const fields = { role };
+  for (const key of ['teamName', 'memberName', 'leadSessionId', 'memberLease']) {
+    const value = team[key] ?? '';
+    if (typeof value !== 'string') throw new TypeError(`team.${key} must be a string`);
+    fields[key] = Buffer.from(value);
+  }
+  return fields;
 }
 
 function copyInput(prompt) {
@@ -291,10 +305,8 @@ function copyGrants(policy) {
 class Runtime {
   #catalogs = new Map();
 
-  /**
-   * @param {{tools?: string[], hostTools?: object[], library?: string, preview?: boolean}} [options]
-   */
-  constructor({ tools = DEFAULT_TOOLS, hostTools = [], library, preview = false } = {}) {
+  constructor({ tools = DEFAULT_TOOLS, hostTools = [], library, preview = false,
+    enableTeams = false, mcpServers = [], mcpCatalogLimits } = {}) {
     if (typeof preview !== 'boolean') throw new TypeError('preview must be a boolean');
     if (preview) tools = [...new Set([...tools, 'ExecuteCode'])];
     const unknown = tools.filter((name) => !BUILTIN_TOOLS.includes(name));
@@ -313,7 +325,30 @@ class Runtime {
       description: hostTool.description,
       schema: JSON.stringify(hostTool.inputSchema),
     }));
-    this._handle = this._native.runtimeCreate(this.tools, specs, preview);
+    if (typeof enableTeams !== 'boolean') throw new TypeError('enableTeams must be a boolean');
+    const limits = mcpCatalogLimits == null ? null : Object.fromEntries(
+      ['maxServers', 'maxNamespaceBytes', 'maxIssues'].map(key => [key, integer64(mcpCatalogLimits[key], false)]));
+    this._mcpJobs = 0;
+    this._handle = this._native.runtimeCreate(this.tools, specs, preview,
+      { enableTeams, servers: mcp.servers(mcpServers, this._native), limits });
+  }
+
+  async applyMcpConfiguration({ desiredRevision, servers }) {
+    this._mcpJobs++;
+    try {
+      return await this._native.applyMcp(this._handle, { desiredRevision: integer64(desiredRevision, false),
+        servers: mcp.servers(servers, this._native) });
+    } finally { this._mcpJobs--; }
+  }
+
+  async refreshMcp() {
+    this._mcpJobs++;
+    try { return await this._native.refreshMcp(this._handle); } finally { this._mcpJobs--; }
+  }
+
+  async describeMcp() {
+    this._mcpJobs++;
+    try { return decode(6, await this._native.describeMcp(this._handle)); } finally { this._mcpJobs--; }
   }
 
   resolveWorkspaceSkillCatalog({ workspace = '.', workspaceHome = workspace, workspaceEpoch = '',
@@ -377,6 +412,7 @@ class Runtime {
   close() {
     if (!this._handle) return;
     if (this._restores) throw new Error('session restore in progress');
+    if (this._mcpJobs) throw new Error('MCP operation in progress');
     for (const session of [...this.sessions]) session.close();
     for (const catalog of this.#catalogs.keys()) this.releaseCatalog(catalog);
     this._native.runtimeDestroy(this._handle);
@@ -442,6 +478,8 @@ class Session {
     const { skillCatalog, skillPolicy } = options;
     const bindSkills = skillCatalog !== undefined || skillPolicy !== undefined;
     const config = {
+      mcpSelection: options.mcpSelection === undefined ? null : mcp.selection(options.mcpSelection),
+      team: copyTeam(options.team),
       grants: bindSkills ? copyGrants(skillPolicy) : null,
       catalog: bindSkills ? runtime._catalogHandle(skillCatalog) : null,
       promptProfile: copyProfile(options.promptProfile),
@@ -694,6 +732,19 @@ class Session {
 
   getGoal() {
     return decode(4, this._native.getGoal(this._handle)).goal;
+  }
+
+  updateMcpSelection(selectors) {
+    this._requireIdle();
+    this._native.updateMcpSelection(this._handle, mcp.selection(selectors));
+  }
+
+  describeTeam() {
+    return JSON.parse(this._native.describeTeam(this._handle)).team;
+  }
+
+  pollTeam() {
+    return JSON.parse(this._native.pollTeam(this._handle)).input;
   }
 
   setGoal(objective, tokenBudget = 0n) {

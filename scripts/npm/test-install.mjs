@@ -40,6 +40,9 @@ await once(server, 'listening');
 const registry = 'http://127.0.0.1:' + server.address().port;
 const work = await fs.mkdtemp(path.join(tmpdir(), 'agent-sdk-install-'));
 const env = { ...process.env, AGENT_SDK_TEST_INSTALLED: '1', METACODES_NODE_SDK_REQUIRE_LIB: '1' };
+env.METACODES_TEST_PYTHON = execFileSync(process.platform === 'win32' ? 'python' : 'python3',
+  ['-c', 'import sys; print(sys.executable)'], { encoding: 'utf8' }).trim();
+env.METACODES_MOCK_MCP_HTTP = path.resolve('tests/_harness/mock_mcp_http_server.py');
 delete env.ELECTRON_RUN_AS_NODE;
 for (const key of ['METACODES_AGENTCORE_LIB', 'METACODES_AGENTCORE_SDK', 'RG_BIN', 'NODE_PATH']) delete env[key];
 for (const key of Object.keys(env)) {
