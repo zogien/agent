@@ -26,6 +26,30 @@
 
 static const metask_agentcore_api_v1 *g_api = NULL;
 
+napi_value node_field(napi_env env, napi_value object, const char *name) {
+    napi_value out;
+    return napi_get_named_property(env, object, name, &out) == napi_ok ? out : NULL;
+}
+napi_value node_element(napi_env env, napi_value array, uint32_t index) {
+    napi_value out;
+    return napi_get_element(env, array, index, &out) == napi_ok ? out : NULL;
+}
+bool node_set_field(napi_env env, napi_value object, const char *name, napi_value value) {
+    return napi_set_named_property(env, object, name, value) == napi_ok;
+}
+bool node_set_element(napi_env env, napi_value array, uint32_t index, napi_value value) {
+    return napi_set_element(env, array, index, value) == napi_ok;
+}
+napi_value node_unsigned(napi_env env, uint64_t x) {
+    napi_value out;
+    return napi_create_bigint_uint64(env, x, &out) == napi_ok ? out : NULL;
+}
+napi_value node_signed(napi_env env, int64_t x) {
+    napi_value out;
+    return napi_create_bigint_int64(env, x, &out) == napi_ok ? out : NULL;
+}
+extern const char *node_project(napi_env env, uint32_t kind, const uint8_t *ptr, size_t len, napi_value js);
+
 /* ---------- small helpers ---------- */
 
 static const char *status_name(uint32_t status) {
@@ -140,6 +164,30 @@ static int get_property_string(napi_env env, napi_value object, const char *name
     napi_value value;
     if (napi_get_named_property(env, object, name, &value) != napi_ok) return 0;
     return get_string(env, value, out);
+}
+
+static napi_value project_protocol(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    uint32_t kind;
+    owned_t bytes;
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    if (argc != 3 || napi_get_value_uint32(env, argv[0], &kind) != napi_ok ||
+        !get_string(env, argv[1], &bytes)) return NULL;
+    const char *failure = bytes.ptr ? node_project(env, kind, bytes.ptr, bytes.len, argv[2]) : "empty JSON";
+    free(bytes.ptr);
+    if (failure) {
+        napi_throw_error(env, "INVALID_PROTOCOL", failure);
+        return NULL;
+    }
+    return argv[2];
+}
+
+static int get_id(napi_env env, napi_value value, uint64_t *id) {
+    bool lossless = false;
+    if (napi_get_value_bigint_uint64(env, value, id, &lossless) == napi_ok && lossless && *id) return 1;
+    napi_throw_range_error(env, NULL, "expected a nonzero uint64 bigint");
+    return 0;
 }
 
 static int get_property_u32(napi_env env, napi_value object, const char *name, uint32_t *out) {
@@ -500,7 +548,40 @@ typedef struct {
     owned_t text;
     uint32_t max_turns;
     uint32_t stream_retry_budget;
+    metask_agentcore_context_block_v1 *blocks;
+    uint32_t block_count;
 } session_t;
+
+static void release_input(session_t *session) {
+    free(session->text.ptr);
+    session->text = (owned_t){0};
+    for (uint32_t i = 0; i < session->block_count; i++) {
+        free((void *)session->blocks[i].label.ptr);
+        free((void *)session->blocks[i].text.ptr);
+    }
+    free(session->blocks);
+    session->blocks = NULL;
+    session->block_count = 0;
+}
+
+static int copy_blocks(napi_env env, session_t *session, napi_value array) {
+    uint32_t count;
+    if (napi_get_array_length(env, array, &count) != napi_ok || count > 32) return 0;
+    if (count == 0) return 1;
+    session->blocks = calloc(count, sizeof(*session->blocks));
+    if (!session->blocks) return 0;
+    session->block_count = count;
+    for (uint32_t i = 0; i < count; i++) {
+        napi_value item;
+        owned_t label, text;
+        if (napi_get_element(env, array, i, &item) != napi_ok || !get_property_string(env, item, "label", &label)) return 0;
+        session->blocks[i].struct_size = sizeof(*session->blocks);
+        session->blocks[i].label = view_of(&label);
+        if (!get_property_string(env, item, "text", &text)) return 0;
+        session->blocks[i].text = view_of(&text);
+    }
+    return 1;
+}
 
 static uint32_t session_on_event(void *ctx, const metask_agentcore_run_context_v1 *run,
                                  metask_agentcore_bytes_view_v1 event_json) {
@@ -578,9 +659,7 @@ static void session_call_js(napi_env env, napi_value callback, void *context, vo
     } else {
         session->running = 0;
         napi_unref_threadsafe_function(env, session->tsfn);
-        free(session->text.ptr);
-        session->text.ptr = NULL;
-        session->text.len = 0;
+        release_input(session);
         napi_value result, value;
         napi_create_object(env, &result);
         napi_create_uint32(env, message->status, &value);
@@ -752,6 +831,8 @@ static THREAD_RESULT run_thread(void *arg) {
     options.struct_size = (uint32_t)sizeof(options);
     options.max_turns = session->max_turns;
     options.stream_retry_budget = session->stream_retry_budget;
+    options.context_blocks = session->blocks;
+    options.context_block_count = session->block_count;
     message_t *message = (message_t *)calloc(1, sizeof(message_t));
     metask_agentcore_run_result_v1 local_result;
     metask_agentcore_run_result_v1 *result = message ? &message->result : &local_result;
@@ -777,8 +858,8 @@ static THREAD_RESULT run_thread(void *arg) {
 /* sessionRun(session, runId, text, maxTurns, streamRetryBudget): starts the Run;
  * completion is a "done" dispatch. */
 static napi_value session_run(napi_env env, napi_callback_info info) {
-    size_t argc = 5;
-    napi_value argv[5];
+    size_t argc = 6;
+    napi_value argv[6];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     session_t *session = get_session(env, argv[0]);
     if (session == NULL) return NULL;
@@ -786,11 +867,11 @@ static napi_value session_run(napi_env env, napi_callback_info info) {
         napi_throw_error(env, "BUSY", "a Run is already active on this session");
         return NULL;
     }
-    int64_t run_id = 0;
+    uint64_t run_id = 0;
     uint32_t max_turns = 0;
     uint32_t stream_retry_budget = 0;
     owned_t text;
-    if (argc < 5 || napi_get_value_int64(env, argv[1], &run_id) != napi_ok || run_id <= 0 ||
+    if (argc < 6 || !get_id(env, argv[1], &run_id) ||
         napi_get_value_uint32(env, argv[3], &max_turns) != napi_ok ||
         napi_get_value_uint32(env, argv[4], &stream_retry_budget) != napi_ok || !get_string(env, argv[2], &text)) {
         bool pending = false;
@@ -800,6 +881,11 @@ static napi_value session_run(napi_env env, napi_callback_info info) {
     }
     session->run_id = (uint64_t)run_id;
     session->text = text;
+    if (!copy_blocks(env, session, argv[5])) {
+        release_input(session);
+        napi_throw_error(env, NULL, "cannot copy context blocks");
+        return NULL;
+    }
     session->max_turns = max_turns;
     session->stream_retry_budget = stream_retry_budget;
     session->running = 1;
@@ -808,8 +894,7 @@ static napi_value session_run(napi_env env, napi_callback_info info) {
     if (failed) {
         session->running = 0;
         napi_unref_threadsafe_function(env, session->tsfn);
-        free(session->text.ptr);
-        session->text.ptr = NULL;
+        release_input(session);
         napi_throw_error(env, NULL, "cannot start the Run thread");
     }
     return NULL;
@@ -821,8 +906,8 @@ static napi_value session_abort(napi_env env, napi_callback_info info) {
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     session_t *session = get_session(env, argv[0]);
     if (session == NULL) return NULL;
-    int64_t run_id = 0;
-    napi_get_value_int64(env, argv[1], &run_id);
+    uint64_t run_id = 0;
+    if (!get_id(env, argv[1], &run_id)) return NULL;
     metask_agentcore_owned_bytes_v1 diagnostic = {NULL, 0};
     uint32_t status = g_api->session->abort(session->handle, (uint64_t)run_id, METASK_AGENTCORE_ABORT_USER_REQUEST, &diagnostic);
     g_api->buffer_release(&diagnostic);
@@ -838,10 +923,9 @@ static napi_value session_submit(napi_env env, napi_callback_info info) {
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     session_t *session = get_session(env, argv[0]);
     if (session == NULL) return NULL;
-    int64_t run_id = 0, input_id = 0;
+    uint64_t run_id = 0, input_id = 0;
     owned_t text;
-    napi_get_value_int64(env, argv[1], &run_id);
-    napi_get_value_int64(env, argv[2], &input_id);
+    if (!get_id(env, argv[1], &run_id) || !get_id(env, argv[2], &input_id)) return NULL;
     if (!get_string(env, argv[3], &text)) return NULL;
     metask_agentcore_submitted_input_v1 input;
     memset(&input, 0, sizeof(input));
@@ -960,11 +1044,8 @@ static napi_value session_rewind_to_user_message(napi_env env, napi_callback_inf
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     session_t *session = get_session(env, argv[0]);
     if (session == NULL) return NULL;
-    int64_t position = 0;
-    if (napi_get_value_int64(env, argv[1], &position) != napi_ok || position < 1) {
-        napi_throw_type_error(env, NULL, "position must be a positive integer");
-        return NULL;
-    }
+    uint64_t position;
+    if (!get_id(env, argv[1], &position)) return NULL;
     metask_agentcore_owned_bytes_v1 diagnostic = {NULL, 0};
     uint32_t status = g_api->session_control->rewind_to_user_message(session->handle, (uint64_t)position, &diagnostic);
     if (status != METASK_AGENTCORE_STATUS_OK) {
@@ -1065,6 +1146,7 @@ NAPI_MODULE_INIT() {
     if (!load_host_api()) return NULL;
 #endif
     EXPORT("load", load_library);
+    EXPORT("project", project_protocol);
     EXPORT("runtimeCreate", runtime_create);
     EXPORT("runtimeDestroy", runtime_destroy);
     EXPORT("sessionCreate", session_create);

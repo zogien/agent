@@ -91,6 +91,32 @@ function toJson(value, what) {
   return text;
 }
 
+function decode(kind, json) {
+  return native.project(kind, json, JSON.parse(json));
+}
+
+function encodeAnswer(answer) {
+  if (typeof answer?.policy_generation !== 'bigint') return toJson(answer, 'onUiRequest answer');
+  const { policy_generation: generation, ...fields } = answer;
+  if (generation < 1n || generation > 0xffffffffffffffffn) throw new RangeError('invalid policy_generation');
+  const json = toJson(fields, 'permission answer');
+  if (!json.startsWith('{')) throw new TypeError('invalid permission answer');
+  return `{"policy_generation":${generation}${json.length === 2 ? '}' : ',' + json.slice(1)}`;
+}
+
+function copyContextBlocks(blocks) {
+  if (!Array.isArray(blocks) || blocks.length > 32) throw new RangeError('contextBlocks allows up to 32 blocks');
+  let total = 0;
+  return Array.from(blocks, ({ label, text }) => {
+    if (typeof label !== 'string' || typeof text !== 'string') throw new TypeError('context block label and text must be strings');
+    const labelSize = Buffer.byteLength(label);
+    const textSize = Buffer.byteLength(text);
+    total += labelSize + textSize;
+    if (labelSize > 64 || textSize > 65536 || total > 262144) throw new RangeError('contextBlocks exceeds the byte limit');
+    return { label, text };
+  });
+}
+
 // A rejection value can be anything, including one String() throws on
 // (Object.create(null)); the text must never throw.
 function errorText(error) {
@@ -162,7 +188,7 @@ class RunState {
     this.finalText = '';
     this.segments = [];
     this.modelError = null;
-    this.usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+    this.usage = { input_tokens: 0n, output_tokens: 0n, cache_read_input_tokens: 0n, cache_creation_input_tokens: 0n };
   }
 
   observe(tag, payload) {
@@ -185,7 +211,7 @@ class RunState {
     } else if (tag === 'model_error' && payload && typeof payload === 'object') {
       this.modelError = payload;
     } else if (tag === 'usage' && payload && typeof payload === 'object') {
-      for (const key of Object.keys(this.usage)) this.usage[key] += Number(payload[key] || 0);
+      for (const key of Object.keys(this.usage)) this.usage[key] += payload[key] ?? 0n;
     }
   }
 }
@@ -301,8 +327,8 @@ class Session {
     this._native = runtime._native;
     this._onEvent = onEvent;
     this._onUiRequest = onUiRequest;
-    this._nextRunId = 1;
-    this._nextInputId = 1;
+    this._nextRunId = 1n;
+    this._nextInputId = 1n;
     this._active = null;
     this._handle = this._native.sessionCreate(
       runtime._handle,
@@ -339,8 +365,10 @@ class Session {
     const active = this._active;
     let event;
     try {
-      event = JSON.parse(json);
+      event = decode(0, json);
     } catch (error) {
+      if (active && !active.error) active.error = error;
+      this.abort();
       return;
     }
     const keys = Object.keys(event);
@@ -363,7 +391,7 @@ class Session {
     if (!this._onUiRequest) return finish(UI_UNAVAILABLE, '');
     let request;
     try {
-      const data = JSON.parse(json);
+      const data = decode(1, json);
       request = 'ask_question' in data
         ? new UiRequest('ask_question', { questions: data.ask_question })
         : new UiRequest('permission', data.permission || data);
@@ -372,7 +400,7 @@ class Session {
     }
     Promise.resolve()
       .then(() => this._onUiRequest(request))
-      .then((answer) => (answer == null ? null : toJson(answer, 'onUiRequest answer')))
+      .then((answer) => (answer == null ? null : encodeAnswer(answer)))
       .then(
         (text) => (text == null ? finish(UI_UNAVAILABLE, '') : finish(UI_ANSWERED, text)),
         (error) => {
@@ -392,6 +420,7 @@ class Session {
       return active.reject(new AgentCoreError('session.run_input', outcome.status, outcome.statusName, outcome.diagnostic));
     }
     active.resolve({
+      runId: active.runId,
       text: active.state.finalText,
       stopReason: STOP_REASONS[outcome.stopReasonCode] || String(outcome.stopReasonCode),
       turns: outcome.turns,
@@ -413,7 +442,7 @@ class Session {
    * `thinking_discarded` event and is announced by `retry_notice`.
    * @returns {Promise<{text: string, stopReason: string, turns: number, toolCalls: number, usage: object, segments: object[]}>}
    */
-  run(prompt, { maxTurns, streamRetryBudget = 0, onEvent } = {}) {
+  run(prompt, { maxTurns, streamRetryBudget = 0, onEvent, contextBlocks = [] } = {}) {
     if (!this._handle) return Promise.reject(new Error('session is closed'));
     if (this._active) return Promise.reject(new Error('a Run is already active on this session'));
     const turns = maxTurns === undefined ? DEFAULT_MAX_TURNS : Number(maxTurns);
@@ -428,7 +457,7 @@ class Session {
       const runId = this._nextRunId++;
       this._active = { runId, state: new RunState(), onEvent, resolve, reject, error: null };
       try {
-        this._native.sessionRun(this._handle, runId, String(prompt), turns, budget);
+        this._native.sessionRun(this._handle, runId, String(prompt), turns, budget, copyContextBlocks(contextBlocks));
       } catch (error) {
         this._active = null;
         reject(error);
@@ -489,7 +518,7 @@ class Session {
   }
 
   describe() {
-    return JSON.parse(this._native.sessionDescribe(this._handle));
+    return decode(2, this._native.sessionDescribe(this._handle));
   }
 
   setModel(model) {
@@ -513,7 +542,8 @@ class Session {
    * `MESSAGE_POSITION_COMPACTED` and changes nothing.
    */
   rewindToUserMessage(position) {
-    if (!Number.isSafeInteger(position) || position < 1) throw new TypeError('position must be a positive safe integer');
+    if (Number.isSafeInteger(position)) position = BigInt(position);
+    if (typeof position !== 'bigint' || position < 1n) throw new TypeError('position must be a positive integer');
     this._native.sessionRewindToUserMessage(this._handle, position);
   }
 

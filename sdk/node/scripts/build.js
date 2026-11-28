@@ -59,6 +59,10 @@ if (!fs.existsSync(path.join(nodeInclude, 'node_api.h'))) {
 }
 
 fs.mkdirSync(out, { recursive: true });
+const codec = path.join(out, 'protocol.o');
+execFileSync(zig, ['build-obj', '-O', 'ReleaseFast', '-target', platform.target, '-fPIC', '-lc',
+  '--dep', 'protocol', '-Mroot=' + path.join(here, 'src/protocol.zig'),
+  '-Mprotocol=' + path.join(repo, 'sdk/zig/protocol.zig'), '-femit-bin=' + codec], { stdio: 'inherit' });
 const args = [
   'cc', '-shared', '-target', platform.target, '-O2', '-std=c11',
   '-Wall', '-Wextra', '-Wno-unused-parameter',
@@ -66,6 +70,7 @@ const args = [
   '-I', path.join(repo, 'sdk'),
   '-o', path.join(out, 'metacodes.node'),
   path.join(here, 'src', 'addon.c'),
+  codec,
 ];
 if (platform.os === 'win32') {
   const source = fs.readFileSync(path.join(here, 'src', 'addon.c'), 'utf8');

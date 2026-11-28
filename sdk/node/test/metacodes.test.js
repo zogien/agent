@@ -59,10 +59,28 @@ test('a text run returns the final answer, events and usage', { skip }, async (t
   assert.equal(result.text, 'hello from the mock');
   assert.equal(result.stopReason, 'end_turn');
   assert.equal(result.turns, 1);
-  assert.equal(result.usage.input_tokens, 11);
+  assert.equal(result.usage.input_tokens, 11n);
   assert.ok(tags.includes('text_chunk'));
   assert.ok(tags.includes('output_segment_end'));
   assert.match(JSON.stringify(provider.requests[0].messages), /say hello/);
+});
+
+test('context blocks reach the provider and wide protocol fields retain every bit', { skip }, async (t) => {
+  const provider = await withProvider(t, [['text', 'ok']]);
+  const { session } = open(t, { tools: [] }, provider, workspace(t));
+  const blocks = [{ label: 'Document', text: '原始内容' }];
+  const runId = 9007199254740993n;
+  session._nextRunId = runId;
+  const events = [];
+  const run = session.run('go', { contextBlocks: blocks, onEvent: event => events.push(event) });
+  blocks[0].text = '调用后替换';
+  assert.equal((await run).runId, runId);
+  assert.equal(session.describe().last_run_id, runId);
+  assert.ok(events.some(event => event.run_state?.run_id === runId));
+  assert.match(JSON.stringify(provider.requests[0]), /原始内容/);
+  assert.doesNotMatch(JSON.stringify(provider.requests[0]), /调用后替换/);
+  await assert.rejects(session.run('go', { contextBlocks: [{ label: 'a', text: '字'.repeat(22000) }] }), RangeError);
+  assert.equal(provider.requests.length, 1);
 });
 
 test('a model failure reaches the result and a later success clears it', { skip }, async (t) => {
@@ -99,10 +117,10 @@ test('a stream cut after thinking is sent again under the budget (Revision 28)',
   assert.equal(provider.requests.length, 2);
   assert.deepEqual(provider.requests[1], provider.requests[0]);
   const payloads = (tag) => events.filter((event) => tag in event).map((event) => event[tag]);
-  assert.deepEqual(payloads('thinking_discarded'), [{ index: 0, turn: 1, group: 0, bytes: 17 }]);
+  assert.deepEqual(payloads('thinking_discarded'), [{ index: 0, turn: 1, group: 0, bytes: 17n }]);
   // One failed stream of at most three: the first attempt, the request's own
   // re-issue (#461) and the budget's one, after the short backoff.
-  assert.deepEqual(payloads('retry_notice'), [{ attempt: 1, max: 3, delay_ms: 500 }]);
+  assert.deepEqual(payloads('retry_notice'), [{ attempt: 1, max: 3, delay_ms: 500n }]);
   assert.deepEqual(result.segments.map((segment) => segment.disposition), ['discarded', 'final']);
 });
 
@@ -121,8 +139,8 @@ test('without a budget a request cut twice after thinking ends the Run', { skip 
   assert.equal(provider.requests.length, 2);
   assert.deepEqual(provider.requests[1], provider.requests[0]);
   const payloads = (tag) => events.filter((event) => tag in event).map((event) => event[tag]);
-  assert.deepEqual(payloads('thinking_discarded'), [{ index: 0, turn: 1, group: 0, bytes: 17 }]);
-  assert.deepEqual(payloads('retry_notice'), [{ attempt: 1, max: 2, delay_ms: 500 }]);
+  assert.deepEqual(payloads('thinking_discarded'), [{ index: 0, turn: 1, group: 0, bytes: 17n }]);
+  assert.deepEqual(payloads('retry_notice'), [{ attempt: 1, max: 2, delay_ms: 500n }]);
   assert.equal(result.modelError.attempts, 2);
   await assert.rejects(session.run('think', { streamRetryBudget: 9 }), RangeError);
   assert.equal(provider.requests.length, 2);
@@ -277,9 +295,9 @@ test('a shell tool requires a shell policy', { skip }, async (t) => {
 test('describe and setModel', { skip }, async (t) => {
   const provider = await withProvider(t, []);
   const { session } = open(t, { tools: [] }, provider, workspace(t));
-  assert.match(JSON.stringify(session.describe()), /mock-model/);
+  assert.equal(session.describe().model, 'mock-model');
   session.setModel('mock-model-2');
-  assert.match(JSON.stringify(session.describe()), /mock-model-2/);
+  assert.equal(session.describe().model, 'mock-model-2');
 });
 
 test('unknown built-in tools are rejected', { skip }, () => {
@@ -449,18 +467,18 @@ test('rewindToUserMessage reruns an edited message', { skip, timeout: TIMEOUT },
   const provider = await withProvider(t, [['text', 'first answer'], ['text', 'second answer'], ['text', 'edited answer']]);
   const { session } = open(t, { tools: [] }, provider, workspace(t));
   await session.run('alpha-prompt');
-  const position = session.describe().conversation.message_count + 1;
+  const position = session.describe().conversation.message_count + 1n;
   await session.run('beta-prompt');
-  assert.equal(session.describe().conversation.message_count, 4);
+  assert.equal(session.describe().conversation.message_count, 4n);
   // An assistant reply and a position past the end are refused with their
   // own codes and change nothing.
   assert.throws(() => session.rewindToUserMessage(2), { code: 'NOT_USER_MESSAGE' });
   assert.throws(() => session.rewindToUserMessage(9), { code: 'MESSAGE_POSITION_OUT_OF_RANGE' });
   assert.throws(() => session.rewindToUserMessage(0), TypeError);
-  assert.equal(session.describe().conversation.message_count, 4);
+  assert.equal(session.describe().conversation.message_count, 4n);
   assert.equal(provider.requests.length, 2);
   session.rewindToUserMessage(position);
-  assert.equal(session.describe().conversation.message_count, 2);
+  assert.equal(session.describe().conversation.message_count, 2n);
   const result = await session.run('gamma-edited');
   assert.equal(result.text, 'edited answer');
   const rerun = JSON.stringify(provider.requests[2].messages);

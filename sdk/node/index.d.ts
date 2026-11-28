@@ -37,7 +37,7 @@ export class UiRequest {
  * safe to display: redacted and bounded.
  */
 export interface ModelError {
-  run_id: number;
+  run_id: bigint;
   category:
     | 'authentication' | 'permission' | 'payment_required' | 'not_found' | 'invalid_request'
     | 'context_window' | 'rate_limited' | 'overloaded' | 'server_error' | 'timeout'
@@ -48,21 +48,22 @@ export interface ModelError {
   http_status: number | null;
   request_id: string | null;
   retry: 'retryable' | 'not_retryable' | 'unknown';
-  retry_after_ms: number | null;
+  retry_after_ms: bigint | null;
   attempts: number;
   truncated: boolean;
 }
 
 export interface RunResult {
+  runId: bigint;
   text: string;
   stopReason: string;
   turns: number;
   toolCalls: number;
   usage: {
-    input_tokens: number;
-    output_tokens: number;
-    cache_read_input_tokens: number;
-    cache_creation_input_tokens: number;
+    input_tokens: bigint;
+    output_tokens: bigint;
+    cache_read_input_tokens: bigint;
+    cache_creation_input_tokens: bigint;
   };
   segments: { disposition: string; group: number; text: string }[];
   inputAccepted: number;
@@ -96,6 +97,7 @@ export interface SessionOptions {
 }
 
 export interface RunOptions {
+  contextBlocks?: readonly { label: string; text: string }[];
   maxTurns?: number;
   /** Revision 28: re-issues after a broken-off stream, beyond each request's own one (#461), 0 to 8 (default 0). */
   streamRetryBudget?: number;
@@ -111,7 +113,7 @@ export class Session {
   readonly runtime: Runtime;
   model: string;
   run(prompt: string, options?: RunOptions): Promise<RunResult>;
-  stream(prompt: string, options?: { maxTurns?: number; streamRetryBudget?: number }): EventStream;
+  stream(prompt: string, options?: Omit<RunOptions, 'onEvent'>): EventStream;
   abort(): void;
   submit(text: string): number;
   /** Revision 25: replace the provider credential in place, also mid-Run. */
@@ -120,7 +122,7 @@ export class Session {
   setModel(model: string): void;
   setPermissionMode(mode: NonNullable<SessionOptions['permissionMode']>): void;
   /** Revision 27: drop the user message at a 1-based position and everything after it. */
-  rewindToUserMessage(position: number): void;
+  rewindToUserMessage(position: bigint | number): void;
   close(): void;
 }
 
