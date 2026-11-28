@@ -8062,6 +8062,22 @@ fn publicModelError(run_id: u64, detail: core.api_model_error.Detail.View) publi
         },
         .retry_after_ms = detail.retry_after_ms,
         .attempts = detail.attempts,
+        .context_window = if (detail.context_window) |window| .{
+            .origin = switch (window.origin) {
+                inline else => |tag| @field(public_protocol.ContextWindow.Origin, @tagName(tag)),
+            },
+            .estimated_input_tokens = window.estimated_input_tokens,
+            .blocking_limit = window.blocking_limit,
+            .compaction = switch (window.compaction) {
+                inline else => |tag| @field(public_protocol.ContextWindow.Compaction, @tagName(tag)),
+            },
+            .server_limit = if (window.server_limit) |limit| .{
+                .tokens = limit.tokens,
+                .kind = switch (limit.kind) {
+                    inline else => |tag| @field(public_protocol.ContextWindow.LimitKind, @tagName(tag)),
+                },
+            } else null,
+        } else null,
         .truncated = detail.truncated,
     };
 }

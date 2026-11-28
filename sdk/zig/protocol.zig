@@ -170,11 +170,24 @@ pub const ModelErrorCategory = enum {
 /// when an upstream code AgentCore does not recognize qualifies the answer.
 pub const ModelErrorRetry = enum { retryable, not_retryable, unknown };
 
+pub const ContextWindow = struct {
+    pub const Origin = enum { local, provider };
+    pub const Compaction = enum { no_history, insufficient, not_evaluated };
+    pub const LimitKind = enum { input, total, unspecified };
+
+    origin: Origin,
+    estimated_input_tokens: u64,
+    blocking_limit: u64,
+    compaction: Compaction,
+    server_limit: ?struct { tokens: u64, kind: LimitKind } = null,
+};
+
 /// Why a Run stopped with `STOP_API_ERROR`. Exactly one per such Run, before
 /// its terminal `run_state`. Status and stop reason are unchanged by it.
 pub const ModelError = struct {
     run_id: u64,
     category: ModelErrorCategory,
+    context_window: ?ContextWindow = null,
     /// The upstream's most specific identifier, as sent: never interpreted, so
     /// a code no version of this SDK has heard of still arrives. Null if none.
     code: ?[]const u8 = null,
@@ -848,7 +861,9 @@ pub fn decodeCoreEvent(allocator: std.mem.Allocator, encoded: []const u8) Decode
                 return error.InvalidPayload,
             .thinking_discarded => |value| if (value.turn == 0 or value.bytes == 0)
                 return error.InvalidPayload,
-            .model_error => |value| if (value.run_id == 0 or value.message.len == 0 or value.attempts == 0)
+            .model_error => |value| if (value.run_id == 0 or value.message.len == 0 or value.attempts == 0 or
+                (value.context_window != null and value.category != .context_window) or
+                (if (value.context_window) |window| window.origin == .local and (value.http_status != null or value.request_id != null) else false))
                 return error.InvalidPayload,
             else => {},
         }
@@ -1850,6 +1865,15 @@ test "CoreEvent decoder normalizes malformed and invalid inputs" {
     try std.testing.expectError(error.InvalidPayload, decodeCoreEvent(a, "{\"model_error\":{\"run_id\":0,\"category\":\"unknown\",\"message\":\"m\",\"retry\":\"unknown\",\"attempts\":1}}"));
     try std.testing.expectError(error.InvalidPayload, decodeCoreEvent(a, "{\"model_error\":{\"run_id\":1,\"category\":\"unknown\",\"message\":\"\",\"retry\":\"unknown\",\"attempts\":1}}"));
     try std.testing.expectError(error.InvalidPayload, decodeCoreEvent(a, "{\"model_error\":{\"run_id\":1,\"category\":\"unknown\",\"message\":\"m\",\"retry\":\"unknown\",\"attempts\":0}}"));
+    {
+        const decoded = try decodeCoreEvent(a, "{\"model_error\":{\"run_id\":3,\"category\":\"context_window\",\"context_window\":{\"origin\":\"local\",\"estimated_input_tokens\":204841,\"blocking_limit\":165000,\"compaction\":\"no_history\",\"server_limit\":null},\"code\":null,\"type\":null,\"message\":\"m\",\"http_status\":null,\"request_id\":null,\"retry\":\"not_retryable\",\"retry_after_ms\":null,\"attempts\":1,\"truncated\":false}}");
+        defer decoded.deinit();
+        const window = decoded.value.known.model_error.context_window.?;
+        try std.testing.expectEqual(ContextWindow.Origin.local, window.origin);
+        try std.testing.expectEqual(@as(u64, 204841), window.estimated_input_tokens);
+    }
+    try std.testing.expectError(error.InvalidPayload, decodeCoreEvent(a, "{\"model_error\":{\"run_id\":1,\"category\":\"unknown\",\"context_window\":{\"origin\":\"provider\",\"estimated_input_tokens\":1,\"blocking_limit\":1,\"compaction\":\"not_evaluated\"},\"message\":\"m\",\"retry\":\"unknown\",\"attempts\":1}}"));
+    try std.testing.expectError(error.InvalidPayload, decodeCoreEvent(a, "{\"model_error\":{\"run_id\":1,\"category\":\"context_window\",\"context_window\":{\"origin\":\"local\",\"estimated_input_tokens\":1,\"blocking_limit\":1,\"compaction\":\"no_history\"},\"message\":\"m\",\"http_status\":400,\"retry\":\"not_retryable\",\"attempts\":1}}"));
     // input_adopted names an accepted input: id, sequence and turn are never zero.
     try std.testing.expectError(error.InvalidPayload, decodeCoreEvent(a, "{\"input_adopted\":{\"input_id\":0,\"sequence\":1,\"turn\":1}}"));
     try std.testing.expectError(error.InvalidPayload, decodeCoreEvent(a, "{\"input_adopted\":{\"input_id\":1,\"sequence\":0,\"turn\":1}}"));

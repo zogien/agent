@@ -64,7 +64,7 @@ pub const ContextPressure = struct {
         current_context_tokens: usize,
         learned_input_cap: ?usize,
     ) ContextPressure {
-        // 输出预留必须按实际请求的 max_tokens **全额**预留(下限 20K 作余量):
+        // 输出按实际请求的 max_tokens 全额预留。额外余量通常为 20K，小窗口最多用一半作余量。
         // 服务端普遍校验 input + max_tokens ≤ context window(Anthropic "prompt is
         // 服务端普遍校验 input + max_tokens ≤ context window（Anthropic 报 "prompt is
         // too long"；glm-5.2/metask 在 2026-07-06 曾实测 198758 input + 64000 completion
@@ -74,7 +74,7 @@ pub const ContextPressure = struct {
         // 公式与具体窗口无关。旧公式 @min(max_output, 20K) 只留 20K，glm-5.2
         // （窗口 262144、max_tokens 64000）算出 auto 阈值 229144 高于真实输入上限
         // 198144，压缩永远来不及，长会话必撞 400——这是 "auto compact 失效" 的主因。
-        const output_reserve = @max(max_output_tokens, OUTPUT_RESERVE_TOKENS);
+        const output_reserve = @max(max_output_tokens, @min(OUTPUT_RESERVE_TOKENS, raw_context_window / 2));
         const catalog_effective = raw_context_window -| output_reserve;
         const effective = if (learned_input_cap) |cap| @min(catalog_effective, cap) else catalog_effective;
         const formula_auto = effective -| scaledBuffer(AUTOCOMPACT_BUFFER_TOKENS, effective);
@@ -86,7 +86,7 @@ pub const ContextPressure = struct {
             .effective_context_window = effective,
             .auto_compact_threshold = auto,
             .warning_threshold = effective -| scaledBuffer(TOKEN_WARNING_BUFFER_TOKENS, effective),
-            .blocking_limit = effective -| scaledBuffer(BLOCKING_LIMIT_BUFFER_TOKENS, effective),
+            .blocking_limit = effective - @min(scaledBuffer(BLOCKING_LIMIT_BUFFER_TOKENS, effective), effective / 2),
             .current_context_tokens = current_context_tokens,
         };
     }
@@ -110,6 +110,16 @@ pub const ContextPressure = struct {
         return .low;
     }
 };
+
+test "ContextPressure keeps small model windows usable while reserving the actual output" {
+    const small = ContextPressure.fromModel(8192, 1024, null, 512);
+    try std.testing.expect(!small.isAtBlockingLimit());
+    try std.testing.expect(small.blocking_limit < 8192 - 1024);
+    try std.testing.expect(ContextPressure.fromModel(8192, 8192, null, 1).isAtBlockingLimit());
+    const limited = ContextPressure.fromModelWithCap(200_000, 32_000, null, 10, 100);
+    try std.testing.expect(!limited.isAtBlockingLimit());
+    try std.testing.expect(limited.blocking_limit <= 100);
+}
 
 test "ContextPressure reserves full max_output_tokens" {
     // 200K 窗口 + 32K 输出:effective = 200K-32K = 168K(服务端校验 in+max_tokens ≤ window)。

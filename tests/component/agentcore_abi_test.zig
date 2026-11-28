@@ -6140,6 +6140,77 @@ const AutoCompactProbe = struct {
     }
 };
 
+test "L2 context-window admission stops locally and the public SDK decodes the terminal event" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try rootPath(&tmp, &root_buf);
+    var server = try harness.MockServer.startCassette(&.{FINAL_SSE}, 0);
+    defer server.stop();
+    const url = try server.urlOwned(a);
+    defer a.free(url);
+    var probe = ModelErrorProbe{};
+    var fixture = try PublicSessionFixture.initObserved(root, url, "local-window-test", null, &probe, ModelErrorProbe.event);
+    defer fixture.deinit();
+    const input = try a.alloc(u8, 800 * 1024);
+    defer a.free(input);
+    @memset(input, 'x');
+    const result = try fixture.runText(1, input);
+    try std.testing.expectEqual(wire.STOP_API_ERROR, result.stop_reason_code);
+    try std.testing.expectEqual(@as(usize, 0), server.requestCount());
+    try probe.expect(1, .{
+        .category = .context_window,
+        .retry = .not_retryable,
+        .message = "The pending request reaches the local context window limit.",
+        .attempts = 1,
+    });
+    const decoded = try sdk.decodeCoreEvent(a, probe.json_buf[0..probe.json_len]);
+    defer decoded.deinit();
+    const failure = decoded.value.known.model_error;
+    try std.testing.expectEqual(@as(u32, 1), failure.attempts);
+    try std.testing.expectEqual(@as(?u16, null), failure.http_status);
+    try std.testing.expectEqual(@as(?[]const u8, null), failure.request_id);
+    const window = failure.context_window orelse return error.MissingWindow;
+    try std.testing.expect(window.origin == .local);
+    try std.testing.expect(window.compaction == .no_history);
+    try std.testing.expect(window.estimated_input_tokens >= window.blocking_limit);
+    try std.testing.expect(window.server_limit == null);
+}
+
+test "L2 context-window rejection preserves the reported limit and provider attempt" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const root = try rootPath(&tmp, &root_buf);
+    const message = "Input exceeds the context limit (64000 tokens). Request ID: 987654";
+    var server = try harness.MockServer.startHttpCassette(&.{
+        "{\"error\":{\"type\":\"invalid_request_error\",\"message\":\"" ++ message ++ "\"},\"request_id\":\"req-window\"}",
+    }, &.{"HTTP/1.1 400 Bad Request"});
+    defer server.stop();
+    const url = try server.urlOwned(a);
+    defer a.free(url);
+    var probe = ModelErrorProbe{};
+    var fixture = try PublicSessionFixture.initObserved(root, url, "reported-window-test", null, &probe, ModelErrorProbe.event);
+    defer fixture.deinit();
+    const result = try fixture.runText(1, "hello");
+    try std.testing.expectEqual(wire.STOP_API_ERROR, result.stop_reason_code);
+    try std.testing.expectEqual(@as(usize, 1), server.requestCount());
+    const decoded = try sdk.decodeCoreEvent(a, probe.json_buf[0..probe.json_len]);
+    defer decoded.deinit();
+    const failure = decoded.value.known.model_error;
+    try std.testing.expectEqual(@as(u32, 1), failure.attempts);
+    try std.testing.expectEqual(@as(?u16, 400), failure.http_status);
+    try expectOptionalString("req-window", failure.request_id);
+    const window = failure.context_window orelse return error.MissingWindow;
+    try std.testing.expect(window.origin == .provider);
+    try std.testing.expect(window.compaction == .no_history);
+    const limit = window.server_limit orelse return error.MissingLimit;
+    try std.testing.expectEqual(@as(u64, 64000), limit.tokens);
+    try std.testing.expect(limit.kind == .unspecified);
+}
+
 test "L2 issue #430: a context-window rejection inside a public Run compacts and the same Run finishes" {
     const a = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
