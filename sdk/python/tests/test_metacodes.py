@@ -282,6 +282,32 @@ class PythonSdkTest(unittest.TestCase):
             self.assertEqual(second.run(prompt).model_error.context_window["origin"], "local")
             self.assertEqual(len(provider.requests), 1)
 
+    def test_recreated_sessions_keep_server_limits_by_full_model_name(self):
+        prefix = "m" * 128
+        long_prefix = prefix + "n" * 127
+        limits = {prefix: 64_000, prefix + "a": 72_000, long_prefix + "a": 80_000, long_prefix + "b": 96_000}
+        profiles = [{"model": name, "max_input_tokens": 1_000_000} for name in limits]
+        failures = [("status", 400, {}, {"error": {
+            "type": "invalid_request_error", "message": f"prompt is too long: 300000 tokens > {limit} maximum",
+        }}) for limit in limits.values()]
+        prompt = "x" * 1_200_000
+        with MockProvider(failures) as provider, metacodes.Runtime(tools=()) as runtime:
+            options = dict(api_key="k", workspace=str(self.root), base_url=provider.base_url, model_capabilities=profiles)
+            for name, limit in limits.items():
+                with runtime.session(name, **options) as session:
+                    self.assertEqual(session.describe()["max_input_tokens"], 1_000_000)
+                    window = session.run(prompt).model_error.context_window
+                    self.assertEqual(window["origin"], "provider")
+                    self.assertEqual(window["server_limit"]["tokens"], limit)
+
+            for name, limit in limits.items():
+                with self.subTest(name=name), runtime.session(name, **options) as session:
+                    self.assertEqual(session.describe()["max_input_tokens"], limit)
+                    error = session.run(prompt).model_error
+                    self.assertEqual(error.category, "context_window")
+                    self.assertEqual(error.context_window["origin"], "local")
+            self.assertEqual([request["model"] for request in provider.requests], list(limits))
+
     def test_model_profile_requires_a_declaration_and_u32_limits(self):
         with MockProvider([]) as provider, metacodes.Runtime(tools=()) as runtime:
             for fields in ({}, {"max_input_tokens": 0}, {"max_tokens": 1 << 32},

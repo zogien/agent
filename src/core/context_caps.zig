@@ -70,13 +70,13 @@ pub const Snapshot = struct {
 
 const MAX_ENTRIES = 32;
 const MAX_ENDPOINT = 256;
-const MAX_MODEL = 128;
+pub const MAX_MODEL_BYTES = 256;
 const MAX_FILE_BYTES = 256 * 1024;
 
 const Entry = struct {
     endpoint_buf: [MAX_ENDPOINT]u8 = undefined,
     endpoint_len: usize = 0,
-    model_buf: [MAX_MODEL]u8 = undefined,
+    model_buf: [MAX_MODEL_BYTES]u8 = undefined,
     model_len: usize = 0,
     input_cap: u64 = 0,
     source: Source = .observed,
@@ -260,7 +260,7 @@ fn removeLocked(e: *Entry) void {
 }
 
 fn allocateLocked(endpoint: []const u8, model: []const u8) ?*Entry {
-    if (endpoint.len > MAX_ENDPOINT or model.len > MAX_MODEL or model.len == 0) return null;
+    if (endpoint.len > MAX_ENDPOINT or model.len > MAX_MODEL_BYTES or model.len == 0) return null;
     if (count == MAX_ENTRIES) {
         // Evict the oldest measurement; a registry this full is a fleet of
         // gateways, and the stalest entry is the least likely to be used.
@@ -480,7 +480,7 @@ test "context caps: table is bounded and evicts the stalest entry" {
     try std.testing.expectEqual(@as(?u64, null), learnedInputCap("e", "m0"));
     try std.testing.expectEqual(@as(?u64, 1001), learnedInputCap("e", "m1"));
     try std.testing.expectEqual(@as(?u64, 5), learnedInputCap("e", "overflow"));
-    const long_model = "x" ** (MAX_MODEL + 1);
+    const long_model = "x" ** (MAX_MODEL_BYTES + 1);
     try std.testing.expectEqual(LearnOutcome.rejected_key, learnInputCap("e", long_model, 1, .observed));
 }
 
@@ -497,9 +497,12 @@ test "context caps: persistence round-trips through the file and ignores foreign
     setPersistPathForTest(path);
     try std.testing.expectEqual(LearnOutcome.inserted, learnInputCap("https://napi", "glm-5.3-flash", 883_000, .server_message));
     try std.testing.expectEqual(LearnOutcome.inserted, learnInputCap("https://other", "m", 50_000, .observed));
+    const long_model = "m" ** MAX_MODEL_BYTES;
+    try std.testing.expectEqual(LearnOutcome.inserted, learnInputCap("https://other", long_model, 64_000, .server_message));
 
     // A fresh registry reading the same file sees both entries.
     setPersistPathForTest(path);
+    try std.testing.expectEqual(@as(?u64, 64_000), learnedInputCap("https://other", long_model));
     const a = lookup("https://napi", "GLM-5.3-FLASH") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 883_000), a.input_cap);
     try std.testing.expectEqual(Source.server_message, a.source);

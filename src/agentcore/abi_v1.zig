@@ -87,6 +87,8 @@ fn writeJsonStringSafe(writer: *std.Io.Writer, value: []const u8) !void {
 }
 
 comptime {
+    if (wire.MAX_MODEL_CAPABILITY_MODEL_BYTES_V1 > core.context_caps.MAX_MODEL_BYTES)
+        @compileError("context cap keys must fit every declared model name");
     if (wire.MAX_TOOL_ERROR_PAYLOAD_BYTES_V1 != @as(u64, core.tool_exec.MAX_TOOL_ERROR_PAYLOAD_BYTES_V1))
         @compileError("AgentCore wire and core encoded Host-error limits must match");
     if (wire.MAX_HOST_TOOL_RESULT_BYTES_V1 != @as(u64, core.tool_catalog.MAX_HOST_SYNC_RESULT_BYTES) or
