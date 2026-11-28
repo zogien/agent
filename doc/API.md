@@ -48,6 +48,18 @@ or summarize the conversation with `await session.compact()`. Use
 edits. Supply the current host's `modelCapabilities`, `durableBudget` and
 `runJournalMode` at creation or restore. See the [Node SDK guide](../sdk/node/README.md#session-configuration-and-input).
 
+Use `runtime.resolveWorkspaceSkillCatalog({ workspace })` to discover skills.
+Pass the catalog and granted IDs as `skillCatalog` and `skillPolicy`, change
+the grants with `session.bindPolicy`, and invoke a skill with `session.runSkill`
+or a tagged skill input to `stream`. Release the host reference with
+`runtime.releaseCatalog`. Sessions retain their bindings. [Workspace skills](../sdk/node/README.md#workspace-skills)
+
+Manage an idle Session's goal with `setGoal`, `getGoal`, `updateGoal` and
+`clearGoal`. The goal also appears in `describe().goal` and survives checkpoint
+restore. Use `continueGoal()` or stream a `goal_continuation` input to advance
+an active goal. Both `run` and `stream` accept `timeContext` and
+`utcOffsetMinutes` for the current Run's date block. [Node SDK guide](../sdk/node/README.md#goals)
+
 ## Preview features
 
 Preview features default to disabled, and each has its own switch:

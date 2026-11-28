@@ -155,6 +155,12 @@ const session = runtime.session('…', {
 
 ## Run context, cancellation and checkpoints
 
+`timeContext` defaults to `'system'` on both `run` and `stream`. Use
+`{ timeContext: 'utc_offset', utcOffsetMinutes: 345 }` for UTC+05:45, or
+`{ timeContext: 'off' }` to omit the runtime's `currentDate` block for this
+Run. The offset is an integer from -840 to 840 minutes east of UTC. Only
+`'utc_offset'` accepts a nonzero offset.
+
 `run(prompt, { contextBlocks: [{ label, text }] })` and `stream` copy the blocks
 when called. Each Run accepts up to 32 blocks, a 64-byte label and 64 KiB of text
 per block, and 256 KiB total, measured in UTF-8.
@@ -197,6 +203,53 @@ with up to 128 MiB per blob and 1 GiB of blobs per Session.
 The installed package locates the addon and shared library in the platform
 package. Keep that package's native files unpacked when bundling an Electron
 application; its library, helpers and manifest must remain accessible as files.
+
+## Workspace skills
+
+`resolveWorkspaceSkillCatalog` returns the descriptor for a workspace. Each
+entry includes its invocation name, concrete skill ID and argument schema.
+Pass the catalog and an array of granted skill IDs together to create or
+restore a Session. An empty grant list denies all skills.
+
+```js
+const catalog = runtime.resolveWorkspaceSkillCatalog({ workspace });
+try {
+  const skill = catalog.skills.find(s => s.invocation_name === 'review');
+  if (!skill) throw new Error('review skill is unavailable');
+  const session = runtime.session(model, { workspace, skillCatalog: catalog, skillPolicy: [skill.skill_id] });
+  const input = { skillId: skill.skill_id, catalogRevision: catalog.catalog_revision, values: ['the changes'] };
+  await session.runSkill(input);
+  session.bindPolicy(catalog, []);
+} finally {
+  runtime.releaseCatalog(catalog);
+}
+```
+
+For streaming, pass `{ type: 'skill', ...input }` to `session.stream()`.
+An idle Session can replace its catalog and grants together with `bindPolicy`.
+After release the Session retains its binding. Use `bindPolicy(null, grants)`
+to update grants against the retained catalog. Resolving a new catalog requires
+granting IDs from that descriptor. To configure discovery, pass `workspaceHome`,
+`workspaceEpoch`, `defaultUserSourcePriority`, `defaultWorkspaceSourcePriority`
+or `additionalSources` entries with `{ scope, root, sourceInstanceId, priority }`.
+
+## Goals
+
+```js
+session.setGoal('Review the importer changes', 10000n);
+await session.continueGoal();
+console.log(session.getGoal().tokens_used);
+session.updateGoal({ tokenBudget: 20000n, action: 'pause' });
+```
+
+`getGoal()` and `describe().goal` return the current goal or `null`.
+Budgets, token usage and millisecond timestamps and durations are `bigint`.
+A zero budget removes the cap. An update can replace the objective, change the
+budget and apply one action (`pause`, `activate`, `block` or `complete`)
+atomically. An active goal can also be continued with
+`session.stream({ type: 'goal_continuation' })`. The runtime supplies the
+input, accounts for usage and preserves the goal across checkpoint restore.
+Use `clearGoal()` to remove it.
 
 ## Building and testing
 

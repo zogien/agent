@@ -88,6 +88,104 @@ test('context blocks reach the provider and wide protocol fields retain every bi
   assert.equal(provider.requests.length, 1);
 });
 
+test('run and stream apply time context to the current user record', { skip }, async (t) => {
+  const provider = await withProvider(t, [['text', 'ok'], ['text', 'ok']]);
+  const { session } = open(t, { tools: [] }, provider, workspace(t));
+  for (const options of [
+    { timeContext: 'utc_offset', utcOffsetMinutes: -841 }, { timeContext: 'utc_offset', utcOffsetMinutes: 841 },
+    { timeContext: 'off', utcOffsetMinutes: 1 }, { utcOffsetMinutes: -1 }, { timeContext: 'local' },
+    { timeContext: 'utc_offset', utcOffsetMinutes: 0.5 }, { timeContext: 'utc_offset', utcOffsetMinutes: 2 ** 32 },
+  ]) await assert.rejects(session.run('invalid', options));
+  await session.stream('no date', { timeContext: 'off' }).result;
+  assert.doesNotMatch(JSON.stringify(provider.requests[0]), /# currentDate/);
+  const day = () => new Date(Date.now() - 840 * 60000).toISOString().slice(0, 10);
+  const before = day();
+  await session.run('offset date', { timeContext: 'utc_offset', utcOffsetMinutes: -840 });
+  const user = JSON.stringify(provider.requests[1].messages.at(-1));
+  assert.match(user, /# currentDate/);
+  assert.match(user, /UTC-14:00/);
+  assert.ok([before, day()].some(date => user.includes(date)));
+  assert.equal(provider.requests.length, 2);
+});
+
+test('a session retains its skill catalog and enforces replacement grants', { skip }, async (t) => {
+  const provider = await withProvider(t, [['text', 'ran'], ['text', 'streamed']]);
+  const root = workspace(t);
+  for (const [source, body] of [['.agents', 'default'], ['extra', 'selected']]) {
+    const dir = path.join(root, source, 'skills', 'review');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'SKILL.md'),
+      '---\nname: Review\ndescription: Review a target\narguments: [target]\n---\n' + body + ' review for $target');
+  }
+  const runtime = new metacodes.Runtime({ tools: [] });
+  t.after(() => runtime.close());
+  const catalog = runtime.resolveWorkspaceSkillCatalog({ workspace: root, workspaceEpoch: 'first',
+    defaultWorkspaceSourcePriority: -1, additionalSources: [
+      { scope: 'workspace', root: path.join(root, 'extra', 'skills'), sourceInstanceId: 'host.extra' },
+    ] });
+  assert.equal(catalog.skills.length, 1);
+  const [skill] = catalog.skills;
+  assert.equal(skill.source.source_instance_id, 'host.extra');
+  const options = { workspace: root, apiKey: 'test', baseUrl: provider.baseUrl, skillCatalog: catalog };
+  const otherRuntime = new metacodes.Runtime({ tools: [] });
+  t.after(() => otherRuntime.close());
+  assert.throws(() => otherRuntime.session('mock-model', { ...options, skillPolicy: [] }), /another runtime/);
+  assert.throws(() => runtime.session('mock-model', options), /skillPolicy/);
+  const session = runtime.session('mock-model', { ...options, skillPolicy: [skill.skill_id] });
+  const input = { skillId: skill.skill_id, catalogRevision: catalog.catalog_revision, values: ['the changes'] };
+  await session.runSkill(input);
+  assert.match(JSON.stringify(provider.requests[0].messages), /selected review for the changes/);
+  session.bindPolicy(catalog, []);
+  assert.throws(() => session.bindPolicy(catalog, ['unknown-id']));
+  await assert.rejects(session.runSkill(input), { code: 'SKILL_POLICY_VIOLATION' });
+  session.bindPolicy(catalog, [skill.skill_id]);
+  runtime.releaseCatalog(catalog);
+  assert.throws(() => session.bindPolicy(catalog, []), /released/);
+  assert.throws(() => runtime.releaseCatalog(catalog), /released/);
+  assert.throws(() => runtime.session('mock-model', { ...options, skillPolicy: [] }), /released/);
+  session.bindPolicy(null, []);
+  await assert.rejects(session.runSkill(input), { code: 'SKILL_POLICY_VIOLATION' });
+  session.bindPolicy(null, [skill.skill_id]);
+  assert.equal((await session.stream({ type: 'skill', ...input }).result).text, 'streamed');
+  assert.equal(provider.requests.length, 2);
+});
+
+test('goals preserve exact budgets, generate continuation input and survive restore', { skip }, async (t) => {
+  const provider = await withProvider(t, [['text', 'progress']]);
+  const { runtime, session } = open(t, { tools: [] }, provider, workspace(t));
+  const budget = 9007199254740993n;
+  assert.equal(session.getGoal(), null);
+  session.setGoal('initial', budget);
+  const goal = session.getGoal();
+  assert.equal(goal.objective, 'initial');
+  assert.equal(goal.token_budget, budget);
+  assert.deepEqual(session.describe().goal, goal);
+  assert.throws(() => session.updateGoal({ objective: 'invalid budget', tokenBudget: 1n << 64n }), RangeError);
+  assert.deepEqual(session.getGoal(), goal);
+  session.updateGoal({ objective: 'Review <changes>', tokenBudget: budget + 2n });
+  const events = [];
+  await session.continueGoal({ onEvent: e => events.push(e) });
+  assert.match(JSON.stringify(provider.requests[0].messages), /<objective>[\s\S]*Review &lt;changes&gt;[\s\S]*<\/objective>/);
+  const charged = session.getGoal();
+  assert.equal(charged.id, goal.id);
+  assert.equal(charged.token_budget, budget + 2n);
+  assert.ok(charged.tokens_used > 0n);
+  assert.equal(typeof charged.updated_at_ms, 'bigint');
+  assert.deepEqual(events.filter(e => e.goal_updated).at(-1).goal_updated, charged);
+  session.updateGoal({ action: 'pause' });
+  const paused = session.describe().goal;
+  assert.equal(paused.status, 'paused');
+  await assert.rejects(session.stream({ type: 'goal_continuation' }).result, { code: 'GOAL_CONFLICT' });
+  assert.equal(provider.requests.length, 1);
+  const snapshot = path.join(workspace(t), 'snapshot');
+  await session.exportCheckpoint(snapshot);
+  session.close();
+  const restored = await runtime.restoreSession(snapshot, { workspace: workspace(t), baseUrl: provider.baseUrl, apiKey: 'test' });
+  assert.deepEqual(restored.getGoal(), paused);
+  restored.clearGoal();
+  assert.equal(restored.describe().goal, null);
+});
+
 test('checkpoint restores history, Run identity and readable tool artifacts in a fresh workspace', { skip }, async (t) => {
   const bytes = 'x'.repeat(180000) + 'portable-result';
   const sha256 = createHash('sha256').update(bytes).digest('hex');

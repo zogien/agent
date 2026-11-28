@@ -1296,7 +1296,9 @@ but the objective is fixed-width, so charging the goal never changes its
 size. A new or edited objective, and clear, are admitted against the durable
 budget before anything changes (`CHECKPOINT_BUDGET_REQUIRED`). A Session
 without a goal keeps writing marker 8 or 9, readable by earlier libraries.
-Restore brings the goal back with its id and usage.
+Restore brings the goal back with its id and usage. The Node binding reads
+`goal->get` to populate both `session.getGoal()` and `session.describe().goal`.
+Its 64-bit goal fields use JavaScript `bigint`.
 
 ### Teams
 
