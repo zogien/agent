@@ -25,12 +25,22 @@ function argument(name) {
   return index === -1 ? null : process.argv[index + 1];
 }
 
-if (process.platform === 'win32') {
-  console.error('metacodes: the Node addon does not support Windows yet (it needs dlopen and pthreads).');
-  process.exit(1);
-}
+const platforms = require('../../../scripts/npm/platforms.json').platforms;
+const selected = argument('--target');
+const platform = platforms.find(p => selected ? p.target === selected : p.os === process.platform && p.cpu === process.arch);
+if (!platform) throw new Error('Unsupported Node addon target');
 
-const bundle = argument('--bundle');
+let bundle = argument('--bundle');
+const artifact = argument('--artifact');
+if (artifact) {
+  const base = path.join(repo, 'zig-out', 'agentcore');
+  const roots = fs.readdirSync(base).map(dir => path.join(base, dir)).filter(dir => {
+    const file = path.join(dir, 'manifest.json');
+    return fs.existsSync(file) && JSON.parse(fs.readFileSync(file)).target.id === platform.target;
+  });
+  if (roots.length !== 1) throw new Error('Expected one built SDK bundle for ' + platform.target);
+  bundle = roots[0];
+}
 if (bundle) {
   const { verifyBundle } = require('./verify_bundle.js');
   try {
@@ -40,9 +50,9 @@ if (bundle) {
     process.exit(1);
   }
 }
-const out = path.resolve(argument('--out') || path.join(here, 'prebuilds', `${process.platform}-${process.arch}`));
+const out = path.resolve(argument('--out') || path.join(here, 'prebuilds', `${platform.os}-${platform.cpu}`));
 const zig = process.env.ZIG || 'zig';
-const nodeInclude = process.env.NODE_INCLUDE_DIR || path.join(path.dirname(process.execPath), '..', 'include', 'node');
+const nodeInclude = process.env.NODE_INCLUDE_DIR || path.join(path.dirname(require.resolve('node-api-headers/package.json')), 'include');
 if (!fs.existsSync(path.join(nodeInclude, 'node_api.h'))) {
   console.error(`metacodes: node_api.h not found in ${nodeInclude}; set NODE_INCLUDE_DIR`);
   process.exit(1);
@@ -50,20 +60,50 @@ if (!fs.existsSync(path.join(nodeInclude, 'node_api.h'))) {
 
 fs.mkdirSync(out, { recursive: true });
 const args = [
-  'cc', '-shared', '-fPIC', '-O2', '-std=c11', '-pthread',
+  'cc', '-shared', '-target', platform.target, '-O2', '-std=c11',
   '-Wall', '-Wextra', '-Wno-unused-parameter',
   '-I', nodeInclude,
   '-I', path.join(repo, 'sdk'),
   '-o', path.join(out, 'metacodes.node'),
   path.join(here, 'src', 'addon.c'),
 ];
-if (process.platform === 'darwin') args.push('-Wl,-undefined,dynamic_lookup');
+if (platform.os === 'win32') {
+  const source = fs.readFileSync(path.join(here, 'src', 'addon.c'), 'utf8');
+  const symbols = [...new Set(Array.from(source.matchAll(/\b(napi_\w+)\s*\(/g), m => m[1]))].sort();
+  fs.writeFileSync(path.join(out, 'host_api.h'), [
+    ...symbols.map(name => `static __typeof__(&${name}) host_${name};`),
+    'static BOOL CALLBACK bind_host_api(PINIT_ONCE once, PVOID arg, PVOID *ctx) {',
+    '  HMODULE host = GetModuleHandleW(L"libnode.dll");',
+    '  if (!host) host = GetModuleHandleW(NULL);',
+    ...symbols.map(name => `  if (!(host_${name} = (__typeof__(&${name}))GetProcAddress(host, "${name}"))) return FALSE;`),
+    '  return TRUE;',
+    '}',
+    'static int load_host_api(void) {',
+    '  static INIT_ONCE once = INIT_ONCE_STATIC_INIT;',
+    '  return InitOnceExecuteOnce(&once, bind_host_api, NULL, NULL);',
+    '}',
+    ...symbols.map(name => `#define ${name} host_${name}`),
+  ].join('\n'));
+  args.push('-I', out);
+} else {
+  args.push('-fPIC', '-pthread');
+  if (platform.os === 'darwin') args.push('-Wl,-undefined,dynamic_lookup');
+}
 execFileSync(zig, args, { stdio: 'inherit' });
 
 fs.copyFileSync(path.join(repo, 'LICENSE'), path.join(out, 'metacodes-LICENSE'));
 
 if (bundle) {
   const manifest = JSON.parse(fs.readFileSync(path.join(bundle, 'manifest.json'), 'utf8'));
+  if (manifest.target.id !== platform.target) throw new Error('SDK and addon targets differ');
+  if (artifact) {
+    fs.mkdirSync(artifact, { recursive: true });
+    const file = path.join(artifact, platform.target + '.node');
+    fs.copyFileSync(path.join(out, 'metacodes.node'), file);
+    const sha256 = require('node:crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+    fs.writeFileSync(file + '.json', JSON.stringify({ target: platform.target, version: manifest.version,
+      commit: manifest.source.commit, revision: manifest.contract.binary_abi_revision, sha256 }));
+  }
   const library = path.join(bundle, manifest.shared_library.path);
   fs.copyFileSync(library, path.join(out, path.basename(library)));
   const bin = path.join(bundle, 'bin');

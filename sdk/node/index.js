@@ -3,7 +3,7 @@
 // See README.md; the native bridge is src/addon.c.
 
 const fs = require('node:fs');
-const os = require('node:os');
+const { addonPath, candidateLibraryPaths } = require('./location');
 const path = require('node:path');
 
 const ABI_REVISION = 29;
@@ -37,34 +37,12 @@ const HOST_FAILED = 1;
 const UI_ANSWERED = 0;
 const UI_UNAVAILABLE = 1;
 
-const PLATFORM_DIR = path.join(__dirname, 'prebuilds', `${process.platform}-${process.arch}`);
-
-function libraryFileName() {
-  if (process.platform === 'darwin') return 'libmetask_agentcore.dylib';
-  if (process.platform === 'win32') return 'metask_agentcore.dll';
-  return 'libmetask_agentcore.so';
-}
-
-/** Where the AgentCore shared library is looked for, in order. */
-function candidateLibraryPaths(explicit) {
-  if (explicit) return [path.resolve(explicit)];
-  const name = libraryFileName();
-  const paths = [];
-  if (process.env.METACODES_AGENTCORE_LIB) paths.push(path.resolve(process.env.METACODES_AGENTCORE_LIB));
-  paths.push(path.join(PLATFORM_DIR, name));
-  if (process.env.METACODES_AGENTCORE_SDK) paths.push(path.join(process.env.METACODES_AGENTCORE_SDK, 'lib', name));
-  const opt = path.join(os.homedir(), '.local', 'opt');
-  paths.push(path.join(opt, 'metacodes', 'sdk', 'agentcore', 'lib', name));
-  paths.push(path.join(opt, 'metacodes-dev', 'sdk', 'agentcore', 'lib', name));
-  return paths;
-}
-
 let native = null;
 let loadedLibrary = null;
 
 function loadNative(explicit) {
   if (!native) {
-    const addon = path.join(PLATFORM_DIR, 'metacodes.node');
+    const addon = addonPath();
     if (!fs.existsSync(addon)) {
       throw new Error(`metacodes: no native addon for ${process.platform}-${process.arch} at ${addon}`);
     }
@@ -79,7 +57,8 @@ function loadNative(explicit) {
   const tried = [];
   for (const candidate of candidateLibraryPaths(explicit)) {
     if (fs.existsSync(candidate)) {
-      native.load(candidate);
+      if (native.abiRevision !== ABI_REVISION || native.load(candidate) !== ABI_REVISION)
+        throw new Error('AgentCore Node binding ABI revision mismatch');
       loadedLibrary = candidate;
       return native;
     }

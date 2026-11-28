@@ -11,17 +11,14 @@
  * Run reaches JavaScript before its completion) and one per Runtime (host tool
  * calls). Tool calls and UI requests block their AgentCore thread until
  * JavaScript answers through completeCall(); the JavaScript thread itself never
- * blocks on a Run.
- *
- * POSIX only for now (dlopen, pthreads); Windows is not supported yet. */
+ * blocks on a Run. */
 
 #define NAPI_VERSION 8
 #include <node_api.h>
 
 #include <metask/agentcore.h>
 
-#include <dlfcn.h>
-#include <pthread.h>
+#include "platform.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -208,16 +205,16 @@ static int get_string_list(napi_env env, napi_value object, const char *name, st
 /* ---------- blocking calls into JavaScript (tool calls, UI requests) ---------- */
 
 typedef struct {
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
+    mutex_t mutex;
+    cond_t cond;
     int done;
     uint32_t status;
     owned_t result;
 } pending_t;
 
 static void pending_init(pending_t *pending) {
-    pthread_mutex_init(&pending->mutex, NULL);
-    pthread_cond_init(&pending->cond, NULL);
+    mutex_init(&pending->mutex);
+    cond_init(&pending->cond);
     pending->done = 0;
     pending->status = 0;
     pending->result.ptr = NULL;
@@ -225,24 +222,24 @@ static void pending_init(pending_t *pending) {
 }
 
 static void pending_finish(pending_t *pending, uint32_t status, owned_t result) {
-    pthread_mutex_lock(&pending->mutex);
+    mutex_lock(&pending->mutex);
     if (!pending->done) {
         pending->status = status;
         pending->result = result;
         pending->done = 1;
         result.ptr = NULL;
     }
-    pthread_cond_signal(&pending->cond);
-    pthread_mutex_unlock(&pending->mutex);
+    cond_wake(&pending->cond);
+    mutex_unlock(&pending->mutex);
     free(result.ptr);
 }
 
 static void pending_wait(pending_t *pending) {
-    pthread_mutex_lock(&pending->mutex);
-    while (!pending->done) pthread_cond_wait(&pending->cond, &pending->mutex);
-    pthread_mutex_unlock(&pending->mutex);
-    pthread_mutex_destroy(&pending->mutex);
-    pthread_cond_destroy(&pending->cond);
+    mutex_lock(&pending->mutex);
+    while (!pending->done) cond_wait(&pending->cond, &pending->mutex);
+    mutex_unlock(&pending->mutex);
+    mutex_destroy(&pending->mutex);
+    cond_destroy(&pending->cond);
 }
 
 enum message_kind { MSG_EVENT = 1, MSG_UI = 2, MSG_DONE = 3, MSG_TOOL = 4 };
@@ -743,7 +740,7 @@ done:
     return external;
 }
 
-static void *run_thread(void *arg) {
+static THREAD_RESULT run_thread(void *arg) {
     session_t *session = (session_t *)arg;
     metask_agentcore_run_input_v1 input;
     memset(&input, 0, sizeof(input));
@@ -764,7 +761,7 @@ static void *run_thread(void *arg) {
     uint32_t status = g_api->session->run_input(session->handle, session->run_id, &input, &options, result, &diagnostic);
     if (message == NULL) {
         g_api->buffer_release(&diagnostic);
-        return NULL; /* out of memory: the Promise cannot be settled */
+        return THREAD_DONE; /* out of memory: the Promise cannot be settled */
     }
     message->kind = MSG_DONE;
     message->status = status;
@@ -774,7 +771,7 @@ static void *run_thread(void *arg) {
         free(message->data.ptr);
         free(message);
     }
-    return NULL;
+    return THREAD_DONE;
 }
 
 /* sessionRun(session, runId, text, maxTurns, streamRetryBudget): starts the Run;
@@ -807,13 +804,7 @@ static napi_value session_run(napi_env env, napi_callback_info info) {
     session->stream_retry_budget = stream_retry_budget;
     session->running = 1;
     napi_ref_threadsafe_function(env, session->tsfn);
-    pthread_t thread;
-    pthread_attr_t attributes;
-    pthread_attr_init(&attributes);
-    pthread_attr_setdetachstate(&attributes, PTHREAD_CREATE_DETACHED);
-    pthread_attr_setstacksize(&attributes, 8 * 1024 * 1024);
-    int failed = pthread_create(&thread, &attributes, run_thread, session);
-    pthread_attr_destroy(&attributes);
+    int failed = spawn_thread(run_thread, session);
     if (failed) {
         session->running = 0;
         napi_unref_threadsafe_function(env, session->tsfn);
@@ -1036,23 +1027,23 @@ static napi_value load_library(napi_env env, napi_callback_info info) {
             napi_throw_type_error(env, NULL, "library path required");
             return NULL;
         }
-        void *library = dlopen((const char *)path.ptr, RTLD_NOW | RTLD_LOCAL);
+        void *library = open_library((const char *)path.ptr);
         free(path.ptr);
         if (library == NULL) {
-            napi_throw_error(env, "LOAD_FAILED", dlerror());
+            napi_throw_error(env, "LOAD_FAILED", library_error());
             return NULL;
         }
-        const void *(*get_api)(uint32_t) = (const void *(*)(uint32_t))dlsym(library, "metask_agentcore_get_api");
+        const void *(*get_api)(uint32_t) = (const void *(*)(uint32_t))library_symbol(library, "metask_agentcore_get_api");
         if (get_api == NULL) {
-            dlclose(library);
+            close_library(library);
             napi_throw_error(env, "LOAD_FAILED", "metask_agentcore_get_api not exported");
             return NULL;
         }
         const metask_agentcore_api_v1 *api = (const metask_agentcore_api_v1 *)get_api(METASK_AGENTCORE_ABI_V1);
         if (!metask_agentcore_api_v1_is_compatible(api)) {
-            dlclose(library);
+            close_library(library);
             napi_throw_error(env, "ABI_MISMATCH",
-                             "library does not provide AgentCore ABI v1 revision " "28" " with the expected layout");
+                             "library does not provide the expected AgentCore ABI revision and layout");
             return NULL;
         }
         g_api = api; /* the library stays loaded for the life of the process */
@@ -1070,6 +1061,9 @@ static napi_value load_library(napi_env env, napi_callback_info info) {
     } while (0)
 
 NAPI_MODULE_INIT() {
+#ifdef _WIN32
+    if (!load_host_api()) return NULL;
+#endif
     EXPORT("load", load_library);
     EXPORT("runtimeCreate", runtime_create);
     EXPORT("runtimeDestroy", runtime_destroy);

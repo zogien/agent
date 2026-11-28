@@ -2,6 +2,8 @@
 .zig-cache/
 .lake/
 zig-out/
+sdk/node/prebuilds/
+sdk/node/node_modules/
 # release archives (zig build release:archive / release:sums)
 dist/
 *.zig.zon

@@ -182,7 +182,7 @@ test('Runtime points RG_BIN at the ripgrep staged beside the library', { skip },
   t.after(() => { if (saved === undefined) delete process.env.RG_BIN; else process.env.RG_BIN = saved; });
   const runtime = new metacodes.Runtime({ tools: ['Grep'] });
   t.after(() => runtime.close());
-  const staged = path.join(__dirname, '..', 'prebuilds', `${process.platform}-${process.arch}`, 'rg');
+  const staged = path.join(__dirname, '..', 'prebuilds', `${process.platform}-${process.arch}`, process.platform === 'win32' ? 'rg.exe' : 'rg');
   if (!fs.existsSync(staged)) return t.skip('no ripgrep staged');
   assert.ok(process.env.RG_BIN && fs.realpathSync(process.env.RG_BIN) === fs.realpathSync(staged));
 });
@@ -478,7 +478,7 @@ test('allowSession is asked once per target', { skip, timeout: TIMEOUT }, async 
     onUiRequest: (request) => { asked.push(request.data.candidate.target); return request.allowSession(); },
   });
   await session.run('write three times');
-  assert.deepEqual(asked, [path.join(root, 'a.txt'), path.join(root, 'b.txt')]);
+  assert.deepEqual(asked.map(value => path.normalize(value)), [path.join(root, 'a.txt'), path.join(root, 'b.txt')]);
 });
 
 test('an ask_question answer reaches the model', { skip, timeout: TIMEOUT }, async (t) => {
