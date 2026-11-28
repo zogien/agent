@@ -35,6 +35,35 @@ in and includes the `ExecuteCode` JavaScript orchestration tool; Session tool
 selection and ordinary permission checks still apply. Selecting `ExecuteCode`
 with preview disabled is rejected. This requires AgentCore ABI revision 29.
 
+## Session configuration and input
+
+```python
+session.set_prompt_profile([{"op": "replace", "id": "metacodes:identity", "text": "You are a shopkeeper."}])
+session.update_permission_rules(allow=["Read"], ask=["Write"], deny=["Bash"])
+session.run([
+    {"type": "text", "text": "Describe this image."},
+    {"type": "image", "media_type": "image/png", "data": base64_png},
+])
+```
+
+Pass the same edit list as `prompt_profile` when creating a Session. Use
+`add` with a `host:<name>` id, text and signed `order`, `replace` with a
+built-in id and text, or `remove` with a removable id. Optional
+`interpolate=True` expands `{{model}}`, `{{workspace_root}}` and `{{platform}}`.
+Use `set_prompt_profile(None)` to clear the edits. Each profile admits 64 edits,
+64 KiB of UTF-8 text per edit and 256 KiB total. Replace the profile or all three
+permission lists while idle. The next Run uses the new settings.
+
+Both `run` and `stream` accept 1–64 ordered parts. Each image admits up to
+5,000,000 bytes of standard base64 data. Declare model support with
+`model_capabilities=[{"model": "vision-model", "image_input": True}]`.
+
+Set `run_journal_mode="durable_workspace"` to record Runs under `workspace_home`.
+The default is `"ephemeral"`. To supply a complete `durable_budget`, pass a dict
+of integer byte counts with the keys `hard_bytes`, `soft_bytes`, `input_cap_bytes`,
+`provider_request_cap_bytes`, `provider_result_cap_bytes`, `tool_result_cap_bytes`,
+`mcp_result_cap_bytes`, `audit_reserve_bytes` and `terminal_reserve_bytes`.
+
 ## Tools written in Python
 
 ```python
@@ -162,5 +191,5 @@ network, no API key. Without a library they skip, unless
 
 Experimental, like the AgentCore ABI it wraps: the package pins one exact ABI
 revision and follows it. Not yet published to PyPI; build the wheel as above.
-Windows is not covered by CI. Skills, MCP, checkpoints, goals and teams exist in
+Windows is not covered by CI. Manual compaction, skills, MCP, checkpoints, goals and teams exist in
 the ABI but are not wrapped yet; contributions welcome.

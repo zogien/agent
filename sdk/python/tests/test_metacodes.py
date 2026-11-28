@@ -46,6 +46,70 @@ class PythonSdkTest(unittest.TestCase):
         options.setdefault("api_key", "test-key")
         return runtime.session("mock-model", base_url=provider.base_url, **options)
 
+    def test_prompt_profile_applies_and_clears(self):
+        def profile(text):
+            return [{"op": "replace", "id": "metacodes:identity", "text": text}]
+
+        with MockProvider([("text", "ok")] * 3) as provider, metacodes.Runtime(tools=()) as runtime:
+            session = self.session(runtime, provider, prompt_profile=profile("First identity"))
+            session.run("one")
+            session.set_prompt_profile(profile("Second identity"))
+            for invalid in [profile("x") * 65, profile("界" * 21846), profile("x" * 65536) * 5]:
+                with self.assertRaises(ValueError):
+                    session.set_prompt_profile(invalid)
+            session.run("two")
+            session.set_prompt_profile(None)
+            session.run("three")
+        self.assertIn("First identity", str(provider.requests[0]["system"]))
+        self.assertIn("Second identity", str(provider.requests[1]["system"]))
+        self.assertNotIn("First identity", str(provider.requests[1]["system"]))
+        self.assertNotIn("Second identity", str(provider.requests[2]["system"]))
+
+    def test_replacement_rules_change_the_next_write(self):
+        names = ("allowed", "denied", "asked")
+        script = [step for name in names for step in self.write_script(name)]
+        questions = []
+
+        def answer(request):
+            questions.append(request)
+            return request.allow_once()
+
+        with MockProvider(script) as provider, metacodes.Runtime(tools=["Write"]) as runtime:
+            session = self.session(runtime, provider, on_ui_request=answer)
+            for action in ("allow", "deny", "ask"):
+                session.update_permission_rules(**{action: ["Write"]})
+                session.run("write")
+        self.assertEqual(len(questions), 1)
+        self.assertEqual([(self.root / name).exists() for name in names], [True, False, True])
+
+    def test_multimodal_parts_capabilities_journal_and_input_budget(self):
+        image = {"type": "image", "media_type": "image/png", "data": "UE5HREFUQQ=="}
+        parts = [{"type": "text", "text": "before"}, image, {"type": "text", "text": "after"}]
+        budget = dict(hard_bytes=64 << 20, soft_bytes=48 << 20, input_cap_bytes=1024,
+                      provider_request_cap_bytes=16 << 20, provider_result_cap_bytes=4 << 20,
+                      tool_result_cap_bytes=2 << 20, mcp_result_cap_bytes=2 << 20,
+                      audit_reserve_bytes=4096, terminal_reserve_bytes=1024)
+        with MockProvider([("text", "seen")]) as provider, metacodes.Runtime(tools=()) as runtime:
+            session = self.session(runtime, provider, model_capabilities=[{"model": "mock-model", "image_input": True}],
+                                   run_journal_mode="durable_workspace", durable_budget=budget)
+            with self.assertRaisesRegex(metacodes.AgentCoreError, "CHECKPOINT_BUDGET_REQUIRED"):
+                session.run("x" * 2048)
+            for invalid in [[], parts[:1] * 65, [dict(image, data="A" * 5_000_001)]]:
+                with self.assertRaises(ValueError):
+                    session.run(invalid)
+            stream = session.stream(parts)
+            list(stream)
+            self.assertEqual(stream.result.text, "seen")
+            journal = self.root / ".metacodes/agentcore/sessions" / session.describe()["session_id"] / "tool-observations.jsonl"
+            self.assertIn("provider_attempt", journal.read_text())
+            denied = self.session(runtime, provider, model_capabilities=[{"model": "mock-model", "image_input": False}])
+            with self.assertRaisesRegex(metacodes.AgentCoreError, "IMAGE_INPUT_UNSUPPORTED"):
+                denied.run(parts)
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(provider.requests[0]["messages"][-1]["content"][-3:], [
+            parts[0], {"type": "image", "source": {"type": "base64", "media_type": image["media_type"], "data": image["data"]}}, parts[2],
+        ])
+
     def test_discovery_validates_the_exact_revision(self) -> None:
         library = _native.load()
         self.assertEqual(library.api.abi_revision, metacodes.ABI_REVISION)

@@ -10,7 +10,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Union
 
 from . import _native as n
 
@@ -441,6 +441,83 @@ class Runtime:
         self.close()
 
 
+RunInput = Union[str, Sequence[Dict[str, Any]]]
+
+
+def _string(value):
+    if not isinstance(value, str):
+        raise TypeError("expected a string")
+    return value
+
+
+def _integer64(value, signed=False):
+    minimum = -(1 << 63) if signed else 0
+    if type(value) is not int or not minimum <= value < minimum + (1 << 64):
+        raise ValueError("expected a 64-bit integer")
+    return value
+
+
+def _prompt_profile(arena, edits):
+    if edits is None or len(edits) == 0:
+        return None
+    if len(edits) > 64:
+        raise ValueError("prompt_profile allows up to 64 sections")
+    sections = arena.keep((n.PromptSection * len(edits))())
+    total = 0
+    for section, edit in zip(sections, edits):
+        section.struct_size = ctypes.sizeof(n.PromptSection)
+        section.op_code = {"add": 1, "replace": 2, "remove": 3}[edit["op"]]
+        section.id = arena.view(_string(edit["id"]))
+        section.order = _integer64(edit.get("order", 0), signed=True)
+        text = _string(edit.get("text", "")).encode("utf-8")
+        total += len(text)
+        if len(text) > 65536 or total > 262144:
+            raise ValueError("prompt_profile exceeds the text byte limit")
+        section.text = arena.view(text)
+        interpolate = edit.get("interpolate", False)
+        if type(interpolate) is not bool:
+            raise TypeError("interpolate must be a bool")
+        section.interpolate = interpolate
+    profile = n.PromptProfile(struct_size=ctypes.sizeof(n.PromptProfile), sections=sections, section_count=len(edits))
+    return ctypes.pointer(arena.keep(profile))
+
+
+def _permission_rules(arena, allow, ask, deny):
+    rules = n.PermissionRuleSet(struct_size=ctypes.sizeof(n.PermissionRuleSet))
+    rules.allow, rules.allow_count = arena.views(allow)
+    rules.ask, rules.ask_count = arena.views(ask)
+    rules.deny, rules.deny_count = arena.views(deny)
+    return ctypes.pointer(arena.keep(rules))
+
+
+def _run_input(arena, prompt):
+    value = n.RunInput(struct_size=ctypes.sizeof(n.RunInput))
+    if isinstance(prompt, (str, bytes)):
+        value.kind_code = n.RUN_INPUT_TEXT
+        value.text = arena.view(prompt)
+        return value
+    if not 1 <= len(prompt) <= 64:
+        raise ValueError("multimodal input requires 1 to 64 parts")
+    parts = arena.keep((n.RunInputPart * len(prompt))())
+    for part, source in zip(parts, prompt):
+        part.struct_size = ctypes.sizeof(n.RunInputPart)
+        if source["type"] == "text":
+            part.kind_code = 1
+            part.text = arena.view(_string(source["text"]))
+        elif source["type"] == "image":
+            part.kind_code = 2
+            data = _string(source["data"]).encode("ascii")
+            if len(data) > 5_000_000:
+                raise ValueError("image exceeds the base64 byte limit")
+            part.data = arena.view(data)
+            part.media_type = arena.view(_string(source["media_type"]))
+        else:
+            raise ValueError("invalid multimodal input part")
+    value.kind_code = n.RUN_INPUT_MULTIMODAL
+    value.parts, value.part_count = parts, len(parts)
+    return value
+
+
 class Session:
     """One agent conversation. Runs are synchronous and one at a time.
 
@@ -470,6 +547,10 @@ class Session:
         permission_mode: str = "default",
         shell: str = "disabled",
         openai_protocol: Optional[str] = None,
+        prompt_profile: Optional[Sequence[dict]] = None,
+        model_capabilities: Sequence[dict] = (),
+        durable_budget: Optional[dict] = None,
+        run_journal_mode: str = "ephemeral",
         allow: Sequence[str] = (),
         ask: Sequence[str] = (),
         deny: Sequence[str] = (),
@@ -531,14 +612,28 @@ class Session:
             host.allowed_tools = selected
             host.allowed_tool_count = selected_count
         if allow or ask or deny:
-            rules = n.PermissionRuleSet(struct_size=ctypes.sizeof(n.PermissionRuleSet))
-            rules.allow, rules.allow_count = arena.views(allow)
-            rules.ask, rules.ask_count = arena.views(ask)
-            rules.deny, rules.deny_count = arena.views(deny)
-            host.permission_rules = ctypes.pointer(arena.keep(rules))
+            host.permission_rules = _permission_rules(arena, allow, ask, deny)
+        host.run_journal_mode_code = ("ephemeral", "durable_workspace").index(run_journal_mode)
+        if len(model_capabilities) > 256:
+            raise ValueError("model_capabilities allows up to 256 models")
+        if model_capabilities:
+            models = arena.keep((n.ModelCapability * len(model_capabilities))())
+            for target, source in zip(models, model_capabilities):
+                target.struct_size = ctypes.sizeof(n.ModelCapability)
+                target.model = arena.view(_string(source["model"]))
+                if type(source["image_input"]) is not bool:
+                    raise TypeError("image_input must be a bool")
+                target.image_input_code = 1 if source["image_input"] else 2
+            host.model_capabilities, host.model_capability_count = models, len(models)
+        if durable_budget is not None:
+            budget = n.DurableBudget(struct_size=ctypes.sizeof(n.DurableBudget))
+            for key in n.BUDGET_FIELDS:
+                setattr(budget, key, _integer64(durable_budget[key]))
+            host.durable_budget = ctypes.pointer(arena.keep(budget))
         config = n.SessionCreateConfig(struct_size=ctypes.sizeof(n.SessionCreateConfig))
         config.host = ctypes.pointer(host)
         config.model = arena.view(model)
+        config.prompt_profile = _prompt_profile(arena, prompt_profile)
 
         self._event_fn = n.OnEventFn(self._event)
         self._ui_fn = n.OnUiRequestFn(self._ui_request)
@@ -641,7 +736,7 @@ class Session:
 
     def run(
         self,
-        prompt: str,
+        prompt: RunInput,
         *,
         max_turns: Optional[int] = None,
         stream_retry_budget: int = 0,
@@ -670,8 +765,7 @@ class Session:
         started = False
         try:
             arena = n.ViewArena()
-            run_input = n.RunInput(struct_size=ctypes.sizeof(n.RunInput), kind_code=n.RUN_INPUT_TEXT)
-            run_input.text = arena.view(prompt)
+            run_input = _run_input(arena, prompt)
             options = n.RunOptions(struct_size=ctypes.sizeof(n.RunOptions))
             turns = DEFAULT_MAX_TURNS if max_turns is None else int(max_turns)
             if not 1 <= turns <= n.MAX_TURNS:
@@ -740,7 +834,7 @@ class Session:
         )
 
     def stream(
-        self, prompt: str, *, max_turns: Optional[int] = None, stream_retry_budget: int = 0
+        self, prompt: RunInput, *, max_turns: Optional[int] = None, stream_retry_budget: int = 0
     ) -> "EventStream":
         """Run ``prompt`` on a background thread and iterate over its events.
 
@@ -804,6 +898,26 @@ class Session:
             self._lib.take_bytes(output)
         self._lib.check("session.describe", status, diagnostic)
         return json.loads(self._lib.take_bytes(output).decode("utf-8"))
+
+    def set_prompt_profile(self, profile: Optional[Sequence[dict]]) -> None:
+        arena = n.ViewArena()
+        sections = _prompt_profile(arena, profile)
+        diagnostic = n.OwnedBytes()
+        with self._handle_lock:
+            status = self._lib.api.session_control.contents.set_prompt_profile(
+                self._handle, sections, ctypes.byref(diagnostic)
+            )
+        self._lib.check("session.set_prompt_profile", status, diagnostic)
+
+    def update_permission_rules(self, *, allow=(), ask=(), deny=()) -> None:
+        arena = n.ViewArena()
+        rules = _permission_rules(arena, allow, ask, deny)
+        diagnostic = n.OwnedBytes()
+        with self._handle_lock:
+            status = self._lib.api.session_control.contents.update_permission_rules(
+                self._handle, rules, ctypes.byref(diagnostic)
+            )
+        self._lib.check("session.update_permission_rules", status, diagnostic)
 
     def set_model(self, model: str) -> None:
         arena = n.ViewArena()
@@ -904,7 +1018,7 @@ class EventStream:
     """Iterator over one Run's events; ``result`` is set when it ends."""
 
     def __init__(
-        self, session: Session, prompt: str, max_turns: Optional[int], stream_retry_budget: int = 0
+        self, session: Session, prompt: RunInput, max_turns: Optional[int], stream_retry_budget: int = 0
     ) -> None:
         self.result: Optional[RunResult] = None
         self._queue: "queue.Queue[Any]" = queue.Queue()
