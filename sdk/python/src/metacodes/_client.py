@@ -242,6 +242,7 @@ class ModelError:
     request_id: Optional[str] = None
     retry_after_ms: Optional[int] = None
     truncated: bool = False
+    context_window: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -302,6 +303,7 @@ class _RunState:
                 request_id=payload.get("request_id"),
                 retry_after_ms=payload.get("retry_after_ms"),
                 truncated=bool(payload.get("truncated", False)),
+                context_window=payload.get("context_window"),
             )
         elif tag == "usage" and isinstance(payload, dict):
             for key in self.usage:
