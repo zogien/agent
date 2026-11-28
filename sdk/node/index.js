@@ -58,7 +58,9 @@ function loadNative(explicit) {
   const tried = [];
   for (const candidate of candidateLibraryPaths(explicit)) {
     if (fs.existsSync(candidate)) {
-      if (native.abiRevision !== ABI_REVISION || native.load(candidate) !== ABI_REVISION)
+      const rg = process.env.RG_BIN || bundledRipgrep(candidate);
+      if (rg && !process.env.RG_BIN) process.env.RG_BIN = rg;
+      if (native.abiRevision !== ABI_REVISION || native.load(candidate, rg || '') !== ABI_REVISION)
         throw new Error('AgentCore Node binding ABI revision mismatch');
       loadedLibrary = candidate;
       return native;

@@ -1,17 +1,3 @@
-/* Node-API bridge to the AgentCore C ABI (sdk/metask/agentcore.h).
- *
- * The addon loads libmetask_agentcore at run time (dlopen), validates the
- * exact ABI revision with the header's own compatibility check, and exposes
- * a small set of functions that index.js wraps into the public API.
- *
- * Threading: a Run executes on a dedicated thread (never the libuv pool, which
- * a long agent Run would starve). AgentCore callbacks arrive on AgentCore
- * threads and are forwarded to JavaScript through one thread-safe function per
- * Session (events, UI requests, Run completion: one queue, so every event of a
- * Run reaches JavaScript before its completion) and one per Runtime (host tool
- * calls). Tool calls and UI requests block their AgentCore thread until
- * JavaScript answers through completeCall(); the JavaScript thread itself never
- * blocks on a Run. */
 
 #define _GNU_SOURCE
 #define NAPI_VERSION 8
@@ -350,7 +336,6 @@ static runtime_t *get_runtime(napi_env env, napi_value value) {
     return runtime;
 }
 
-/* runtimeCreate(tools: string[], hostTools: {name, description, schema}[], dispatch, preview) */
 static napi_value runtime_create(napi_env env, napi_callback_info info) {
     size_t argc = 4;
     napi_value argv[4];
@@ -969,8 +954,6 @@ static THREAD_RESULT run_thread(void *arg) {
     return THREAD_DONE;
 }
 
-/* sessionRun(session, runId, text, maxTurns, streamRetryBudget): starts the Run;
- * completion is a "done" dispatch. */
 static napi_value session_run(napi_env env, napi_callback_info info) {
     size_t argc = 6;
     napi_value argv[6];
@@ -1167,8 +1150,6 @@ static napi_value session_set_permission_mode(napi_env env, napi_callback_info i
     return NULL;
 }
 
-/* sessionRewindToUserMessage(session, position): index.js has checked that
- * position is a safe integer >= 1. */
 static napi_value session_rewind_to_user_message(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value argv[2];
@@ -1227,10 +1208,24 @@ static napi_value complete_call(napi_env env, napi_callback_info info) {
 
 /* load(path) -> ABI revision */
 static napi_value load_locked(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value argv[1];
+    size_t argc = 2;
+    napi_value argv[2];
     napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
     if (g_api == NULL) {
+        owned_t rg = {0};
+        if (argc == 2 && !get_string(env, argv[1], &rg)) return NULL;
+        if (rg.ptr) {
+#ifdef _WIN32
+            int failed = _putenv_s("RG_BIN", (const char *)rg.ptr);
+#else
+            int failed = setenv("RG_BIN", (const char *)rg.ptr, 1);
+#endif
+            free(rg.ptr);
+            if (failed) {
+                napi_throw_error(env, "LOAD_FAILED", "cannot configure bundled ripgrep");
+                return NULL;
+            }
+        }
         owned_t path;
         if (!get_string(env, argv[0], &path)) return NULL;
         if (path.ptr == NULL) {
