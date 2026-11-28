@@ -491,6 +491,19 @@ test('abort immediately after starting a Run reaches admission', { skip, timeout
   assert.equal((await stream.result).stopReason, 'aborted');
 });
 
+test('a host tool can await cancellation of its own Run', { skip, timeout: TIMEOUT }, async (t) => {
+  let observed;
+  const finished = new Promise(resolve => { observed = resolve; });
+  const cancel = metacodes.tool({ name: 'cancel', async handler(_, context) {
+    const result = await session.abort();
+    observed([result.status, context.signal.aborted]);
+  } });
+  const provider = await withProvider(t, [['tool', 'cancel', {}]]);
+  const { session } = open(t, { tools: [], hostTools: [cancel] }, provider, workspace(t), { permissionMode: 'full_access' });
+  assert.equal((await session.run('cancel from tool')).stopReason, 'aborted');
+  assert.deepEqual(await finished, ['cancelled', true]);
+});
+
 test('terminating Workers with pending host callbacks leaves the process usable', { skip, timeout: TIMEOUT }, async (t) => {
   const provider = await withProvider(t, [['tool', 'wait', {}], ['tool', 'wait', {}], ['text', 'still alive']]);
   const workers = Array.from({ length: 2 }, () => new Worker(`

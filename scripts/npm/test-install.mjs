@@ -67,6 +67,21 @@ try {
   await fs.copyFile(new URL('./electron-smoke.cjs', import.meta.url), path.join(work, 'electron-smoke.cjs'));
   await run(process.execPath, ['--test', 'metacodes.test.js']);
   await run(electron, [path.join(work, 'electron-smoke.cjs')]);
+  await run(process.execPath, ['-e', `
+    const assert = require('node:assert/strict');
+    const fs = require('node:fs');
+    const sdk = require('@zogien/agent-sdk');
+    const bundle = sdk.resolve();
+    const manifest = require(bundle.manifestPath);
+    manifest.contract.binary_abi_revision++;
+    assert.throws(() => new sdk.Runtime(), /ABI revision mismatch/);
+    fs.renameSync(bundle.root, bundle.root + '.missing');
+  `]);
+  await run(process.execPath, ['-e', `
+    const assert = require('node:assert/strict');
+    const sdk = require('@zogien/agent-sdk');
+    assert.throws(() => new sdk.Runtime(), /optional dependency/);
+  `]);
 } finally {
   server.close();
   await fs.rm(work, { recursive: true, force: true });

@@ -58,8 +58,10 @@ function resolve(options = {}) {
   };
 }
 
-function addonPath() {
-  return path.join(resolve().root, 'node', 'metacodes.node');
+function addonPath(revision) {
+  const bundle = resolve();
+  if (bundle.abiRevision !== revision) throw new Error('AgentCore platform package ABI revision mismatch');
+  return path.join(bundle.root, 'node', 'metacodes.node');
 }
 
 function candidateLibraryPaths(explicit) {

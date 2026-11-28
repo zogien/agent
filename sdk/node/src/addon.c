@@ -1226,32 +1226,41 @@ static napi_value load_locked(napi_env env, napi_callback_info info) {
                 return NULL;
             }
         }
-        owned_t path;
-        if (!get_string(env, argv[0], &path)) return NULL;
-        if (path.ptr == NULL) {
-            napi_throw_type_error(env, NULL, "library path required");
+    }
+    owned_t path;
+    if (!get_string(env, argv[0], &path)) return NULL;
+    if (path.ptr == NULL) {
+        napi_throw_type_error(env, NULL, "library path required");
+        return NULL;
+    }
+    void *library = open_library((const char *)path.ptr);
+    free(path.ptr);
+    if (library == NULL) {
+        napi_throw_error(env, "LOAD_FAILED", library_error());
+        return NULL;
+    }
+    const void *(*get_api)(uint32_t) = (const void *(*)(uint32_t))library_symbol(library, "metask_agentcore_get_api");
+    if (get_api == NULL) {
+        close_library(library);
+        napi_throw_error(env, "LOAD_FAILED", "metask_agentcore_get_api not exported");
+        return NULL;
+    }
+    const metask_agentcore_api_v1 *api = (const metask_agentcore_api_v1 *)get_api(METASK_AGENTCORE_ABI_V1);
+    if (!metask_agentcore_api_v1_is_compatible(api)) {
+        close_library(library);
+        napi_throw_error(env, "ABI_MISMATCH",
+                         "library does not provide the expected AgentCore ABI revision and layout");
+        return NULL;
+    }
+    if (g_api == NULL) {
+        g_api = api;
+    } else {
+        int different = g_api != api;
+        close_library(library);
+        if (different) {
+            napi_throw_error(env, "ABI_MISMATCH", "another AgentCore library is already loaded in this process");
             return NULL;
         }
-        void *library = open_library((const char *)path.ptr);
-        free(path.ptr);
-        if (library == NULL) {
-            napi_throw_error(env, "LOAD_FAILED", library_error());
-            return NULL;
-        }
-        const void *(*get_api)(uint32_t) = (const void *(*)(uint32_t))library_symbol(library, "metask_agentcore_get_api");
-        if (get_api == NULL) {
-            close_library(library);
-            napi_throw_error(env, "LOAD_FAILED", "metask_agentcore_get_api not exported");
-            return NULL;
-        }
-        const metask_agentcore_api_v1 *api = (const metask_agentcore_api_v1 *)get_api(METASK_AGENTCORE_ABI_V1);
-        if (!metask_agentcore_api_v1_is_compatible(api)) {
-            close_library(library);
-            napi_throw_error(env, "ABI_MISMATCH",
-                             "library does not provide the expected AgentCore ABI revision and layout");
-            return NULL;
-        }
-        g_api = api; /* the library stays loaded for the life of the process */
     }
     napi_value value;
     napi_create_uint32(env, g_api->abi_revision, &value);

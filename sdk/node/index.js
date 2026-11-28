@@ -43,7 +43,7 @@ let loadedLibrary = null;
 
 function loadNative(explicit) {
   if (!native) {
-    const addon = addonPath();
+    const addon = addonPath(ABI_REVISION);
     if (!fs.existsSync(addon)) {
       throw new Error(`metacodes: no native addon for ${process.platform}-${process.arch} at ${addon}`);
     }
