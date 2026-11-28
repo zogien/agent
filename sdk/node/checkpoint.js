@@ -10,7 +10,12 @@ const MAX_BLOB = 128 * 1024 * 1024;
 const MAX_STORE = 1024 * 1024 * 1024;
 const DIGEST = /^[0-9a-f]{64}$/;
 const SESSION_ID = /^[0-9a-f]{24}$/;
-const ARTIFACT_REFERENCE = /artifact_id\\?"\s*:\s*\\?"sha256:([0-9a-f]{64})/g;
+const CHECKPOINT_MESSAGE_BYTES_OFFSET = 72;
+const CHECKPOINT_DIGEST_BYTES = 32;
+const CHECKPOINT_BLOCK_FIELDS = [
+  null, ['text'], ['id', 'name', 'input'], ['id', 'toolResult', 'isError'],
+  ['thinking'], ['mediaType', 'data'], ['model', 'reasoning'],
+];
 
 async function directory(root, parts, create = false) {
   let dir = root;
@@ -71,9 +76,41 @@ async function exclusive(native, lockPath, work) {
   finally { native.unlockPath(lock); }
 }
 
+function* checkpointToolResults(bytes) {
+  const end = bytes.length - CHECKPOINT_DIGEST_BYTES;
+  let offset = end - Number(bytes.readBigUInt64LE(CHECKPOINT_MESSAGE_BYTES_OFFSET));
+  while (offset < end) {
+    const blocks = bytes.readUInt32LE(offset + 1);
+    offset += 5;
+    for (let i = 0; i < blocks; i++) {
+      const fields = CHECKPOINT_BLOCK_FIELDS[bytes.readUInt8(offset++)];
+      if (!fields) throw new Error('Unknown checkpoint block');
+      for (const field of fields) {
+        if (field === 'isError') {
+          offset++;
+          continue;
+        }
+        const length = Number(bytes.readBigUInt64LE(offset));
+        offset += 8;
+        if (length > end - offset) throw new Error('Invalid checkpoint field length');
+        if (field === 'toolResult') yield bytes.subarray(offset, offset + length);
+        offset += length;
+      }
+    }
+  }
+}
+
 async function referencedArtifacts(checkpoint) {
-  const text = (await fsp.readFile(checkpoint)).toString('latin1');
-  return new Set(Array.from(text.matchAll(ARTIFACT_REFERENCE), match => match[1]));
+  const hashes = new Set();
+  for (const content of checkpointToolResults(await fsp.readFile(checkpoint))) {
+    if (!content.includes('artifact_id')) continue;
+    let result;
+    try { result = JSON.parse(content.toString('utf8')); } catch { continue; }
+    for (const id of [result?.artifact_id, result?.stdout_artifact_id, result?.stderr_artifact_id]) {
+      if (typeof id === 'string' && id.startsWith('sha256:') && DIGEST.test(id.slice(7))) hashes.add(id.slice(7));
+    }
+  }
+  return hashes;
 }
 
 function sessionParts(id) {

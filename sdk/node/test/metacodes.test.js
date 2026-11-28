@@ -137,6 +137,16 @@ test('checkpoint export reports an artifact the session references but no longer
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(snapshot, 'manifest.json'))).blobs, []);
 });
 
+test('checkpoint export ignores artifact receipts quoted in conversation text', { skip }, async (t) => {
+  const example = JSON.stringify({
+    schema_version: 'metacodes.tool-result-projection.v1', projection: 'artifact', artifact_id: 'sha256:' + 'a'.repeat(64),
+  });
+  const provider = await withProvider(t, [['text', example]]);
+  const { session } = open(t, { tools: [] }, provider, workspace(t));
+  assert.equal((await session.run(example)).toolCalls, 0);
+  assert.deepEqual(await session.exportCheckpoint(path.join(workspace(t), 'snapshot')), { missingArtifacts: [] });
+});
+
 test('a model failure reaches the result and a later success clears it', { skip }, async (t) => {
   const provider = await withProvider(t, [
     ['status', 402, { 'x-request-id': 'req-node-1' }, { error: { code: 'insufficient_balance', message: 'Balance too low' } }],
