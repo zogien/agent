@@ -325,6 +325,7 @@ class Runtime:
         host_tools: Sequence[Tool] = (),
         library: Optional[str] = None,
         preview: bool = False,
+        enable_teams: bool = False,
     ) -> None:
         if not isinstance(preview, bool):
             raise TypeError("preview must be a boolean")
@@ -360,6 +361,9 @@ class Runtime:
         builtin, builtin_count = self._arena.views(self.tools)
         config = n.RuntimeConfig(struct_size=ctypes.sizeof(n.RuntimeConfig))
         config.preview = int(preview)
+        if type(enable_teams) is not bool:
+            raise TypeError("enable_teams must be a boolean")
+        config.enable_teams = enable_teams
         if builtin_count:
             config.builtin_tools = builtin
             config.builtin_tool_count = builtin_count
@@ -556,6 +560,7 @@ class Session:
         model_capabilities: Sequence[dict] = (),
         durable_budget: Optional[dict] = None,
         run_journal_mode: str = "ephemeral",
+        team: Optional[dict] = None,
         allow: Sequence[str] = (),
         ask: Sequence[str] = (),
         deny: Sequence[str] = (),
@@ -619,6 +624,12 @@ class Session:
         if allow or ask or deny:
             host.permission_rules = _permission_rules(arena, allow, ask, deny)
         host.run_journal_mode_code = ("ephemeral", "durable_workspace").index(run_journal_mode)
+        if team is not None:
+            role = ("lead", "member").index(team["role"]) + 1
+            membership = n.TeamConfig(struct_size=ctypes.sizeof(n.TeamConfig), role_code=role)
+            for key in ("team_name", "member_name", "lead_session_id", "member_lease"):
+                setattr(membership, key, arena.view(_string(team.get(key, ""))))
+            host.team = ctypes.pointer(arena.keep(membership))
         if len(model_capabilities) > 256:
             raise ValueError("model_capabilities allows up to 256 models")
         if model_capabilities:
@@ -934,6 +945,22 @@ class Session:
         document = self._lib.take_bytes(output)
         self._lib.check("goal.get", status, diagnostic)
         return json.loads(document)["goal"]
+
+    def describe_team(self) -> Optional[dict]:
+        output, diagnostic = n.OwnedBytes(), n.OwnedBytes()
+        with self._handle_lock:
+            status = self._lib.api.team.contents.describe(self._handle, ctypes.byref(output), ctypes.byref(diagnostic))
+        document = self._lib.take_bytes(output)
+        self._lib.check("team.describe", status, diagnostic)
+        return json.loads(document)["team"]
+
+    def poll_team(self) -> Optional[str]:
+        output, diagnostic = n.OwnedBytes(), n.OwnedBytes()
+        with self._handle_lock:
+            status = self._lib.api.team.contents.poll(self._handle, ctypes.byref(output), ctypes.byref(diagnostic))
+        document = self._lib.take_bytes(output)
+        self._lib.check("team.poll", status, diagnostic)
+        return json.loads(document)["input"]
 
     def set_goal(self, objective: str, token_budget: int = 0) -> None:
         arena = n.ViewArena()

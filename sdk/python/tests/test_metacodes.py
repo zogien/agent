@@ -81,6 +81,25 @@ class PythonSdkTest(unittest.TestCase):
             session.clear_goal()
             self.assertIsNone(session.get_goal())
 
+    def test_team_member_reports_to_lead(self):
+        script = [("tool", "TeamCreate", {"name": "crew"}),
+                  ("tool", "SpawnTeammate", {"name": "solver", "prompt": "solve"}), ("text", "delegated"),
+                  ("tool", "SendMessage", {"to": "team-lead", "message": "computed 42", "summary": "done"}),
+                  ("text", "idle")]
+        with MockProvider(script) as provider, metacodes.Runtime(tools=(), enable_teams=True) as runtime:
+            options = {"workspace_home": str(self.root), "permission_mode": "full_access"}
+            lead = self.session(runtime, provider, tools=["TeamCreate", "SpawnTeammate"], team={"role": "lead"}, **options)
+            lead.run("create a team and delegate")
+            self.assertEqual(lead.describe_team()["pending_spawns"][0]["name"], "solver")
+            team = {"role": "member", "team_name": "crew", "member_name": "solver",
+                    "lead_session_id": lead.describe()["session_id"], "member_lease": "12" * 12}
+            member = self.session(runtime, provider, tools=["SendMessage"], team=team, **options)
+            self.assertIn("solver", [item["name"] for item in member.describe_team()["members"]])
+            self.assertIsNone(member.poll_team())
+            member.run("report your result")
+            self.assertIn("computed 42", lead.poll_team())
+            self.assertIsNone(lead.poll_team())
+
     def test_prompt_profile_applies_and_clears(self):
         def profile(text):
             return [{"op": "replace", "id": "metacodes:identity", "text": text}]
