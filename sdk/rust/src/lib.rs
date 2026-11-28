@@ -754,6 +754,7 @@ mod tests {
         assert_eq!(raw::METASK_AGENTCORE_MAX_MODEL_CAPABILITIES_V1, 256);
         assert_eq!(raw::METASK_AGENTCORE_MAX_MODEL_CAPABILITY_MODEL_BYTES_V1, 256);
         assert_eq!(size_of::<raw::metask_agentcore_model_capability_v1>(), 40);
+        assert_eq!(size_of::<raw::metask_agentcore_model_profile_v1>(), 72);
         assert_eq!(
             size_of::<raw::metask_agentcore_session_host_config_v1>(),
             168

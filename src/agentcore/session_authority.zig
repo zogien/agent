@@ -224,6 +224,9 @@ pub const SessionDescription = struct {
     permission_mode: core.types.PermissionMode,
     catalog_generation: u64,
     model: []u8,
+    max_input_tokens: u32,
+    max_tokens: u32,
+    inline_budget: core.result_budget.Budget,
     /// Revision 21: image input for `model` and who said so.
     image_input: core.image_capability.Resolution = .{ .supported = false, .source = .unknown },
     conversation_messages: u64,

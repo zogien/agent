@@ -1149,6 +1149,7 @@ pub const BudgetedProvider = struct {
     pub fn provider(self: *BudgetedProvider) core.api_provider.Provider {
         return .{
             .ctx = self,
+            .host_capabilities = self.base.host_capabilities,
             .modelFn = model,
             .sendStreamFn = sendStream,
             .sendStreamRetryFn = sendStreamRetry,

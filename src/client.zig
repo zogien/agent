@@ -878,6 +878,7 @@ pub const Client = struct {
     pub fn provider(client: *Client) AnthropicProvider {
         return .{
             .ctx = @ptrCast(client),
+            .host_capabilities = &client.host_capabilities,
             .modelFn = &pModel,
             .sendStreamFn = &pSendStream,
             .sendStreamRetryFn = &pSendStreamRetry,

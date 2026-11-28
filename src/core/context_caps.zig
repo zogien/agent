@@ -27,6 +27,7 @@
 //! degrades to an in-memory registry; it never fails a request.
 
 const std = @import("std");
+const Provider = @import("../api/provider.zig").Provider;
 const builtin = @import("builtin");
 const sync = @import("platform").sync;
 const pfs = @import("platform").fs;
@@ -118,6 +119,20 @@ fn unlock() void {
 pub fn learnedInputCap(endpoint: []const u8, model: []const u8) ?u64 {
     const snap = lookup(endpoint, model) orelse return null;
     return snap.input_cap;
+}
+
+pub fn reportedProfileInputCap(provider: Provider, model_override: ?[]const u8) ?u64 {
+    const declarations = provider.host_capabilities orelse return null;
+    const model = model_override orelse provider.model();
+    const declaration = declarations.forModel(model) orelse return null;
+    if (!declaration.hasTokenLimits()) return null;
+    const learned = lookup(provider.endpointId(), model) orelse return null;
+    return if (learned.source == .server_message) learned.input_cap else null;
+}
+
+pub fn boundedInputTokens(window: u32, provider: Provider, model_override: ?[]const u8) u32 {
+    const cap = reportedProfileInputCap(provider, model_override) orelse return window;
+    return @intCast(@min(window, cap));
 }
 
 pub fn lookup(endpoint: []const u8, model: []const u8) ?Snapshot {

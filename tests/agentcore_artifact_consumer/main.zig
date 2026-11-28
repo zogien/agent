@@ -1041,7 +1041,6 @@ pub fn main(init: std.process.Init) !void {
         .struct_size = @sizeOf(wire.ModelCapabilityV1),
         .image_input_code = wire.CAPABILITY_SUPPORTED,
         .model = sdk.bytesView("artifact-vision"),
-        .reserved = [_]u64{0} ** 2,
     }};
     session_host.model_capabilities = &restore_capabilities;
     session_host.model_capability_count = restore_capabilities.len;

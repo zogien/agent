@@ -10,6 +10,7 @@ const types = @import("../types.zig");
 const provider_factory = @import("../api/provider_factory.zig");
 const model_error = @import("../api/model_error.zig");
 const credential_cell = @import("../api/credential_cell.zig");
+const ModelCatalog = @import("../api/catalog.zig").Catalog;
 const image_capability = @import("../api/image_capability.zig");
 const provider_mod = @import("../api/provider.zig");
 const conversation_mod = @import("conversation.zig");
@@ -843,7 +844,7 @@ pub const SessionConfig = struct {
     api_key: []const u8,
     model: []const u8,
     base_url: ?[]const u8 = null,
-    /// What the Host knows about its models' image input (issue #273),
+    /// What the Host knows about its models' image input and token limits,
     /// borrowed for the call and copied into the Session. A declaration
     /// outranks the family table and holds for the Session's model, every
     /// `setModel` target, and tool-scoped providers. Two entries naming the
@@ -1652,6 +1653,7 @@ pub const AgentSession = struct {
     /// Owned copy of `SessionConfig.model_capabilities`, handed to every
     /// provider this Session builds.
     model_capabilities: image_capability.Declarations = .{},
+    model_catalog: ModelCatalog,
     provider: provider_factory.OwnedProvider,
     /// The effort last applied to `provider`; reapplied to a replacement
     /// provider by `setModel`.
@@ -1777,7 +1779,7 @@ pub const AgentSession = struct {
             self.base_url,
             self.openai_protocol,
             self.runtime.plugin_snapshot.dialectResolver(),
-            .{ .auth_scheme = self.auth_scheme, .dialect = self.dialect, .limits = null, .capability_declarations = self.model_capabilities },
+            .{ .auth_scheme = self.auth_scheme, .dialect = self.dialect, .limits = .{ .catalog = &self.model_catalog }, .capability_declarations = self.model_capabilities },
         );
     }
 
@@ -1867,6 +1869,8 @@ pub const AgentSession = struct {
         errdefer prompt_profile.deinit();
         var model_capabilities = try image_capability.Declarations.init(allocator, config.model_capabilities);
         errdefer model_capabilities.deinit();
+        var model_catalog = try ModelCatalog.fromHost(allocator, config.model_capabilities);
+        errdefer model_catalog.deinit();
 
         var conversation = if (hooks.restored) |restored|
             try restored.conversation.cloneInto(allocator)
@@ -1887,7 +1891,7 @@ pub const AgentSession = struct {
             base_url,
             config.openai_protocol,
             runtime.plugin_snapshot.dialectResolver(),
-            .{ .auth_scheme = auth_scheme, .dialect = config.dialect, .limits = null, .capability_declarations = model_capabilities },
+            .{ .auth_scheme = auth_scheme, .dialect = config.dialect, .limits = .{ .catalog = &model_catalog }, .capability_declarations = model_capabilities },
         );
         errdefer owned_provider.deinit();
         if (config.reasoning_effort) |effort| try owned_provider.provider().setReasoningEffort(effort);
@@ -1939,6 +1943,7 @@ pub const AgentSession = struct {
             .auth_scheme = auth_scheme,
             .dialect = config.dialect,
             .model_capabilities = model_capabilities,
+            .model_catalog = model_catalog,
             .provider = owned_provider,
             .reasoning_effort = config.reasoning_effort,
             .conversation = conversation,
@@ -2047,6 +2052,7 @@ pub const AgentSession = struct {
         self.goal_state.deinit();
         if (self.swarm) |*s| s.deinit();
         if (self.swarm_self_name) |n| allocator.free(n);
+        self.model_catalog.deinit();
         self.model_capabilities.deinit();
         if (self.last_prompt_manifest) |*manifest| manifest.deinit();
         allocator.free(self.artifact_root);
@@ -2188,7 +2194,7 @@ pub const AgentSession = struct {
             self.base_url,
             self.openai_protocol,
             self.runtime.plugin_snapshot.dialectResolver(),
-            .{ .auth_scheme = self.auth_scheme, .dialect = replacement_dialect, .limits = null, .capability_declarations = self.model_capabilities },
+            .{ .auth_scheme = self.auth_scheme, .dialect = replacement_dialect, .limits = .{ .catalog = &self.model_catalog }, .capability_declarations = self.model_capabilities },
         ) catch |err| {
             self.cancelMutation();
             return err;
@@ -2984,7 +2990,7 @@ pub const AgentSession = struct {
             base_url,
             route.openai_protocol,
             self.runtime.plugin_snapshot.dialectResolver(),
-            .{ .auth_scheme = auth_scheme, .dialect = route.dialect, .limits = null, .capability_declarations = self.model_capabilities },
+            .{ .auth_scheme = auth_scheme, .dialect = route.dialect, .limits = .{ .catalog = &self.model_catalog }, .capability_declarations = self.model_capabilities },
         );
         errdefer provider.deinit();
         if (effort) |value| provider.provider().setReasoningEffort(value) catch
@@ -3889,6 +3895,27 @@ fn createTestSession(runtime: *AgentRuntime, mode: types.PermissionMode, root: [
         .workspace = .{ .root = root },
         .allowed_tools = &.{"Read"},
     });
+}
+
+test "tool providers resolve the session catalog for a child model" {
+    const runtime = try createTestRuntime(std.testing.allocator);
+    defer runtime.destroy() catch unreachable;
+    const cwd = try testCwd();
+    defer std.testing.allocator.free(cwd);
+    const session = try runtime.createSession(.{
+        .provider_kind = .openai,
+        .api_key = "test-key",
+        .model = "parent",
+        .workspace = .{ .root = cwd },
+        .allowed_tools = &.{},
+        .model_capabilities = &.{.{ .model = "child", .max_input_tokens = 900_000, .max_tokens = 42_000 }},
+    });
+    defer session.destroy() catch unreachable;
+    var child = try session.toolProviderFactory().make();
+    defer child.deinit();
+    try std.testing.expectEqual(@as(u32, 128_000), child.provider().maxInputTokens());
+    try std.testing.expectEqual(@as(u32, 900_000), child.provider().maxInputTokensFor("CHILD"));
+    try std.testing.expectEqual(@as(u32, 42_000), child.provider().maxTokensFor("child"));
 }
 
 test "secureClear uses optimizer-resistant zeroing" {

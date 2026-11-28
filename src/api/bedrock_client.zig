@@ -121,6 +121,7 @@ pub const BedrockClient = struct {
     pub fn provider(self: *BedrockClient) provider_mod.Provider {
         return .{
             .ctx = @ptrCast(self),
+            .host_capabilities = &self.host_capabilities,
             .modelFn = &pModel,
             .sendStreamFn = &pSendStream,
             .sendStreamRetryFn = &pSendStreamRetry,
@@ -187,6 +188,9 @@ pub const BedrockClient = struct {
     fn pMaxInputTokensFor(ctx: *anyopaque, model: []const u8) u32 {
         const self = cast(ctx);
         if (self.model_context) |mc| if (mc.windowFor(model)) |w| return w;
+        if (self.catalog) |*catalog| if (catalog.entryFor(model)) |entry| {
+            if (entry.max_input_tokens) |limit| return limit;
+        };
         return self.context_window;
     }
     fn pReasoningEffort(ctx: *anyopaque) ?types.ReasoningEffort {
@@ -267,6 +271,9 @@ pub const BedrockClient = struct {
 
     pub fn maxTokensFor(self: *const BedrockClient, model: []const u8) u32 {
         if (self.max_tokens_override) |value| return value;
+        if (self.catalog) |*catalog| if (catalog.entryFor(model)) |entry| {
+            if (entry.max_tokens) |limit| return limit;
+        };
         return model_limits_table.limitsFor(bedrock_dialect.bareModel(model)).default;
     }
 

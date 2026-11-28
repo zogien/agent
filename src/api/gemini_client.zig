@@ -193,6 +193,7 @@ pub const GeminiClient = struct {
     pub fn provider(self: *GeminiClient) provider_mod.Provider {
         return .{
             .ctx = @ptrCast(self),
+            .host_capabilities = &self.host_capabilities,
             .modelFn = &pModel,
             .sendStreamFn = &pSendStream,
             .sendStreamRetryFn = &pSendStreamRetry,
@@ -257,12 +258,17 @@ pub const GeminiClient = struct {
     }
     fn pMaxTokensFor(ctx: *anyopaque, model: []const u8) u32 {
         const self = cast(ctx);
-        _ = model; // Gemini does not serialize max_output_tokens; an override would desync local budgeting.
+        if (self.catalog) |*catalog| if (catalog.entryFor(model)) |entry| {
+            if (entry.max_tokens) |limit| return limit;
+        };
         return self.max_tokens;
     }
     fn pMaxInputTokensFor(ctx: *anyopaque, model: []const u8) u32 {
         const self = cast(ctx);
         if (self.model_context) |mc| if (mc.windowFor(model)) |w| return w;
+        if (self.catalog) |*catalog| if (catalog.entryFor(model)) |entry| {
+            if (entry.max_input_tokens) |limit| return limit;
+        };
         return self.context_window;
     }
     fn pReasoningEffort(_: *anyopaque) ?types.ReasoningEffort {

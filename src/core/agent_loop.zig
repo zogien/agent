@@ -3013,7 +3013,7 @@ fn runCounted(
             // committed one or the two paths render differently. Resolved
             // against `model_override`, because a subagent shares its parent's
             // Provider and differs from it only by that field.
-            .result_budget = result_budget_mod.Budget.fromModel(provider.maxInputTokensFor(opts.model_override)),
+            .result_budget = toolResultBudget(provider, opts),
             .tool_result_metrics = opts.tool_result_metrics,
             .file_change_journal = opts.file_change_journal,
             .additional_dirs = opts.additional_dirs,
@@ -4634,7 +4634,7 @@ fn runCounted(
             // instead of against the floor the budget can never go under - and
             // against the window of the model this run will actually name, not
             // the parent's.
-            .result_budget = result_budget_mod.Budget.fromModel(provider.maxInputTokensFor(opts.model_override)),
+            .result_budget = toolResultBudget(provider, opts),
             .tool_result_metrics = opts.tool_result_metrics,
             .file_change_journal = opts.file_change_journal,
             .additional_dirs = opts.additional_dirs,
@@ -4934,7 +4934,7 @@ fn runCounted(
             }
             const suspended_projection_stats = try result_projection.project(allocator, suspended_items, .{
                 .session_root = opts.artifact_root,
-                .budget = result_budget_mod.Budget.fromModel(provider.maxInputTokensFor(opts.model_override)),
+                .budget = toolResultBudget(provider, opts),
                 .per_turn_image_bytes = opts.image_request_bytes_cap -| conversation.nonTrimmableImageBytes(),
             });
             if (opts.tool_result_metrics) |metrics| metrics.recordProjection(suspended_projection_stats);
@@ -5079,7 +5079,7 @@ fn runCounted(
         }
         const projection_stats = try result_projection.project(allocator, projection_items, .{
             .session_root = opts.artifact_root,
-            .budget = result_budget_mod.Budget.fromModel(provider.maxInputTokensFor(opts.model_override)),
+            .budget = toolResultBudget(provider, opts),
             // Fresh results get whatever the cap leaves after the images no trim
             // may remove (user images, undelivered results already in history).
             .per_turn_image_bytes = opts.image_request_bytes_cap -| conversation.nonTrimmableImageBytes(),
@@ -5800,6 +5800,12 @@ fn serializeToolSchemasForCache(
     return try out.toOwnedSlice(allocator);
 }
 
+fn toolResultBudget(provider: provider_mod.Provider, opts: Options) result_budget_mod.Budget {
+    const window = provider.maxInputTokensFor(opts.model_override);
+    const bounded = context_caps.boundedInputTokens(window, provider, opts.model_override);
+    return result_budget_mod.Budget.fromModel(bounded);
+}
+
 /// Compaction pressure includes the input cap learned on this endpoint.
 fn pressureFor(
     provider: provider_mod.Provider,
@@ -5831,7 +5837,7 @@ const ContextRecoveryState = struct {
 
     fn pressure(self: ContextRecoveryState, provider: provider_mod.Provider, model: ?[]const u8) context_pressure_mod.ContextPressure {
         const output = provider.maxTokensFor(model);
-        const cap = self.numbers.inputCap(output);
+        const cap = self.numbers.inputCap(output) orelse context_caps.reportedProfileInputCap(provider, model);
         return context_pressure_mod.ContextPressure.fromModelWithCap(provider.maxInputTokensFor(model), output, null, self.pending_tokens, if (cap) |n| @intCast(n) else null);
     }
 

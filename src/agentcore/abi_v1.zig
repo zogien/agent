@@ -2776,6 +2776,8 @@ const AbiSession = struct {
             try session_authority.cloneManifest(a, manifest)
         else
             null;
+        const session_provider = self.core_session.provider.provider();
+        const max_input_tokens = core.context_caps.boundedInputTokens(session_provider.maxInputTokens(), session_provider, null);
         return .{
             .arena = description_arena,
             .session_id = lease.session_id,
@@ -2789,7 +2791,10 @@ const AbiSession = struct {
             .permission_mode = self.core_session.permission_ctx.modeValue(),
             .catalog_generation = self.catalog_generation,
             .model = model,
-            .image_input = self.core_session.provider.provider().imageInput(null),
+            .image_input = session_provider.imageInput(null),
+            .max_input_tokens = max_input_tokens,
+            .max_tokens = session_provider.maxTokens(),
+            .inline_budget = core.result_budget.Budget.fromModel(max_input_tokens),
             .conversation_messages = @intCast(lease.conversation.messages.items.len),
             .compact_boundary = @intCast(lease.conversation.compact_boundary),
             .skill_revision = if (self.skill_binding) |*binding|
@@ -4734,7 +4739,7 @@ fn parseModelCapabilities(
     const raw = (host.model_capabilities orelse return error.InvalidModelCapabilities)[0..count];
     const out = try arena.alloc(core.image_capability.Declaration, count);
     for (raw, out, 0..) |entry, *slot, i| {
-        if (entry.struct_size != @sizeOf(wire.ModelCapabilityV1) or !allZero(entry.reserved))
+        if (entry.struct_size != @sizeOf(wire.ModelCapabilityV1) or entry.reserved1 != 0)
             return error.InvalidModelCapabilities;
         if (entry.model.len > wire.MAX_MODEL_CAPABILITY_MODEL_BYTES_V1) return error.ResourceLimit;
         try addMetadata(metadata, entry.model.len, wire.MAX_SESSION_METADATA_BYTES_V1);
@@ -4743,9 +4748,24 @@ fn parseModelCapabilities(
         for (out[0..i]) |earlier| {
             if (std.ascii.eqlIgnoreCase(earlier.model, model)) return error.DuplicateModelCapability;
         }
+        var max_input_tokens: ?u32 = null;
+        var max_tokens: ?u32 = null;
+        if (entry.profile) |profile| {
+            if (profile.struct_size != @sizeOf(wire.ModelProfileV1) or
+                profile.reserved0 != 0 or !allZero(profile.reserved)) return error.InvalidModelCapabilities;
+            if (profile.max_input_tokens != 0)
+                max_input_tokens = std.math.cast(u32, profile.max_input_tokens) orelse return error.InvalidModelCapabilities;
+            if (profile.max_tokens != 0)
+                max_tokens = std.math.cast(u32, profile.max_tokens) orelse return error.InvalidModelCapabilities;
+        }
+        if (entry.image_input_code == 0 and max_input_tokens == null and max_tokens == null)
+            return error.InvalidModelCapabilities;
         slot.* = .{
             .model = model,
+            .max_input_tokens = max_input_tokens,
+            .max_tokens = max_tokens,
             .image_input = switch (entry.image_input_code) {
+                0 => null,
                 wire.CAPABILITY_SUPPORTED => true,
                 wire.CAPABILITY_UNSUPPORTED => false,
                 else => return error.InvalidModelCapabilities,
@@ -7055,6 +7075,10 @@ const SessionDescriptionJson = struct {
     permission_mode: []const u8,
     catalog_generation: u64,
     model: []const u8,
+    max_input_tokens: u32,
+    max_tokens: u32,
+    per_result_bytes: u32,
+    per_turn_bytes: u32,
     /// Revision 21: whether `model` takes image input and who said so
     /// (`host`, `catalog`, `model_family`, or `unknown`).
     image_input: struct {
@@ -7188,6 +7212,10 @@ fn encodeSessionDescription(
         .permission_mode = permissionModeName(description.permission_mode),
         .catalog_generation = description.catalog_generation,
         .model = description.model,
+        .max_input_tokens = description.max_input_tokens,
+        .max_tokens = description.max_tokens,
+        .per_result_bytes = @intCast(description.inline_budget.per_result_bytes),
+        .per_turn_bytes = @intCast(description.inline_budget.per_turn_bytes),
         .image_input = .{
             .supported = description.image_input.supported,
             .source = description.image_input.source.name(),
