@@ -94,7 +94,43 @@ export class AgentCoreError extends Error {
   readonly diagnostic: string;
 }
 
+export type PromptSection = {
+  op: 'add' | 'replace' | 'remove';
+  id: string;
+  text?: string;
+  order?: number | bigint;
+  interpolate?: boolean;
+};
+
+export type RunInput = string | readonly (
+  | { type: 'text'; text: string }
+  | { type: 'image'; mediaType: string; data: string }
+)[];
+
+export interface DurableBudget {
+  hardBytes: number | bigint;
+  softBytes: number | bigint;
+  inputCapBytes: number | bigint;
+  providerRequestCapBytes: number | bigint;
+  providerResultCapBytes: number | bigint;
+  toolResultCapBytes: number | bigint;
+  mcpResultCapBytes: number | bigint;
+  auditReserveBytes: number | bigint;
+  terminalReserveBytes: number | bigint;
+}
+
+export interface CompactResult {
+  outcome: 'compacted' | 'no_change' | 'degraded' | 'aborted';
+  beforeContextTokens: bigint;
+  afterContextTokens: bigint;
+  usage: RunResult['usage'];
+}
+
 export interface SessionOptions {
+  promptProfile?: readonly PromptSection[] | null;
+  modelCapabilities?: readonly { model: string; imageInput: boolean }[];
+  durableBudget?: DurableBudget;
+  runJournalMode?: 'ephemeral' | 'durable_workspace';
   provider?: 'anthropic' | 'openai' | 'gemini';
   apiKey?: string;
   /** Full endpoint; empty means the provider's official one. */
@@ -152,13 +188,17 @@ export class Session {
   exportCheckpoint(directory: string): Promise<CheckpointExport>;
   readonly runtime: Runtime;
   model: string;
-  run(prompt: string, options?: RunOptions): Promise<RunResult>;
-  stream(prompt: string, options?: Omit<RunOptions, 'onEvent'>): EventStream;
+  run(prompt: RunInput, options?: RunOptions): Promise<RunResult>;
+  stream(prompt: RunInput, options?: Omit<RunOptions, 'onEvent'>): EventStream;
   abort(): Promise<CancelResult>;
   submit(text: string): number;
   /** Revision 25: replace the provider credential in place, also mid-Run. */
   updateCredential(apiKey: string): void;
   describe(): SessionDescription;
+  setPromptProfile(profile: readonly PromptSection[] | null): void;
+  updatePermissionRules(rules: Pick<SessionOptions, 'allow' | 'ask' | 'deny'>): void;
+  compact(): Promise<CompactResult>;
+  abortCompact(): Promise<void>;
   setModel(model: string): void;
   setPermissionMode(mode: NonNullable<SessionOptions['permissionMode']>): void;
   /** Revision 27: drop the user message at a 1-based position and everything after it. */
@@ -166,12 +206,19 @@ export class Session {
   close(): void;
 }
 
+export interface RuntimeOptions {
+  tools?: string[];
+  hostTools?: Tool<any>[];
+  library?: string;
+  preview?: boolean;
+}
+
 export class Runtime {
-  constructor(options?: { tools?: string[]; hostTools?: Tool<any>[]; library?: string; preview?: boolean });
+  constructor(options?: RuntimeOptions);
   readonly tools: string[];
   readonly hostTools: Tool<any>[];
   session(model: string, options?: SessionOptions): Session;
-  restoreSession(directory: string, options?: SessionOptions): Promise<Session>;
+  restoreSession(directory: string, options?: Omit<SessionOptions, 'promptProfile'>): Promise<Session>;
   close(): void;
 }
 

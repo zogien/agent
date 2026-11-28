@@ -79,6 +79,7 @@ STOP_REASONS = {
     8: "checkpoint_resource_limit",
 }
 RUN_INPUT_TEXT = 1
+RUN_INPUT_MULTIMODAL = 3
 EVENT_CONTINUE = 0
 EVENT_FATAL = 1
 UI_ANSWERED = 0
@@ -204,6 +205,51 @@ class PermissionRuleSet(ctypes.Structure):
     ]
 
 
+class PromptSection(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32), ("op_code", ctypes.c_uint32), ("id", BytesView),
+        ("order", ctypes.c_int64), ("text", BytesView), ("interpolate", ctypes.c_uint32),
+        ("reserved0", ctypes.c_uint32), ("reserved", ctypes.c_uint64 * 2),
+    ]
+
+
+class PromptProfile(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32), ("reserved0", ctypes.c_uint32),
+        ("sections", ctypes.POINTER(PromptSection)), ("section_count", ctypes.c_uint64),
+        ("reserved", ctypes.c_uint64 * 4),
+    ]
+
+
+class ModelCapability(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32), ("image_input_code", ctypes.c_uint32),
+        ("model", BytesView), ("reserved", ctypes.c_uint64 * 2),
+    ]
+
+
+BUDGET_FIELDS = (
+    "hard_bytes", "soft_bytes", "input_cap_bytes", "provider_request_cap_bytes",
+    "provider_result_cap_bytes", "tool_result_cap_bytes", "mcp_result_cap_bytes",
+    "audit_reserve_bytes", "terminal_reserve_bytes",
+)
+
+
+class DurableBudget(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32), ("reserved0", ctypes.c_uint32),
+        *((name, ctypes.c_uint64) for name in BUDGET_FIELDS), ("reserved", ctypes.c_uint64 * 4),
+    ]
+
+
+class RunInputPart(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_uint32), ("kind_code", ctypes.c_uint32),
+        ("text", BytesView), ("media_type", BytesView), ("data", BytesView),
+        ("reserved", ctypes.c_uint64 * 2),
+    ]
+
+
 class SessionHostConfig(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -220,10 +266,10 @@ class SessionHostConfig(ctypes.Structure):
         ("skill_policy", ctypes.c_void_p),
         ("permission_rules", ctypes.POINTER(PermissionRuleSet)),
         ("mcp_selection", ctypes.c_void_p),
-        ("durable_budget", ctypes.c_void_p),
+        ("durable_budget", ctypes.POINTER(DurableBudget)),
         ("run_journal_mode_code", ctypes.c_uint32),
         ("protocol_kind_code", ctypes.c_uint32),
-        ("model_capabilities", ctypes.c_void_p),
+        ("model_capabilities", ctypes.POINTER(ModelCapability)),
         ("model_capability_count", ctypes.c_uint64),
         ("team", ctypes.c_void_p),
     ]
@@ -235,7 +281,7 @@ class SessionCreateConfig(ctypes.Structure):
         ("reserved0", ctypes.c_uint32),
         ("host", ctypes.POINTER(SessionHostConfig)),
         ("model", BytesView),
-        ("prompt_profile", ctypes.c_void_p),
+        ("prompt_profile", ctypes.POINTER(PromptProfile)),
         ("reserved", ctypes.c_uint64 * 3),
     ]
 
@@ -248,7 +294,7 @@ class RunInput(ctypes.Structure):
         ("skill_id", BytesView),
         ("catalog_revision", BytesView),
         ("arguments_json", BytesView),
-        ("parts", ctypes.c_void_p),
+        ("parts", ctypes.POINTER(RunInputPart)),
         ("part_count", ctypes.c_uint64),
         ("reserved", ctypes.c_uint64 * 2),
     ]
@@ -383,7 +429,7 @@ class SessionControlApi(ctypes.Structure):
         ("compact", ctypes.c_void_p),
         ("abort_compact", ctypes.c_void_p),
         ("export_checkpoint", ctypes.c_void_p),
-        ("set_prompt_profile", ctypes.c_void_p),
+        ("set_prompt_profile", ctypes.CFUNCTYPE(ctypes.c_uint32, _P, ctypes.POINTER(PromptProfile), _DIAG)),
         ("update_permission_mode", SessionUpdateModeFn),
         ("rewind_to_user_message", SessionRewindFn),
     ]

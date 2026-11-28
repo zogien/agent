@@ -107,6 +107,55 @@ function encodeAnswer(answer) {
   return `{"policy_generation":${generation}${json.length === 2 ? '}' : ',' + json.slice(1)}`;
 }
 
+function integer64(value, signed) {
+  if (Number.isSafeInteger(value)) value = BigInt(value);
+  if (typeof value !== 'bigint' || (signed ? BigInt.asIntN(64, value) : BigInt.asUintN(64, value)) !== value)
+    throw new RangeError('expected a 64-bit integer');
+  return value;
+}
+
+function copyProfile(profile) {
+  if (profile == null) return [];
+  if (!Array.isArray(profile) || profile.length > 64) throw new RangeError('promptProfile allows up to 64 sections');
+  let total = 0;
+  return Array.from(profile, ({ op, id, text = '', order = 0, interpolate = false }) => {
+    const code = ['add', 'replace', 'remove'].indexOf(op) + 1;
+    if (!code || typeof id !== 'string' || typeof text !== 'string' || typeof interpolate !== 'boolean')
+      throw new TypeError('invalid promptProfile section');
+    const size = Buffer.byteLength(text);
+    total += size;
+    if (size > 65536 || total > 262144) throw new RangeError('promptProfile exceeds the text byte limit');
+    return { op: code, id: Buffer.from(id), text: Buffer.from(text), order: integer64(order, true), interpolate: Number(interpolate) };
+  });
+}
+
+function copyCapabilities(entries = []) {
+  if (!Array.isArray(entries) || entries.length > 256) throw new RangeError('modelCapabilities allows up to 256 models');
+  return Array.from(entries, ({ model, imageInput }) => {
+    if (typeof model !== 'string' || typeof imageInput !== 'boolean') throw new TypeError('invalid model capability');
+    return { model: Buffer.from(model), imageInput: imageInput ? 1 : 2 };
+  });
+}
+
+function copyBudget(budget) {
+  if (budget === undefined) return null;
+  const fields = ['hardBytes', 'softBytes', 'inputCapBytes', 'providerRequestCapBytes', 'providerResultCapBytes',
+    'toolResultCapBytes', 'mcpResultCapBytes', 'auditReserveBytes', 'terminalReserveBytes'];
+  return Object.fromEntries(fields.map(key => [key, integer64(budget[key], false)]));
+}
+
+function copyInput(prompt) {
+  if (!Array.isArray(prompt)) return String(prompt);
+  if (!prompt.length || prompt.length > 64) throw new RangeError('multimodal input requires 1 to 64 parts');
+  return Array.from(prompt, part => {
+    if (part.type === 'text' && typeof part.text === 'string') return { kind: 1, text: part.text };
+    if (part.type !== 'image' || typeof part.mediaType !== 'string' || typeof part.data !== 'string')
+      throw new TypeError('invalid multimodal input part');
+    if (Buffer.byteLength(part.data) > 5000000) throw new RangeError('image exceeds the base64 byte limit');
+    return { kind: 2, mediaType: part.mediaType, data: part.data };
+  });
+}
+
 function copyContextBlocks(blocks) {
   if (!Array.isArray(blocks) || blocks.length > 32) throw new RangeError('contextBlocks allows up to 32 blocks');
   let total = 0;
@@ -319,12 +368,21 @@ class Session {
     this._onEvent = onEvent;
     this._onUiRequest = onUiRequest;
     this._nextRunId = 1n;
+    this._nextCompactId = 1n;
+    this._compact = null;
     this._nextInputId = 1n;
     this._active = null;
     this._workspaceHome = path.resolve(workspaceHome || workspace);
     this._exporting = false;
     this.restoreReport = null;
+    const journal = ['ephemeral', 'durable_workspace'].indexOf(options.runJournalMode ?? 'ephemeral');
+    if (journal < 0) throw new TypeError('invalid runJournalMode');
+    if (readCheckpoint && options.promptProfile != null) throw new TypeError('restore uses the checkpoint prompt profile');
     const config = {
+      promptProfile: copyProfile(options.promptProfile),
+      modelCapabilities: copyCapabilities(options.modelCapabilities),
+      durableBudget: copyBudget(options.durableBudget),
+      runJournalMode: journal,
       provider: PROVIDERS[provider],
       protocol,
       permissionMode: PERMISSION_MODES[permissionMode],
@@ -349,13 +407,20 @@ class Session {
         const description = this.describe();
         this.model = description.model;
         this._nextRunId = description.last_run_id + 1n;
+        this._nextCompactId = description.last_compact_id + 1n;
       } catch (error) { this.close(); throw error; }
     }
   }
 
   _dispatch(kind, a, b, index, runId, sessionId) {
     if (kind === 'event') this._event(a);
-    else if (kind === 'done') this._done(a);
+    else if (kind === 'compact') {
+      const { resolve, reject } = this._compact;
+      this._compact = null;
+      if (a.status) reject(new AgentCoreError('session.compact', a.status, a.statusName, a.diagnostic));
+      else resolve({ outcome: ['compacted', 'no_change', 'degraded', 'aborted'][a.outcomeCode - 1],
+        beforeContextTokens: a.beforeContextTokens, afterContextTokens: a.afterContextTokens, usage: a.usage });
+    } else if (kind === 'done') this._done(a);
     else if (kind === 'ui' || kind === 'tool') {
       const active = this._active;
       if (!active || active.runId !== runId || active.cancel) return;
@@ -463,6 +528,7 @@ class Session {
   run(prompt, { maxTurns, streamRetryBudget = 0, onEvent, contextBlocks = [] } = {}) {
     if (!this._handle) return Promise.reject(new Error('session is closed'));
     if (this._exporting) return Promise.reject(new Error('checkpoint export in progress'));
+    if (this._compact) return Promise.reject(new Error('compaction in progress'));
     if (this._active) return Promise.reject(new Error('a Run is already active on this session'));
     const turns = maxTurns === undefined ? DEFAULT_MAX_TURNS : Number(maxTurns);
     if (!Number.isInteger(turns) || turns < 1 || turns > MAX_TURNS) {
@@ -476,7 +542,7 @@ class Session {
       const runId = this._nextRunId++;
       this._active = { runId, state: new RunState(), onEvent, resolve, reject, error: null, calls: new Map() };
       try {
-        this._native.sessionRun(this._handle, runId, String(prompt), turns, budget, copyContextBlocks(contextBlocks));
+        this._native.sessionRun(this._handle, runId, copyInput(prompt), turns, budget, copyContextBlocks(contextBlocks));
       } catch (error) {
         this._active = null;
         reject(error);
@@ -556,19 +622,58 @@ class Session {
   }
 
   async exportCheckpoint(directory) {
-    if (!this._handle || this._active || this._exporting) throw new Error('checkpoint export requires an idle session');
+    if (!this._handle || this._active || this._compact || this._exporting) throw new Error('checkpoint export requires an idle session');
     this._exporting = true;
     try { return await exportSnapshot(this, directory); }
     finally { this._exporting = false; }
   }
 
+  _requireIdle() {
+    if (!this._handle) throw new Error('session is closed');
+    if (this._active || this._compact || this._exporting) throw new Error('operation requires an idle session');
+  }
+
+  setPromptProfile(profile) {
+    this._requireIdle();
+    this._native.sessionSetPromptProfile(this._handle, copyProfile(profile));
+  }
+
+  updatePermissionRules({ allow = [], ask = [], deny = [] }) {
+    this._requireIdle();
+    this._native.sessionUpdatePermissionRules(this._handle, { allow, ask, deny });
+  }
+
+  async compact() {
+    this._requireIdle();
+    const id = this._nextCompactId++;
+    return new Promise((resolve, reject) => {
+      this._compact = { id, resolve, reject };
+      try { this._native.sessionCompact(this._handle, id); }
+      catch (error) { this._compact = null; reject(error); }
+    });
+  }
+
+  async abortCompact() {
+    const operation = this._compact;
+    while (operation && operation === this._compact) {
+      try { this._native.sessionAbortCompact(this._handle, operation.id); return; }
+      catch (error) {
+        if (error.code === 'TOO_LATE') return;
+        if (error.code !== 'INVALID_ARGUMENT') throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+  }
+
   setModel(model) {
+    if (this._compact) throw new Error('compaction in progress');
     if (this._exporting) throw new Error('checkpoint export in progress');
     this._native.sessionSetModel(this._handle, model);
     this.model = model;
   }
 
   setPermissionMode(mode) {
+    if (this._compact) throw new Error('compaction in progress');
     if (this._exporting) throw new Error('checkpoint export in progress');
     if (!(mode in PERMISSION_MODES)) throw new Error(`permissionMode must be one of ${Object.keys(PERMISSION_MODES).join(', ')}`);
     this._native.sessionSetPermissionMode(this._handle, PERMISSION_MODES[mode]);
@@ -585,6 +690,7 @@ class Session {
    * `MESSAGE_POSITION_COMPACTED` and changes nothing.
    */
   rewindToUserMessage(position) {
+    if (this._compact) throw new Error('compaction in progress');
     if (this._exporting) throw new Error('checkpoint export in progress');
     if (Number.isSafeInteger(position)) position = BigInt(position);
     if (typeof position !== 'bigint' || position < 1n) throw new TypeError('position must be a positive integer');

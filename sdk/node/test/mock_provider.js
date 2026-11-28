@@ -90,12 +90,13 @@ async function startMockProvider(script) {
   const server = http.createServer((request, response) => {
     const chunks = [];
     request.on('data', (chunk) => chunks.push(chunk));
-    request.on('end', () => {
+    request.on('end', async () => {
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
       requests.push(body);
       authorizations.push(request.headers.authorization || '');
       const index = requests.length;
       const step = steps.shift() || ['text', 'script exhausted'];
+      if (step[0] === 'hold') await step[2]();
       if (step[0] === 'status') {
         const failure = JSON.stringify(step[3]);
         response.writeHead(step[1], { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(failure), ...step[2] });

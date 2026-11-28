@@ -251,7 +251,7 @@ typedef struct pending_s {
 
 static mutex_t gate = MUTEX_INITIALIZER;
 
-enum message_kind { MSG_EVENT = 1, MSG_UI = 2, MSG_DONE = 3, MSG_TOOL = 4 };
+enum message_kind { MSG_COMPACT = 5, MSG_EVENT = 1, MSG_UI = 2, MSG_DONE = 3, MSG_TOOL = 4 };
 
 typedef struct {
     enum message_kind kind;
@@ -261,6 +261,7 @@ typedef struct {
     owned_t session_id;
     uint32_t tool_index;    /* MSG_TOOL */
     uint32_t status;        /* MSG_DONE */
+    metask_agentcore_compact_result_v1 compact;
     metask_agentcore_run_result_v1 result; /* MSG_DONE */
 } message_t;
 
@@ -463,6 +464,9 @@ typedef struct session_s {
     int running;
     uint64_t run_id;
     owned_t text;
+    metask_agentcore_run_input_part_v1 *parts;
+    uint32_t part_count;
+    uint64_t compact_id;
     uint32_t max_turns;
     uint32_t stream_retry_budget;
     metask_agentcore_context_block_v1 *blocks;
@@ -470,6 +474,14 @@ typedef struct session_s {
 } session_t;
 
 static void release_input(session_t *session) {
+    for (uint32_t i = 0; i < session->part_count; i++) {
+        free((void *)session->parts[i].text.ptr);
+        free((void *)session->parts[i].media_type.ptr);
+        free((void *)session->parts[i].data.ptr);
+    }
+    free(session->parts);
+    session->parts = NULL;
+    session->part_count = 0;
     free(session->text.ptr);
     session->text = (owned_t){0};
     for (uint32_t i = 0; i < session->block_count; i++) {
@@ -479,6 +491,34 @@ static void release_input(session_t *session) {
     free(session->blocks);
     session->blocks = NULL;
     session->block_count = 0;
+}
+
+static int copy_view(napi_env env, napi_value item, const char *key, metask_agentcore_bytes_view_v1 *out) {
+    owned_t bytes;
+    if (!get_property_string(env, item, key, &bytes)) return 0;
+    *out = view_of(&bytes);
+    return 1;
+}
+
+static int copy_input(napi_env env, session_t *session, napi_value value) {
+    bool is_array;
+    if (napi_is_array(env, value, &is_array) != napi_ok) return 0;
+    if (!is_array) return get_string(env, value, &session->text);
+    uint32_t count;
+    if (napi_get_array_length(env, value, &count) != napi_ok || !count || count > METASK_AGENTCORE_MAX_RUN_INPUT_PARTS_V1)
+        return 0;
+    session->parts = calloc(count, sizeof(*session->parts));
+    if (!session->parts) return 0;
+    session->part_count = count;
+    for (uint32_t i = 0; i < count; i++) {
+        napi_value item;
+        metask_agentcore_run_input_part_v1 *part = &session->parts[i];
+        part->struct_size = sizeof(*part);
+        if (napi_get_element(env, value, i, &item) != napi_ok || !get_property_u32(env, item, "kind", &part->kind_code) ||
+            !copy_view(env, item, "text", &part->text) || !copy_view(env, item, "mediaType", &part->media_type) ||
+            !copy_view(env, item, "data", &part->data)) return 0;
+    }
+    return 1;
 }
 
 static int copy_blocks(napi_env env, session_t *session, napi_value array) {
@@ -612,6 +652,20 @@ static void session_release_response(void *ctx, metask_agentcore_owned_bytes_v1 
     owned->len = 0;
 }
 
+static void compact_fields(napi_env env, napi_value result, const metask_agentcore_compact_result_v1 *compact) {
+    napi_value outcome, usage;
+    napi_create_uint32(env, compact->outcome_code, &outcome);
+    node_set_field(env, result, "outcomeCode", outcome);
+    node_set_field(env, result, "beforeContextTokens", node_unsigned(env, compact->before_context_tokens));
+    node_set_field(env, result, "afterContextTokens", node_unsigned(env, compact->after_context_tokens));
+    napi_create_object(env, &usage);
+    node_set_field(env, usage, "input_tokens", node_unsigned(env, compact->input_tokens));
+    node_set_field(env, usage, "output_tokens", node_unsigned(env, compact->output_tokens));
+    node_set_field(env, usage, "cache_read_input_tokens", node_unsigned(env, compact->cache_read_input_tokens));
+    node_set_field(env, usage, "cache_creation_input_tokens", node_unsigned(env, compact->cache_creation_input_tokens));
+    node_set_field(env, result, "usage", usage);
+}
+
 static void session_call_js(napi_env env, napi_value callback, void *context, void *data) {
     session_t *session = (session_t *)context;
     message_t *message = (message_t *)data;
@@ -645,18 +699,23 @@ static void session_call_js(napi_env env, napi_value callback, void *context, vo
         napi_set_named_property(env, result, "status", value);
         napi_create_string_utf8(env, status_name(message->status), NAPI_AUTO_LENGTH, &value);
         napi_set_named_property(env, result, "statusName", value);
-        napi_create_uint32(env, message->result.stop_reason_code, &value);
-        napi_set_named_property(env, result, "stopReasonCode", value);
-        napi_create_uint32(env, message->result.turns, &value);
-        napi_set_named_property(env, result, "turns", value);
-        napi_create_uint32(env, message->result.tool_calls, &value);
-        napi_set_named_property(env, result, "toolCalls", value);
-        napi_create_uint32(env, message->result.input_accepted_count, &value);
-        napi_set_named_property(env, result, "inputAccepted", value);
-        napi_create_uint32(env, message->result.input_adopted_count, &value);
-        napi_set_named_property(env, result, "inputAdopted", value);
+        if (message->kind == MSG_COMPACT) {
+            session->compact_id = 0;
+            compact_fields(env, result, &message->compact);
+        } else {
+            napi_create_uint32(env, message->result.stop_reason_code, &value);
+            napi_set_named_property(env, result, "stopReasonCode", value);
+            napi_create_uint32(env, message->result.turns, &value);
+            napi_set_named_property(env, result, "turns", value);
+            napi_create_uint32(env, message->result.tool_calls, &value);
+            napi_set_named_property(env, result, "toolCalls", value);
+            napi_create_uint32(env, message->result.input_accepted_count, &value);
+            napi_set_named_property(env, result, "inputAccepted", value);
+            napi_create_uint32(env, message->result.input_adopted_count, &value);
+            napi_set_named_property(env, result, "inputAdopted", value);
+        }
         napi_set_named_property(env, result, "diagnostic", make_string(env, &message->data));
-        napi_create_string_utf8(env, "done", NAPI_AUTO_LENGTH, &argv[0]);
+        napi_create_string_utf8(env, message->kind == MSG_COMPACT ? "compact" : "done", NAPI_AUTO_LENGTH, &argv[0]);
         argv[1] = result;
         argc = 2;
     }
@@ -703,7 +762,8 @@ static void cleanup_session(void *data) {
     int running = session->native_running;
     if (running) {
         metask_agentcore_owned_bytes_v1 diagnostic = {0};
-        request_abort(session, &diagnostic);
+        if (session->compact_id) g_api->session_control->abort_compact(session->handle, session->compact_id, &diagnostic);
+        else request_abort(session, &diagnostic);
         g_api->buffer_release(&diagnostic);
     }
     napi_release_threadsafe_function(session->tsfn, napi_tsfn_abort);
@@ -788,6 +848,106 @@ static napi_value session_export(napi_env env, napi_callback_info info) {
     return NULL;
 }
 
+typedef struct {
+    metask_agentcore_prompt_section_v1 sections[METASK_AGENTCORE_MAX_PROMPT_PROFILE_SECTIONS_V1];
+    metask_agentcore_prompt_profile_v1 profile;
+} profile_t;
+
+static int buffer_view(napi_env env, napi_value item, const char *key, metask_agentcore_bytes_view_v1 *view) {
+    napi_value value;
+    void *bytes;
+    size_t length;
+    if (napi_get_named_property(env, item, key, &value) != napi_ok ||
+        napi_get_buffer_info(env, value, &bytes, &length) != napi_ok) return 0;
+    view->ptr = length ? bytes : NULL;
+    view->len = length;
+    return 1;
+}
+
+static int read_profile(napi_env env, napi_value array, profile_t *out) {
+    uint32_t count;
+    if (napi_get_array_length(env, array, &count) != napi_ok || count > METASK_AGENTCORE_MAX_PROMPT_PROFILE_SECTIONS_V1) return 0;
+    out->profile.struct_size = sizeof(out->profile);
+    out->profile.section_count = count;
+    out->profile.sections = count ? out->sections : NULL;
+    for (uint32_t i = 0; i < count; i++) {
+        napi_value item, order;
+        bool lossless;
+        metask_agentcore_prompt_section_v1 *section = &out->sections[i];
+        section->struct_size = sizeof(*section);
+        if (napi_get_element(env, array, i, &item) != napi_ok ||
+            !get_property_u32(env, item, "op", &section->op_code) || !buffer_view(env, item, "id", &section->id) ||
+            !buffer_view(env, item, "text", &section->text) || !get_property_u32(env, item, "interpolate", &section->interpolate) ||
+            napi_get_named_property(env, item, "order", &order) != napi_ok ||
+            napi_get_value_bigint_int64(env, order, &section->order, &lossless) != napi_ok || !lossless) return 0;
+    }
+    return 1;
+}
+
+typedef struct {
+    metask_agentcore_model_capability_v1 models[METASK_AGENTCORE_MAX_MODEL_CAPABILITIES_V1];
+    metask_agentcore_durable_budget_profile_v1 budget;
+} host_options_t;
+
+static int read_host_options(napi_env env, napi_value cfg, host_options_t *storage, metask_agentcore_session_host_config_v1 *host) {
+    napi_value array, budget;
+    napi_valuetype type;
+    uint32_t count;
+    if (!get_property_u32(env, cfg, "runJournalMode", &host->run_journal_mode_code) ||
+        napi_get_named_property(env, cfg, "modelCapabilities", &array) != napi_ok ||
+        napi_get_array_length(env, array, &count) != napi_ok || count > METASK_AGENTCORE_MAX_MODEL_CAPABILITIES_V1) return 0;
+    for (uint32_t i = 0; i < count; i++) {
+        napi_value item;
+        metask_agentcore_model_capability_v1 *model = &storage->models[i];
+        model->struct_size = sizeof(*model);
+        if (napi_get_element(env, array, i, &item) != napi_ok || !buffer_view(env, item, "model", &model->model) ||
+            !get_property_u32(env, item, "imageInput", &model->image_input_code)) return 0;
+    }
+    host->model_capabilities = count ? storage->models : NULL;
+    host->model_capability_count = count;
+    if (napi_get_named_property(env, cfg, "durableBudget", &budget) != napi_ok || napi_typeof(env, budget, &type) != napi_ok) return 0;
+    if (type == napi_null) return 1;
+    metask_agentcore_durable_budget_profile_v1 *b = &storage->budget;
+    b->struct_size = sizeof(*b);
+    const struct { const char *name; uint64_t *field; } fields[] = {
+        {"hardBytes", &b->hard_bytes}, {"softBytes", &b->soft_bytes}, {"inputCapBytes", &b->input_cap_bytes},
+        {"providerRequestCapBytes", &b->provider_request_cap_bytes}, {"providerResultCapBytes", &b->provider_result_cap_bytes},
+        {"toolResultCapBytes", &b->tool_result_cap_bytes}, {"mcpResultCapBytes", &b->mcp_result_cap_bytes},
+        {"auditReserveBytes", &b->audit_reserve_bytes}, {"terminalReserveBytes", &b->terminal_reserve_bytes},
+    };
+    for (size_t i = 0; i < sizeof(fields)/sizeof(fields[0]); i++) {
+        napi_value value;
+        bool lossless;
+        if (napi_get_named_property(env, budget, fields[i].name, &value) != napi_ok ||
+            napi_get_value_bigint_uint64(env, value, fields[i].field, &lossless) != napi_ok || !lossless) return 0;
+    }
+    host->durable_budget = b;
+    return 1;
+}
+
+typedef struct {
+    string_list_t allow, ask, deny;
+    metask_agentcore_permission_rule_set_v1 rules;
+} permission_rules_t;
+
+static int read_rules(napi_env env, napi_value value, permission_rules_t *out) {
+    if (!get_string_list(env, value, "allow", &out->allow) ||
+        !get_string_list(env, value, "ask", &out->ask) || !get_string_list(env, value, "deny", &out->deny)) return 0;
+    out->rules = (metask_agentcore_permission_rule_set_v1){
+        .struct_size = sizeof(out->rules),
+        .allow = out->allow.views, .allow_count = out->allow.count,
+        .ask = out->ask.views, .ask_count = out->ask.count,
+        .deny = out->deny.views, .deny_count = out->deny.count,
+    };
+    return 1;
+}
+
+static void free_rules(permission_rules_t *rules) {
+    free_list(&rules->allow);
+    free_list(&rules->ask);
+    free_list(&rules->deny);
+}
+
 static napi_value session_create(napi_env env, napi_callback_info info) {
     size_t argc = 4;
     napi_value argv[4];
@@ -797,7 +957,11 @@ static napi_value session_create(napi_env env, napi_callback_info info) {
     napi_value cfg = argv[1];
 
     owned_t api_key = {0}, base_url = {0}, workspace_root = {0}, workspace_home = {0}, model = {0};
-    string_list_t tools = {0}, allow = {0}, ask = {0}, deny = {0};
+    string_list_t tools = {0};
+    permission_rules_t rules = {0};
+    profile_t profile = {0};
+    host_options_t host_options = {0};
+    napi_value sections;
     metask_agentcore_session_host_config_v1 host;
     memset(&host, 0, sizeof(host));
     host.struct_size = (uint32_t)sizeof(host);
@@ -814,9 +978,7 @@ static napi_value session_create(napi_env env, napi_callback_info info) {
         !get_property_string(env, cfg, "workspaceHome", &workspace_home) ||
         !get_property_string(env, cfg, "model", &model) ||
         !get_string_list(env, cfg, "tools", &tools) ||
-        !get_string_list(env, cfg, "allow", &allow) ||
-        !get_string_list(env, cfg, "ask", &ask) ||
-        !get_string_list(env, cfg, "deny", &deny))
+        !read_rules(env, cfg, &rules))
         goto done;
 
     host.api_key = view_of(&api_key);
@@ -825,23 +987,18 @@ static napi_value session_create(napi_env env, napi_callback_info info) {
     host.workspace_home = view_of(&workspace_home);
     host.allowed_tools = tools.views;
     host.allowed_tool_count = tools.count;
-    metask_agentcore_permission_rule_set_v1 rules;
-    memset(&rules, 0, sizeof(rules));
-    if (allow.count || ask.count || deny.count) {
-        rules.struct_size = (uint32_t)sizeof(rules);
-        rules.allow = allow.views;
-        rules.allow_count = allow.count;
-        rules.ask = ask.views;
-        rules.ask_count = ask.count;
-        rules.deny = deny.views;
-        rules.deny_count = deny.count;
-        host.permission_rules = &rules;
+    if (!read_host_options(env, cfg, &host_options, &host) ||
+        napi_get_named_property(env, cfg, "promptProfile", &sections) != napi_ok || !read_profile(env, sections, &profile)) {
+        napi_throw_type_error(env, NULL, "invalid session options");
+        goto done;
     }
+    if (rules.allow.count || rules.ask.count || rules.deny.count) host.permission_rules = &rules.rules;
     metask_agentcore_session_create_config_v1 config;
     memset(&config, 0, sizeof(config));
     config.struct_size = (uint32_t)sizeof(config);
     config.host = &host;
     config.model = view_of(&model);
+    config.prompt_profile = profile.profile.section_count ? &profile.profile : NULL;
 
     session = (session_t *)calloc(1, sizeof(session_t));
     if (session == NULL) {
@@ -918,18 +1075,17 @@ done:
     free(workspace_home.ptr);
     free(model.ptr);
     free_list(&tools);
-    free_list(&allow);
-    free_list(&ask);
-    free_list(&deny);
+    free_rules(&rules);
     return external;
 }
 
-static THREAD_RESULT run_thread(void *arg) {
-    session_t *session = (session_t *)arg;
+static uint32_t run_sync(session_t *session, metask_agentcore_run_result_v1 *result, metask_agentcore_owned_bytes_v1 *diagnostic) {
     metask_agentcore_run_input_v1 input;
     memset(&input, 0, sizeof(input));
     input.struct_size = (uint32_t)sizeof(input);
-    input.kind_code = METASK_AGENTCORE_RUN_INPUT_TEXT;
+    input.kind_code = session->part_count ? METASK_AGENTCORE_RUN_INPUT_MULTIMODAL : METASK_AGENTCORE_RUN_INPUT_TEXT;
+    input.parts = session->parts;
+    input.part_count = session->part_count;
     input.text = view_of(&session->text);
     metask_agentcore_run_options_v1 options;
     memset(&options, 0, sizeof(options));
@@ -938,11 +1094,22 @@ static THREAD_RESULT run_thread(void *arg) {
     options.stream_retry_budget = session->stream_retry_budget;
     options.context_blocks = session->blocks;
     options.context_block_count = session->block_count;
+    result->struct_size = sizeof(*result);
+    return g_api->session->run_input(session->handle, session->run_id, &input, &options, result, diagnostic);
+}
+
+static THREAD_RESULT session_thread(void *arg) {
+    session_t *session = arg;
     message_t *message = session->completion;
-    message->result.struct_size = sizeof(message->result);
     metask_agentcore_owned_bytes_v1 diagnostic = {0};
-    message->status = g_api->session->run_input(session->handle, session->run_id, &input, &options, &message->result, &diagnostic);
-    message->kind = MSG_DONE;
+    if (session->compact_id) {
+        message->kind = MSG_COMPACT;
+        message->compact.struct_size = sizeof(message->compact);
+        message->status = g_api->session_control->compact(session->handle, session->compact_id, &message->compact, &diagnostic);
+    } else {
+        message->kind = MSG_DONE;
+        message->status = run_sync(session, &message->result, &diagnostic);
+    }
     message->data = copy_bytes(diagnostic.ptr, (size_t)diagnostic.len);
     g_api->buffer_release(&diagnostic);
     mutex_lock(&gate);
@@ -952,6 +1119,29 @@ static THREAD_RESULT run_thread(void *arg) {
     mutex_unlock(&gate);
     if (detached) destroy_detached(session);
     return THREAD_DONE;
+}
+
+static napi_value start_thread(napi_env env, session_t *session) {
+    session->completion = calloc(1, sizeof(*session->completion));
+    if (!session->completion) {
+        release_input(session);
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    session->cancel_requested = 0;
+    session->native_running = 1;
+    session->running = 1;
+    napi_ref_threadsafe_function(env, session->tsfn);
+    int failed = spawn_thread(session_thread, session);
+    if (failed) {
+        free(session->completion);
+        session->native_running = 0;
+        session->running = 0;
+        napi_unref_threadsafe_function(env, session->tsfn);
+        release_input(session);
+        napi_throw_error(env, NULL, "cannot start the session thread");
+    }
+    return NULL;
 }
 
 static napi_value session_run(napi_env env, napi_callback_info info) {
@@ -967,43 +1157,51 @@ static napi_value session_run(napi_env env, napi_callback_info info) {
     uint64_t run_id = 0;
     uint32_t max_turns = 0;
     uint32_t stream_retry_budget = 0;
-    owned_t text;
     if (argc < 6 || !get_id(env, argv[1], &run_id) ||
         napi_get_value_uint32(env, argv[3], &max_turns) != napi_ok ||
-        napi_get_value_uint32(env, argv[4], &stream_retry_budget) != napi_ok || !get_string(env, argv[2], &text)) {
+        napi_get_value_uint32(env, argv[4], &stream_retry_budget) != napi_ok) {
         bool pending = false;
         napi_is_exception_pending(env, &pending);
         if (!pending) napi_throw_type_error(env, NULL, "invalid Run arguments");
         return NULL;
     }
+    session->compact_id = 0;
     session->run_id = (uint64_t)run_id;
-    session->text = text;
-    if (!copy_blocks(env, session, argv[5])) {
+    if (!copy_input(env, session, argv[2]) || !copy_blocks(env, session, argv[5])) {
         release_input(session);
-        napi_throw_error(env, NULL, "cannot copy context blocks");
+        napi_throw_error(env, NULL, "cannot copy Run input");
         return NULL;
     }
     session->max_turns = max_turns;
     session->stream_retry_budget = stream_retry_budget;
-    session->completion = calloc(1, sizeof(*session->completion));
-    if (!session->completion) {
-        release_input(session);
-        napi_throw_error(env, NULL, "out of memory");
+    return start_thread(env, session);
+}
+
+static napi_value session_compact(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    session_t *session = get_session(env, argv[0]);
+    if (!session) return NULL;
+    if (session->running) {
+        napi_throw_error(env, "BUSY", "session is busy");
         return NULL;
     }
-    session->cancel_requested = 0;
-    session->native_running = 1;
-    session->running = 1;
-    napi_ref_threadsafe_function(env, session->tsfn);
-    int failed = spawn_thread(run_thread, session);
-    if (failed) {
-        free(session->completion);
-        session->native_running = 0;
-        session->running = 0;
-        napi_unref_threadsafe_function(env, session->tsfn);
-        release_input(session);
-        napi_throw_error(env, NULL, "cannot start the Run thread");
-    }
+    if (!get_id(env, argv[1], &session->compact_id)) return NULL;
+    return start_thread(env, session);
+}
+
+static napi_value session_abort_compact(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    session_t *session = get_session(env, argv[0]);
+    uint64_t id;
+    if (!session || !get_id(env, argv[1], &id)) return NULL;
+    metask_agentcore_owned_bytes_v1 diagnostic = {0};
+    uint32_t status = g_api->session_control->abort_compact(session->handle, id, &diagnostic);
+    if (status) throw_status(env, "session.abort_compact", status, &diagnostic);
+    else g_api->buffer_release(&diagnostic);
     return NULL;
 }
 
@@ -1113,6 +1311,42 @@ static napi_value session_describe(napi_env env, napi_callback_info info) {
     return value;
 }
 
+static napi_value session_set_profile(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    session_t *session = get_session(env, argv[0]);
+    if (!session) return NULL;
+    profile_t profile = {0};
+    if (!read_profile(env, argv[1], &profile)) {
+        napi_throw_type_error(env, NULL, "invalid prompt profile");
+        return NULL;
+    }
+    metask_agentcore_owned_bytes_v1 diagnostic = {0};
+    uint32_t status = g_api->session_control->set_prompt_profile(session->handle,
+        profile.profile.section_count ? &profile.profile : NULL, &diagnostic);
+    if (status) throw_status(env, "session.set_prompt_profile", status, &diagnostic);
+    else g_api->buffer_release(&diagnostic);
+    return NULL;
+}
+
+static napi_value session_update_rules(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    napi_get_cb_info(env, info, &argc, argv, NULL, NULL);
+    session_t *session = get_session(env, argv[0]);
+    if (!session) return NULL;
+    permission_rules_t rules = {0};
+    if (read_rules(env, argv[1], &rules)) {
+        metask_agentcore_owned_bytes_v1 diagnostic = {0};
+        uint32_t status = g_api->session_control->update_permission_rules(session->handle, &rules.rules, &diagnostic);
+        if (status) throw_status(env, "session.update_permission_rules", status, &diagnostic);
+        else g_api->buffer_release(&diagnostic);
+    }
+    free_rules(&rules);
+    return NULL;
+}
+
 static napi_value session_set_model(napi_env env, napi_callback_info info) {
     size_t argc = 2;
     napi_value argv[2];
@@ -1175,7 +1409,7 @@ static napi_value session_destroy(napi_env env, napi_callback_info info) {
     session_t *session = get_session(env, argv[0]);
     if (session == NULL) return NULL;
     if (session->running) {
-        napi_throw_error(env, "BUSY", "cannot close a session while a Run is active");
+        napi_throw_error(env, "BUSY", "cannot close a session while a Run or compaction is active");
         return NULL;
     }
     metask_agentcore_owned_bytes_v1 diagnostic = {NULL, 0};
@@ -1372,10 +1606,14 @@ NAPI_MODULE_INIT() {
     EXPORT("sessionCreate", session_create);
     EXPORT("sessionExport", session_export);
     EXPORT("sessionRun", session_run);
+    EXPORT("sessionCompact", session_compact);
+    EXPORT("sessionAbortCompact", session_abort_compact);
     EXPORT("sessionAbort", session_abort);
     EXPORT("sessionSubmit", session_submit);
     EXPORT("sessionUpdateCredential", session_update_credential);
     EXPORT("sessionDescribe", session_describe);
+    EXPORT("sessionSetPromptProfile", session_set_profile);
+    EXPORT("sessionUpdatePermissionRules", session_update_rules);
     EXPORT("sessionSetModel", session_set_model);
     EXPORT("sessionSetPermissionMode", session_set_permission_mode);
     EXPORT("sessionRewindToUserMessage", session_rewind_to_user_message);
